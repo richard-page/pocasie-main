@@ -1,0 +1,55 @@
+name: pocasie
+description: Slovenská predpoveď počasia (Open-Meteo)
+publish_to: "none"
+version: 1.0.1+6
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  http: ^1.2.2
+  geolocator: ^13.0.1
+  url_launcher: ^6.3.0
+  shared_preferences: ^2.2.2
+  flutter_svg: ^2.2.3
+  onesignal_flutter: ^5.1.2
+  flutter_local_notifications: ^17.2.3
+  timezone: ^0.9.4
+  flutter_timezone: ^5.0.2
+  xml: ^6.3.0
+  webview_flutter: ^4.13.1
+  home_widget: ^0.9.0
+  workmanager: ^0.9.0+3
+  android_intent_plus: ^6.0.0
+  
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.2
+  flutter_launcher_icons: ^0.13.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icon.png
+    - assets/moon.svg
+    - assets/sun.svg
+    - assets/cloud.svg
+    - assets/cloudy.svg
+    - assets/drizzle.svg
+    - assets/moon-cloud.svg
+    - assets/rain.svg
+    - assets/thunder.svg
+    - assets/snow.svg
+    - assets/snow-drizzle.svg
+    - assets/partly-cloudy.svg
+    - backend/ecmwf_forecast.json
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon.png"

@@ -1,0 +1,43 @@
+name: CDS ECMWF Fetch
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Každých 6 hodín
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install CDS API
+      run: |
+        pip install cdsapi
+        
+    - name: Create CDS config
+      run: |
+        mkdir -p ~/.cdsapirc
+        echo "url: https://cds.climate.copernicus.eu/api/v2" > ~/.cdsapirc
+        echo "key: ${{ secrets.CDS_API_KEY }}" >> ~/.cdsapirc
+        
+    - name: Fetch ECMWF data
+      env:
+        CDS_API_KEY: ${{ secrets.CDS_API_KEY }}
+      run: |
+        cd backend
+        python fetch_cds.py
+        
+    - name: Commit and push
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add backend/ecmwf_forecast.json
+        git diff --staged --quiet || git commit -m "CDS ECMWF update $(date)"
+        git push
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Jedna veľkosť „—“ vo widgete (mesto, ikona, teplota, …) kým appka nesynchronizuje. -->
+    <dimen name="meteo_widget_placeholder_dash_text_size">24sp</dimen>
+</resources>

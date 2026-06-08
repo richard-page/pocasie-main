@@ -1,0 +1,33 @@
+name: ECMWF Real Data
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: mamba-org/setup-micromamba@v1
+      with:
+        environment-name: ecmwf
+        create-args: |
+          eccodes
+          python=3.11
+          requests
+          
+    - shell: micromamba-shell {0}
+      run: |
+        python backend/fetch_ecmwf.py
+        
+    - run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add backend/ecmwf_forecast.json
+        git diff --staged --quiet || git commit -m "ECMWF update $(date)"
+        git push
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

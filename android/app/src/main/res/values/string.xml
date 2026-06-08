@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Meteo počasie</string>
+    <string name="meteo_widget_desc">Aktuálna mapa a teplota</string>
+    <string name="meteo_widget_name">Meteo počasie</string>
+    <string name="meteo_widget_plus_desc">Aktuálna mapa, teplota a detailné metriky</string>
+    <string name="meteo_widget_plus_name">Meteo počasie metriky</string>
+    <string name="meteo_widget_mini_desc">Kompaktné aktuálne počasie</string>
+    <string name="meteo_widget_mini_name">Meteo počasie mini</string>
+    <string name="meteo_widget_icon_cd">Stav počasia</string>
+    <string name="onesignal_notification_accent_color">FF2196F3</string>
+</resources>

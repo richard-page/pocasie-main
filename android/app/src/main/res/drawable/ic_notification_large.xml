@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rozšírený náhľad: modrý kruh (#2196F3) + čierny oblak (zhoda s dizajnom aplikácie). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="64dp"
+    android:height="64dp"
+    android:viewportWidth="64"
+    android:viewportHeight="64">
+    <path
+        android:fillColor="#2196F3"
+        android:pathData="M32,6c14.36,0 26,11.64 26,26S46.36,58 32,58 6,46.36 6,32 17.64,6 32,6z" />
+    <group
+        android:scaleX="1.5"
+        android:scaleY="1.5"
+        android:translateX="14"
+        android:translateY="18">
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M19.35,10.04C18.67,6.59 15.64,4 12,4 9.11,4 6.6,5.64 5.35,8.04 2.34,8.36 0,10.91 0,14c0,3.31 2.69,6 6,6h13c2.76,0 5,-2.24 5,-5 0,-2.64 -2.05,-4.78 -4.65,-4.96z" />
+    </group>
+</vector>

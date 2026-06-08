@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- API 31+ (Android 12+) system splash configuration -->
+    <!-- Keep parent same to avoid missing Theme.SplashScreen on some toolchains -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <!-- Background of the system splash -->
+        <item name="android:windowSplashScreenBackground">#FF0A2A57</item>
+        <!-- Hide the centered splash icon -->
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/transparent_splash_icon</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
+
+        <!-- Fallback window background -->
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
+</resources>

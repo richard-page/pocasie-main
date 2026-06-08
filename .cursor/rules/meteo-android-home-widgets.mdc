@@ -1,0 +1,26 @@
+---
+description: Domovské Android widgety pre Meteo – vzhľad a technický vzor
+globs: lib/*widget*.dart,lib/forecast*.dart,android/**/sk/menopocasie/app/*Widget*.kt,android/**/res/layout/meteo_*.xml,android/**/res/xml/*widget_info.xml
+alwaysApply: false
+---
+
+# Meteo: domovské widgety (Android)
+
+## Vzhľad
+
+- Základ: farba karty v appke `Color(0xFF2A3848)`.
+- Riadok / bunka: „sklo“ = `0x15FFFFFF` + okraj `0x28FFFFFF` a zaoblenie 10–14 dp (rovnaká logika ako v `WeatherPage` – `glassColor` + `glassBorderColor`).
+- Texty: biele a svetlosedé ako v hlavnej obrazovke; dôležité čísla `FontWeight.w800`, sekundárne `w600`.
+- Ikony počasia: `SvgPicture` z existujúcich `assets/*.svg` (kódy WMO), nie nové miesta na „odhad“ ikon.
+
+## Implementácia
+
+- Zložitejšie layouty: `HomeWidget.renderFlutterWidget` s presne vykresleným Flutter **rovnakým** widgetom ako v appke (napr. karta „Počasie pred rokom“ v `historical_yearly_home_widget.dart` kopíruje `_buildHistoricalCard`), potom `ImageView` v `AppWidget` (funguje s RemoteViews). Jednoduché vychádzaj z `MeteoPocasieWidgetProvider` / `weather_home_widget.dart`.
+- Synchronizáciu dát volaj z rovnakého miesta ako hlavná obrazovka (napr. po naplnení `weatherData` – `_scheduleWidgetUpdate`).
+- Na každý typ widgetu vlastný `HomeWidgetProvider` a vlastný pár kľúčov v `HomeWidget` (nepoužívať rovnaký kľúč pre PNG ako pri inom widži).
+
+## Nový widget
+
+1. `lib/..._home_widget.dart` – `update` / `clear`, kľúče, prípadne `renderFlutterWidget`.
+2. `Meteo*WidgetProvider.kt` – načítanie cesty k súboru z `SharedPreferences` (rovnaká skupina ako `home_widget`) a `setImageViewBitmap` alebo `RemoteViews` layout.
+3. `meteo_*_widget.xml` + `*_widget_info.xml` + `AndroidManifest` receiver + `string` pre názov.

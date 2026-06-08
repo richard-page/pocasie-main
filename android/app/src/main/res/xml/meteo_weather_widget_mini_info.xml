@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Údaje obnovuje aplikácia (interval z nastavení). Hodnota 0 = žiadne periodické systémové budenie. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="120dp"
+    android:minHeight="140dp"
+    android:minResizeWidth="120dp"
+    android:minResizeHeight="140dp"
+    android:updatePeriodMillis="0"
+    android:targetCellWidth="2"
+    android:targetCellHeight="2"
+    android:initialLayout="@layout/meteo_weather_widget_mini"
+    android:previewLayout="@layout/meteo_weather_widget_mini"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen"
+    android:description="@string/meteo_widget_mini_desc" />
