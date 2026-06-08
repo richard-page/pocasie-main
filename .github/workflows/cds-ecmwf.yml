@@ -15,17 +15,15 @@ jobs:
       with:
         python-version: '3.11'
         
-    - name: Install CDS API
+    - name: Install dependencies
       run: |
         pip install --upgrade pip
-        pip install cads-api-client
+        pip install requests
         
     - name: Fetch ECMWF data
-      env:
-        CDS_API_KEY: e1f7a29a-8a37-494c-86ff-8795fea9b426
       run: |
         cd backend
-        python fetch_cds.py
+        python fetch_ecmwf.py
         
     - name: Commit and push
       run: |
