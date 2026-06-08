@@ -17,7 +17,13 @@ jobs:
         
     - name: Install CDS API
       run: |
-        pip install cdsapi
+        pip install --upgrade pip
+        pip install --upgrade cdsapi
+        
+    - name: Create CDS config
+      run: |
+        echo "url: https://cds.climate.copernicus.eu/api" > ~/.cdsapirc
+        echo "key: e1f7a29a-8a37-494c-86ff-8795fea9b426" >> ~/.cdsapirc
         
     - name: Fetch ECMWF data
       run: |
