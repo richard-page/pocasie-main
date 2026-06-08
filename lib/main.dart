@@ -371,7 +371,7 @@ bool isGeoCityInEuropeanUnion(GeoCity city) {
 /// 2. Vlastný server: 'https://tvoj-server.com/forecast'
 /// 
 /// POZNÁMKA: Open-Meteo fallback bol odstránený - appka používa LEN tvoj ECMWF zdroj
-const String kEcmwfBackendUrl = 'https://raw.githubusercontent.com/richard-pape/pocasie/main/backend/ecmwf_forecast.json'; // CDS ECMWF dáta
+const String kEcmwfBackendUrl = 'https://raw.githubusercontent.com/richard-pape/pocasie-main/main/backend/ecmwf_forecast.json'; // CDS ECMWF dáta
 
 // Open-Meteo fallback FUNKCIA ODSTRÁNENÁ
 // Appka používa výhradne ECMWF Open Data z tvojho zdroja
