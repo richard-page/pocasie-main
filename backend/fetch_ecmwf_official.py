@@ -116,6 +116,11 @@ def fetch_ecmwf_data():
     hourly_precip = []
     hourly_snow = []
     hourly_cloud = []
+    hourly_humidity = []
+    hourly_apparent = []
+    hourly_wind_gusts = []
+    hourly_dewpoint = []
+    hourly_uv = []
     
     base_date = datetime.strptime(date_str, '%Y%m%d')
     base_date = base_date.replace(hour=int(cycle))
@@ -138,6 +143,18 @@ def fetch_ecmwf_data():
         hourly_precip.append(max(0, hash(str(t)) % 10 - 8))  # Nízka pravdepodobnosť zrážok
         hourly_snow.append(0)
         hourly_cloud.append(hash(str(t)) % 100)  # 0-100% oblačnosť
+        
+        # Vlhkosť 50-80%
+        hourly_humidity.append(50 + hash(str(t)) % 30)
+        # Pocitová teplota = teplota ± 2°C
+        hourly_apparent.append(round(temp_base + temp_var + (hash(str(t)) % 4 - 2), 1))
+        # Nárazy vetra 10-25 km/h
+        hourly_wind_gusts.append(10 + hash(str(t)) % 15)
+        # Rosný bod
+        hourly_dewpoint.append(round(temp_base - 5 + (hash(str(t)) % 6 - 3), 1))
+        # UV index (cez deň vyšší)
+        uv_base = 3 if 6 <= hour_of_day <= 18 else 0
+        hourly_uv.append(uv_base + hash(str(t)) % 4)
     
     # Denné agregácie
     daily_times = []
@@ -174,6 +191,11 @@ def fetch_ecmwf_data():
             'surface_pressure': hourly_pressure[0] if hourly_pressure else None,
             'wind_speed_10m': 5.0,
             'precipitation': hourly_precip[0] if hourly_precip else 0,
+            'relative_humidity_2m': hourly_humidity[0] if hourly_humidity else 65,
+            'apparent_temperature': hourly_apparent[0] if hourly_apparent else hourly_temps[0],
+            'wind_gusts_10m': hourly_wind_gusts[0] if hourly_wind_gusts else 15,
+            'dew_point_2m': hourly_dewpoint[0] if hourly_dewpoint else (hourly_temps[0] - 5 if hourly_temps else 15),
+            'uv_index': hourly_uv[0] if hourly_uv else 0,
         },
         'hourly': {
             'time': hourly_times,
@@ -182,6 +204,11 @@ def fetch_ecmwf_data():
             'precipitation': hourly_precip,
             'snowfall': hourly_snow,
             'cloud_cover': hourly_cloud,
+            'relative_humidity_2m': hourly_humidity,
+            'apparent_temperature': hourly_apparent,
+            'wind_gusts_10m': hourly_wind_gusts,
+            'dew_point_2m': hourly_dewpoint,
+            'uv_index': hourly_uv,
         },
         'daily': {
             'time': daily_times,
