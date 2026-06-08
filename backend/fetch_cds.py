@@ -21,26 +21,25 @@ all_data = {}
 for loc in locations:
     print(f"Sťahujem: {loc['name']}...")
     
-    # ECMWF predpoveď z CDS
+    # ECMWF predpoveď z CDS - Open Data API
+    target_date = datetime.utcnow().strftime('%Y-%m-%d')
     c.retrieve(
-        'operational-archive',
+        'ecmwf-open-data',
         {
-            'class': 'od',
-            'stream': 'oper',
-            'type': 'fc',
-            'date': datetime.utcnow().strftime('%Y-%m-%d'),
+            'date': target_date,
             'time': '00:00',
+            'step': '0/to/240/by/6',
+            'type': 'fc',
             'levtype': 'sfc',
             'params': [
-                '167.128',  # 2m teplota
-                '165.128',  # 10m vietor U
-                '166.128',  # 10m vietor V
-                '151.128',  # tlak
-                '228.128',  # zrážky
-                '164.128',  # oblačnosť
+                '2t',      # 2m teplota
+                '10u',     # 10m vietor U
+                '10v',     # 10m vietor V
+                'msl',     # tlak
+                'tp',      # zrážky
+                'tcc',     # oblačnosť
             ],
             'area': [loc['lat']+0.5, loc['lon']-0.5, loc['lat']-0.5, loc['lon']+0.5],
-            'grid': '0.4/0.4',
             'format': 'grib',
         },
         f'/tmp/{loc["name"]}.grib'
