@@ -44,7 +44,11 @@ for loc in locations:
     }
     
     # Stiahni dáta
-    client.retrieve('ecmwf-open-data', request, f'/tmp/{loc["name"]}.grib')
+    client.retrieve(
+        collection_id='ecmwf-open-data',
+        request=request,
+        target=f'/tmp/{loc["name"]}.grib'
+    )
     
     all_data[loc['name']] = {
         'lat': loc['lat'],
