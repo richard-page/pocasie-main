@@ -3007,8 +3007,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       return {'rise': '--:--', 'set': '--:--'};
     }
 
-    final sunriseTime = d.sunrise!.first;
-    final sunsetTime = d.sunset!.first;
+    final sunriseTime = d.sunrise?.first ?? '';
+    final sunsetTime = d.sunset?.first ?? '';
 
     try {
       String extractTime(String isoTime) {
