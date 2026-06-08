@@ -18,12 +18,12 @@ jobs:
     - name: Install dependencies
       run: |
         pip install --upgrade pip
-        pip install requests
+        pip install ecmwf-opendata
         
     - name: Fetch ECMWF data
       run: |
         cd backend
-        python fetch_ecmwf.py
+        python fetch_ecmwf_official.py
         
     - name: Commit and push
       run: |
