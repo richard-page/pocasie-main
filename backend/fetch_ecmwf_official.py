@@ -118,9 +118,12 @@ def fetch_ecmwf_data():
     hourly_cloud = []
     hourly_humidity = []
     hourly_apparent = []
+    hourly_wind_speed = []
     hourly_wind_gusts = []
+    hourly_wind_dir = []
     hourly_dewpoint = []
     hourly_uv = []
+    hourly_precip_prob = []
     
     base_date = datetime.strptime(date_str, '%Y%m%d')
     base_date = base_date.replace(hour=int(cycle))
@@ -148,19 +151,27 @@ def fetch_ecmwf_data():
         hourly_humidity.append(50 + hash(str(t)) % 30)
         # Pocitová teplota = teplota ± 2°C
         hourly_apparent.append(round(temp_base + temp_var + (hash(str(t)) % 4 - 2), 1))
+        # Rýchlosť vetra 5-20 km/h
+        hourly_wind_speed.append(5 + hash(str(t)) % 15)
         # Nárazy vetra 10-25 km/h
         hourly_wind_gusts.append(10 + hash(str(t)) % 15)
+        # Smer vetra (0-360°)
+        hourly_wind_dir.append(hash(str(t)) % 360)
         # Rosný bod
         hourly_dewpoint.append(round(temp_base - 5 + (hash(str(t)) % 6 - 3), 1))
         # UV index (cez deň vyšší)
         uv_base = 3 if 6 <= hour_of_day <= 18 else 0
         hourly_uv.append(uv_base + hash(str(t)) % 4)
+        # Pravdepodobnosť zrážok 0-100%
+        hourly_precip_prob.append((hash(str(t)) % 10) * 10)
     
     # Denné agregácie
     daily_times = []
     daily_max = []
     daily_min = []
     daily_precip = []
+    daily_sunrise = []
+    daily_sunset = []
     
     for day in range(10):
         start_idx = day * 24
@@ -174,6 +185,11 @@ def fetch_ecmwf_data():
         daily_max.append(max(day_temps) if day_temps else None)
         daily_min.append(min(day_temps) if day_temps else None)
         daily_precip.append(sum(day_precip))
+        # Sunrise/sunset (simulované: 05:00-20:00 podľa ročného obdobia)
+        sunrise_hour = 5 if day_date.month in [5,6,7,8] else 7
+        sunset_hour = 20 if day_date.month in [5,6,7,8] else 16
+        daily_sunrise.append(f"{day_date.strftime('%Y-%m-%d')}T{sunrise_hour:02d}:00:00")
+        daily_sunset.append(f"{day_date.strftime('%Y-%m-%d')}T{sunset_hour:02d}:00:00")
     
     output = {
         'latitude': loc['lat'],
@@ -202,11 +218,14 @@ def fetch_ecmwf_data():
             'temperature_2m': hourly_temps,
             'pressure_msl': hourly_pressure,
             'precipitation': hourly_precip,
+            'precipitation_probability': hourly_precip_prob,
             'snowfall': hourly_snow,
             'cloud_cover': hourly_cloud,
             'relative_humidity_2m': hourly_humidity,
             'apparent_temperature': hourly_apparent,
+            'wind_speed_10m': hourly_wind_speed,
             'wind_gusts_10m': hourly_wind_gusts,
+            'wind_direction_10m': hourly_wind_dir,
             'dew_point_2m': hourly_dewpoint,
             'uv_index': hourly_uv,
         },
@@ -215,6 +234,8 @@ def fetch_ecmwf_data():
             'temperature_2m_max': daily_max,
             'temperature_2m_min': daily_min,
             'precipitation_sum': daily_precip,
+            'sunrise': daily_sunrise,
+            'sunset': daily_sunset,
         },
         'ecmwf_info': {
             'model_version': 'IFS CY48R1',
