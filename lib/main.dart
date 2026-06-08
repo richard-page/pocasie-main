@@ -419,7 +419,39 @@ Future<String?> _loadLocalEcmwfFile() async {
   }
 }
 
-/// Stiahne predpoveď z ECMWF backendu alebo Open-Meteo fallback
+/// Vyberie najbližšiu lokalitu zo zoznamu podľa zemepisných súradníc
+Map<String, dynamic>? _selectLocationByCoords(Map<String, dynamic> data, double lat, double lon) {
+  final locations = data['locations'] as List<dynamic>?;
+  if (locations == null || locations.isEmpty) return null;
+  
+  // Hľadaj najbližšiu lokalitu
+  Map<String, dynamic>? closest;
+  double minDistance = double.infinity;
+  
+  for (final loc in locations) {
+    final locData = loc as Map<String, dynamic>;
+    final locLat = (locData['latitude'] as num?)?.toDouble();
+    final locLon = (locData['longitude'] as num?)?.toDouble();
+    
+    if (locLat == null || locLon == null) continue;
+    
+    // Jednoduchá euklidovská vzdialenosť (stačí pre porovnanie)
+    final dist = (locLat - lat) * (locLat - lat) + (locLon - lon) * (locLon - lon);
+    
+    if (dist < minDistance) {
+      minDistance = dist;
+      closest = locData;
+    }
+  }
+  
+  if (closest != null) {
+    debugPrint('ECMWF: Vybraná lokalita: ${closest['location_name']} (vzdialenosť: ${(minDistance * 111).toStringAsFixed(1)} km)');
+  }
+  
+  return closest;
+}
+
+/// Stiahne predpoveď z ECMWF backendu
 Future<Map<String, dynamic>?> _downloadEcmwfForecast(
   double lat,
   double lon,
@@ -448,6 +480,13 @@ Future<Map<String, dynamic>?> _downloadEcmwfForecast(
       final jsonString = await _loadLocalEcmwfFile();
       if (jsonString != null) {
         final map = json.decode(jsonString) as Map<String, dynamic>;
+        // Nový formát: zoznam lokalít - vyber najbližšiu
+        final locationData = _selectLocationByCoords(map, lat, lon);
+        if (locationData != null) {
+          await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(locationData));
+          return locationData;
+        }
+        // Starý formát: rovno vráť dáta
         await CacheManager.saveWeather(lat, lon, cacheKey, jsonString);
         return map;
       }
@@ -468,6 +507,13 @@ Future<Map<String, dynamic>?> _downloadEcmwfForecast(
       
       if (r.statusCode == 200) {
         final map = json.decode(r.body) as Map<String, dynamic>;
+        // Nový formát: zoznam lokalít - vyber najbližšiu
+        final locationData = _selectLocationByCoords(map, lat, lon);
+        if (locationData != null) {
+          await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(locationData));
+          return locationData;
+        }
+        // Starý formát
         await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(map));
         return map;
       }
