@@ -23,39 +23,54 @@ def get_latest_run():
     """Nájde najnovší dostupný ECMWF beh"""
     now = datetime.utcnow()
     
-    for hours_back in [0, 6, 12, 18, 24, 48]:
-        check_time = now - timedelta(hours=hours_back)
-        date_str = check_time.strftime('%Y%m%d')
-        cycle = f"{(check_time.hour // 6) * 6:02d}"
-        
-        url = f"{ECMWF_URL}/{date_str}/{cycle}z/ifs/0p4-beta/oper/"
-        
-        try:
-            r = requests.head(url, timeout=10)
-            if r.status_code == 200:
-                return date_str, cycle
-        except:
-            pass
+    # Skontroluj viac dní dozadu - ECMWF má oneskorenie
+    for days_back in [0, 1, 2, 3]:
+        for cycle in ['00', '06', '12', '18']:
+            check_time = now - timedelta(days=days_back)
+            date_str = check_time.strftime('%Y%m%d')
+            
+            # Skús viac formátov URL
+            urls_to_try = [
+                f"{ECMWF_URL}/{date_str}/{cycle}z/ifs/0p4-beta/oper/",
+                f"https://data.ecmwf.int/forecasts/{date_str}/{cycle}z/ifs/0p4/oper/",
+            ]
+            
+            for url in urls_to_try:
+                try:
+                    r = requests.head(url, timeout=10, allow_redirects=True)
+                    if r.status_code == 200:
+                        print(f"Nájdené dáta: {date_str} {cycle}z")
+                        return date_str, cycle
+                except Exception as e:
+                    pass
     
-    raise Exception("Žiadna dostupná predpoveď")
+    # Fallback - vráť včerajšiu 00z ak nič nefunguje
+    yesterday = now - timedelta(days=1)
+    return yesterday.strftime('%Y%m%d'), '00'
 
 
 def download_grib_param(date_str, cycle, param_code, output_path):
     """Stiahne GRIB2 súbor pre parameter"""
-    url = f"{ECMWF_URL}/{date_str}/{cycle}z/ifs/0p4-beta/oper/sfc/{param_code}/grib"
+    urls_to_try = [
+        f"{ECMWF_URL}/{date_str}/{cycle}z/ifs/0p4-beta/oper/sfc/{param_code}/grib",
+        f"https://data.ecmwf.int/forecasts/{date_str}/{cycle}z/ifs/0p4/oper/sfc/{param_code}/grib",
+    ]
     
     print(f"Sťahujem {param_code}...", end=" ")
     
-    r = requests.get(url, timeout=120)
-    if r.status_code != 200:
-        print(f"CHYBA {r.status_code}")
-        return False
+    for url in urls_to_try:
+        try:
+            r = requests.get(url, timeout=120)
+            if r.status_code == 200:
+                with open(output_path, 'wb') as f:
+                    f.write(r.content)
+                print(f"OK ({len(r.content)} bajtov)")
+                return True
+        except:
+            pass
     
-    with open(output_path, 'wb') as f:
-        f.write(r.content)
-    
-    print(f"OK ({len(r.content)} bajtov)")
-    return True
+    print("CHYBA - nenašlo sa")
+    return False
 
 
 def parse_grib_with_ecCodes(grib_path):
