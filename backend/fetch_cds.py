@@ -13,10 +13,11 @@ from cdsapi import Client
 with open(os.path.join(os.path.dirname(__file__), 'locations.json')) as f:
     locations = json.load(f)['locations']
 
-# CDS API klient (číta CDS_API_KEY z env)
+# CDS API klient
+CDS_API_KEY = 'e1f7a29a-8a37-494c-86ff-8795fea9b426'
 c = Client(
     url='https://cds.climate.copernicus.eu/api/v2',
-    key=os.environ.get('CDS_API_KEY'),
+    key=CDS_API_KEY,
     verify=True
 )
 

@@ -19,15 +19,7 @@ jobs:
       run: |
         pip install cdsapi
         
-    - name: Create CDS config
-      run: |
-        mkdir -p ~/.cdsapirc
-        echo "url: https://cds.climate.copernicus.eu/api/v2" > ~/.cdsapirc
-        echo "key: ${{ secrets.CDS_API_KEY }}" >> ~/.cdsapirc
-        
     - name: Fetch ECMWF data
-      env:
-        CDS_API_KEY: ${{ secrets.CDS_API_KEY }}
       run: |
         cd backend
         python fetch_cds.py
