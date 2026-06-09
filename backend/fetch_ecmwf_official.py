@@ -414,9 +414,57 @@ def fetch_ecmwf_data():
     return output
 
 
+def generate_for_location(name, lat, lon, output_file=None):
+    """Vygeneruje ECMWF dáta pre jednu konkrétnu lokalitu"""
+    
+    if output_file is None:
+        # Vytvor názov súboru z názvu lokality
+        safe_name = name.lower().replace(' ', '_').replace('-', '_')
+        output_file = f'ecmwf_forecast_{safe_name}.json'
+    
+    # Načítaj lokality
+    locations = load_locations()
+    
+    # Vytvor záznam pre túto lokalitu
+    loc = {'name': name, 'lat': lat, 'lon': lon}
+    
+    # Získaj aktuálny dátum a cyklus
+    now = datetime.utcnow()
+    date_str = now.strftime('%Y%m%d')
+    cycle = '00'
+    
+    # Vygeneruj dáta
+    print(f"Generujem dáta pre {name} ({lat}, {lon})...")
+    data = generate_location_data(loc, date_str, cycle, now)
+    
+    # Ulož do samostatného súboru
+    output_path = os.path.join(os.path.dirname(__file__), output_file)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    
+    print(f"\n✓ Uložené do: {output_file}")
+    print(f"  Lokalita: {name}")
+    print(f"  Súradnice: {lat}, {lon}")
+    print(f"  Teplota teraz: {data['current']['temperature_2m']}°C")
+    print(f"  Zrážky dnes: {sum(data['hourly']['precipitation'][:24]):.1f} mm")
+    
+    return output_file
+
+
 if __name__ == '__main__':
+    import sys
+    
     try:
-        fetch_ecmwf_data()
+        # Ak sú zadané argumenty, generuj pre konkrétnu lokalitu
+        if len(sys.argv) >= 4:
+            name = sys.argv[1]
+            lat = float(sys.argv[2])
+            lon = float(sys.argv[3])
+            output_file = sys.argv[4] if len(sys.argv) > 4 else None
+            generate_for_location(name, lat, lon, output_file)
+        else:
+            # Inak generuj všetky lokality
+            fetch_ecmwf_data()
     except Exception as e:
         print(f"\n✗ Chyba: {e}")
         import traceback
