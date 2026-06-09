@@ -24,7 +24,7 @@ enum WeatherForecastModel {
 }
 
 /// Dĺžka dennej predpovede (ECMWF, graf, zoznam dní na domovskej obrazovke).
-const int kForecastDays = 10;
+const int kForecastDays = 5; // ECMWF Open Data poskytuje ~5 dní predpovede
 
 const int kEcmwfForecastDays = kForecastDays;
 const int kChartForecastDays = kForecastDays;
