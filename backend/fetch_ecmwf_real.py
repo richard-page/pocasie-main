@@ -74,19 +74,21 @@ def parse_grib_file(grib_file, param_name, lat, lon):
             var_name = 't2m' if 't2m' in ds else '2t'
             if var_name in ds:
                 da = ds[var_name]
-                # Vyber najbližší bod
+                # Vyber najbližší bod a konvertuj na Python float
                 values = da.sel(latitude=lat, longitude=lon_norm, method='nearest')
-                # Konvertuj na °C
-                return (values.values - 273.15).tolist()
+                # Konvertuj na °C a potom na Python list s float hodnotami
+                temps = [float(v) for v in (values.values - 273.15)]
+                return temps
         elif param_name == 'precipitation':
             var_name = 'tp'
             if var_name in ds:
                 da = ds[var_name]
                 values = da.sel(latitude=lat, longitude=lon_norm, method='nearest')
-                # Konvertuj z m na mm
-                tp_mm = values.values * 1000
-                # Spočítaj kumulatívne zrážky
-                return [0.0] + [max(0, tp_mm[i] - tp_mm[i-1]) for i in range(1, len(tp_mm))]
+                # Konvertuj z m na mm a potom na Python float
+                tp_mm = [float(v) for v in (values.values * 1000)]
+                # Spočítaj hodinové zrážky z kumulatívnych hodnôt
+                hourly_precip = [0.0] + [max(0.0, tp_mm[i] - tp_mm[i-1]) for i in range(1, len(tp_mm))]
+                return hourly_precip
         
         return None
         
