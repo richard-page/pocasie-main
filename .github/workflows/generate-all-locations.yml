@@ -19,7 +19,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests
+          pip install cdsapi requests xarray cfgrib pandas numpy
+
+      - name: Create CDS config
+        run: |
+          echo "url: https://cds.climate.copernicus.eu/api" > ~/.cdsapirc
+          echo "key: e1f7a29a-8a37-494c-86ff-8795fea9b426" >> ~/.cdsapirc
 
       - name: Generate forecasts for all locations
         run: |
@@ -42,7 +47,7 @@ for loc in locations:
     lat = loc['lat']
     lon = loc['lon']
     print(f'Generating: {name}')
-    subprocess.run(['python', 'fetch_ecmwf_official.py', name, str(lat), str(lon)], check=True)
+    subprocess.run(['python', 'fetch_cds_ecmwf.py', name, str(lat), str(lon)], check=True)
 "
 
       - name: Commit and push changes
