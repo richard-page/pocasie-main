@@ -1654,10 +1654,11 @@ Map<String, dynamic> _getDayPartWeather(
 
   final DateTime? locForHourlyPipe = locationTime;
   /// Ten istý pás ikon ako panel „24 h“ — aj pre zajtrajšok, ak je v najbližších 24 h.
+  int? utcOffsetSeconds;
   final Map<int, int>? stripIconsByIdx =
       current != null && locForHourlyPipe != null
           ? _hourlyStripDisplayIconByIndex(
-              hourly, locForHourlyPipe, current, daily)
+              hourly, locForHourlyPipe, current, daily, utcOffsetSeconds)
           : null;
 
   final Map<String, (int, List<int>)?>? slicesFair =
