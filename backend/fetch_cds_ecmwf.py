@@ -42,10 +42,10 @@ def fetch_ecmwf_for_location(name, lat, lon):
     now = datetime.utcnow()
     date_str = now.strftime('%Y-%m-%d')
     
-    # Nastavenie requestu pre ECMWF IFS
+    # Nastavenie requestu pre ECMWF IFS operational forecast
+    # Použijeme dataset operational-ecmwf-ifs pre aktuálne predpovede
     request = {
-        'product_type': 'forecast',
-        'format': 'grib',
+        'product_type': ['forecast'],
         'variable': [
             '2m_temperature',
             '2m_dewpoint_temperature',
@@ -56,10 +56,11 @@ def fetch_ecmwf_for_location(name, lat, lon):
             'cloud_cover',
             'relative_humidity',
         ],
-        'date': date_str,
-        'time': '00:00',
-        'leadtime_hour': list(range(0, 121, 1)),  # 0-120 hodín (5 dní)
+        'date': [date_str],
+        'time': ['00:00'],
+        'leadtime_hour': [f'{h:03d}' for h in range(0, 121, 1)],  # 000, 001, 002...
         'area': [lat + 0.5, lon - 0.5, lat - 0.5, lon + 0.5],  # Okolie lokality
+        'format': 'grib',
     }
     
     try:
@@ -68,7 +69,7 @@ def fetch_ecmwf_for_location(name, lat, lon):
         print(f"Sťahujem z CDS (môže trvať 1-2 minúty)...")
         
         c.retrieve(
-            'reanalysis-era5-single-levels',  # Dataset
+            'operational-ecmwf-ifs',  # Dataset - ECMWF IFS forecast (nie ERA5!)
             request,
             target_file
         )
