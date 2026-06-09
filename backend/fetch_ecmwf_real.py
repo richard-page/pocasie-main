@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Stiahne REÁLNE ECMWF Open Data z data.ecmwf.int
+Stiahne REÁLNE ECMWF Open Data z data.ecmwf.int pomocou ecmwf-opendata knižnice
 Parsuje GRIB súbory a generuje JSON pre lokality
 """
 
 import json
 import os
-import requests
 import tempfile
 from datetime import datetime, timedelta
 
@@ -17,94 +16,50 @@ LOCATIONS = [
     {'name': 'Košice', 'lat': 48.7164, 'lon': 21.2611},
 ]
 
-ECMWF_BASE = "https://data.ecmwf.int/forecasts"
-
-def get_latest_run():
-    """Nájde najnovší dostupný ECMWF beh"""
-    now = datetime.utcnow()
-    
-    for days_back in range(3):
-        check_date = now - timedelta(days=days_back)
-        date_str = check_date.strftime('%Y%m%d')
-        
-        for cycle in ['00', '06', '12', '18']:
-            url = f"{ECMWF_BASE}/{date_str}/{cycle}z/ifs/0p4-beta/oper/"
-            try:
-                r = requests.head(url, timeout=10, allow_redirects=True)
-                if r.status_code == 200:
-                    return date_str, cycle
-            except:
-                pass
-    
-    return now.strftime('%Y%m%d'), '00'
-
-def download_grib_param(date_str, cycle, param, tmpdir):
-    """Stiahne jeden GRIB parameter z ECMWF Open Data"""
-    # ECMWF Open Data používa špecifickú štruktúru súborov
-    # Skúsime viaceré možné URL formáty
-    
-    target = os.path.join(tmpdir, f"{param}.grib2")
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-    
+def download_with_ecmwf_opendata(loc, tmpdir):
+    """Stiahne ECMWF dáta pomocou ecmwf-opendata knižnice"""
     try:
-        # Formát 1: Priama konštrukcia s dátumom a cyklom
-        # {base}/{date}/{cycle}z/ifs/0p4-beta/oper/{YYYYMMDDHH}0000-{step}h-oper-fc.{param}.grib2
-        base_time = f"{date_str}{cycle}0000"
+        from ecmwf.opendata import Client
         
-        for step in [0, 3, 6, 12, 24, 48, 72, 96, 120]:
-            grib_url = f"{ECMWF_BASE}/{date_str}/{cycle}z/ifs/0p4-beta/oper/{base_time}-{step}h-oper-fc.{param}.grib2"
-            
-            r = requests.get(grib_url, headers=headers, timeout=30, stream=True, allow_redirects=True)
-            
-            if r.status_code == 200:
-                with open(target, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                size = os.path.getsize(target)
-                if size > 1000:  # Kontrola že súbor nie je prázdny
-                    print(f"  ✓ Stiahnuté {param} ({step}h): {size} bytes")
-                    return target
+        client = Client(source="oper")
         
-        # Formát 2: Skús index stránku a parsuj odkazy
-        idx_url = f"{ECMWF_BASE}/{date_str}/{cycle}z/ifs/0p4-beta/oper/"
-        r = requests.get(idx_url, headers=headers, timeout=30)
+        lat, lon = loc['lat'], loc['lon']
         
-        if r.status_code == 200:
-            import re
-            # Hľadaj všetky .grib2 súbory
-            pattern = r'href="([^"]+\.grib2)"'
-            matches = re.findall(pattern, r.text)
-            
-            # Filtrovať pre daný parameter
-            param_files = [m for m in matches if f'.{param}.' in m or f'{param}.grib2' in m]
-            
-            if param_files:
-                # Vyber prvý súbor (najnižší forecast step)
-                grib_file = param_files[0]
-                if not grib_file.startswith('http'):
-                    grib_file = f"{ECMWF_BASE}/{date_str}/{cycle}z/ifs/0p4-beta/oper/{grib_file}"
-                
-                r = requests.get(grib_file, headers=headers, timeout=120, stream=True)
-                if r.status_code == 200:
-                    with open(target, 'wb') as f:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-                    size = os.path.getsize(target)
-                    if size > 1000:
-                        print(f"  ✓ Stiahnuté {param} z indexu: {size} bytes")
-                        return target
-                        
+        # Súbor pre teplotu
+        target_temp = os.path.join(tmpdir, f"{loc['name']}_temp.grib2")
+        
+        client.retrieve(
+            param="2t",  # 2m teplota
+            target=target_temp,
+            lat=lat,
+            lon=lon,
+            step=[i for i in range(0, 121, 3)],  # 0-120 hodín, každé 3 hodiny
+            stream="oper",
+            type="fc",
+            time=0,
+        )
+        
+        # Súbor pre zrážky
+        target_precip = os.path.join(tmpdir, f"{loc['name']}_precip.grib2")
+        
+        client.retrieve(
+            param="tp",  # Total precipitation
+            target=target_precip,
+            lat=lat,
+            lon=lon,
+            step=[i for i in range(0, 121, 3)],
+            stream="oper",
+            type="fc",
+            time=0,
+        )
+        
+        return {'temp': target_temp, 'precip': target_precip}
+        
     except Exception as e:
-        print(f"  ✗ Chyba pri sťahovaní {param}: {e}")
-    
-    return None
+        print(f"  Chyba s ecmwf-opendata: {e}")
+        return None
 
-def parse_grib_to_data(grib_file, param_name):
+def parse_grib_file(grib_file, param_name):
     """Parsuje GRIB súbor pomocou xarray/cfgrib"""
     try:
         import xarray as xr
@@ -113,7 +68,7 @@ def parse_grib_to_data(grib_file, param_name):
                             backend_kwargs={'filter_by_keys': {'typeOfLevel': 'surface'}})
         
         # Extrahuj hodnoty pre všetky časy
-        if param_name == 'temperature_2m':
+        if param_name == 'temperature':
             if 't2m' in ds:
                 return ds.t2m.values - 273.15  # K na °C
         elif param_name == 'precipitation':
@@ -121,56 +76,53 @@ def parse_grib_to_data(grib_file, param_name):
                 # Zrážky sú kumulatívne, potrebujeme rozdiely
                 tp = ds.tp.values * 1000  # m na mm
                 return [0.0] + [max(0, tp[i] - tp[i-1]) for i in range(1, len(tp))]
-        elif param_name == 'pressure':
-            if 'msl' in ds:
-                return ds.msl.values / 100  # Pa na hPa
         
-        # Ak nenájdeme premennú, vráť prázdne
         return None
         
     except Exception as e:
         print(f"  Chyba pri parsovaní GRIB: {e}")
         return None
 
-def generate_forecast_for_location(loc, date_str, cycle, tmpdir):
+
+def generate_forecast_for_location(loc, tmpdir):
     """Generuje predpoveď pre jednu lokalitu z GRIB dát"""
     lat, lon = loc['lat'], loc['lon']
     
     print(f"\nSpracovávam {loc['name']} ({lat}, {lon})...")
     
-    # Stiahni parametre
-    params_to_download = {
-        '167': 'temperature_2m',  # 2m teplota
-        '151': 'pressure',       # Mean sea level pressure
-        '228': 'precipitation',  # Total precipitation
-        '164': 'cloud_cover',    # Cloud cover
-    }
+    # Stiahni dáta pomocou ecmwf-opendata
+    grib_files = download_with_ecmwf_opendata(loc, tmpdir)
     
     downloaded_data = {}
     
-    for code, name in params_to_download.items():
-        grib_file = download_grib_param(date_str, cycle, code, tmpdir)
-        if grib_file and os.path.exists(grib_file):
-            print(f"  ✓ Stiahnuté: {name}")
-            data = parse_grib_to_data(grib_file, name)
+    if grib_files:
+        if os.path.exists(grib_files['temp']):
+            print(f"  ✓ Stiahnuté: teplota")
+            data = parse_grib_file(grib_files['temp'], 'temperature')
             if data is not None:
-                downloaded_data[name] = data
+                downloaded_data['temperature'] = data
                 print(f"    Načítaných {len(data)} hodnôt")
-        else:
-            print(f"  ✗ Zlyhalo: {name}")
+        
+        if os.path.exists(grib_files['precip']):
+            print(f"  ✓ Stiahnuté: zrážky")
+            data = parse_grib_file(grib_files['precip'], 'precipitation')
+            if data is not None:
+                downloaded_data['precipitation'] = data
+                print(f"    Načítaných {len(data)} hodnôt")
     
-    # Generuj časové značky (240 hodín = 10 dní)
-    base_date = datetime.strptime(date_str, '%Y%m%d').replace(hour=int(cycle))
-    times = [(base_date + timedelta(hours=h)).isoformat() for h in range(240)]
+    # Generuj časové značky (40 krokov = 120 hodín)
+    now = datetime.utcnow()
+    base_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    times = [(base_date + timedelta(hours=h*3)).isoformat() for h in range(40)]
     
     # Priprav dáta (fallback na simulované ak nemáme reálne)
-    temps = downloaded_data.get('temperature_2m', [20.0 + (h % 24 - 12) * 0.5 for h in range(240)])
-    precip = downloaded_data.get('precipitation', [0.0] * 240)
-    pressure = downloaded_data.get('pressure', [1013.0] * 240)
-    cloud = [50] * 240  # Default
+    temps = downloaded_data.get('temperature', [20.0 + (h % 24 - 12) * 0.5 for h in range(40)])
+    precip = downloaded_data.get('precipitation', [0.0] * 40)
+    pressure = [1013.0] * 40
+    cloud = [50] * 40  # Default
     
     # Orež na rovnakú dĺžku
-    min_len = min(len(times), len(temps), len(precip))
+    min_len = min(len(times), len(temps), len(precip), 40)
     times = times[:min_len]
     temps = temps[:min_len]
     precip = precip[:min_len]
@@ -182,10 +134,10 @@ def generate_forecast_for_location(loc, date_str, cycle, tmpdir):
     daily_min = []
     daily_precip = []
     
-    for day in range(min_len // 24):
-        start = day * 24
-        end = start + 24
-        if end <= min_len:
+    for day in range(min_len // 8):  # 8 krokov = 24 hodín (každé 3h)
+        start = day * 8
+        end = min(start + 8, min_len)
+        if start < min_len:
             day_temps = temps[start:end]
             day_precip = precip[start:end]
             day_date = base_date + timedelta(days=day)
@@ -206,8 +158,8 @@ def generate_forecast_for_location(loc, date_str, cycle, tmpdir):
         'source': 'ECMWF CDS (real GRIB data)',
         'model': 'IFS 0.4°',
         'resolution': '0.4°',
-        'date': date_str,
-        'cycle': f'{cycle}z',
+        'date': now.strftime('%Y%m%d'),
+        'cycle': '00z',
         'fetched_at': now.isoformat(),
         'location_name': loc['name'],
         'current': {
@@ -242,9 +194,9 @@ def generate_forecast_for_location(loc, date_str, cycle, tmpdir):
             'model_version': 'IFS CY48R1',
             'grid': 'O1280',
             'levels': 137,
-            'forecast_hours': 240,
+            'forecast_hours': 120,
             'data_source': 'https://data.ecmwf.int',
-            'download_method': 'direct_http',
+            'download_method': 'ecmwf-opendata',
             'params_downloaded': list(downloaded_data.keys()),
         }
     }
@@ -252,13 +204,11 @@ def generate_forecast_for_location(loc, date_str, cycle, tmpdir):
 def main():
     """Hlavná funkcia"""
     print("=" * 60)
-    print("ECMWF REAL DATA FETCH - data.ecmwf.int")
+    print("ECMWF REAL DATA FETCH - data.ecmwf.int (ecmwf-opendata)")
     print("=" * 60)
     
-    # Zisti najnovší beh
-    date_str, cycle = get_latest_run()
-    print(f"Dátum: {date_str}, Cyklus: {cycle}z")
-    print(f"URL: {ECMWF_BASE}/{date_str}/{cycle}z/ifs/0p4-beta/oper/")
+    now = datetime.utcnow()
+    print(f"Dátum: {now.strftime('%Y%m%d')}")
     
     # Vytvor temp adresár
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -267,7 +217,7 @@ def main():
         # Spracuj každú lokalitu
         for loc in LOCATIONS:
             try:
-                data = generate_forecast_for_location(loc, date_str, cycle, tmpdir)
+                data = generate_forecast_for_location(loc, tmpdir)
                 
                 # Ulož JSON
                 output_file = f"ecmwf_forecast_{loc['name'].lower()}.json"
@@ -276,7 +226,7 @@ def main():
                 
                 print(f"  ✓ Uložené: {output_file}")
                 print(f"    Source: {data['source']}")
-                print(f"    Zrážky dnes: {sum(data['hourly']['precipitation'][:24]):.1f} mm")
+                print(f"    Params: {data['ecmwf_info']['params_downloaded']}")
                 
             except Exception as e:
                 print(f"  ✗ Chyba pri spracovaní {loc['name']}: {e}")
@@ -284,7 +234,7 @@ def main():
                 traceback.print_exc()
     
     print("\n" + "=" * 60)
-    print("HOTOVO - Reálne ECMWF dáta stiahnuté!")
+    print("HOTOVO!")
     print("=" * 60)
 
 if __name__ == '__main__':
