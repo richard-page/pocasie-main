@@ -395,12 +395,25 @@ def generate_forecast_for_location_with_grib(loc, grib_files):
             ds = xr.open_dataset(grib_files['temp'], engine='cfgrib',
                                 filter_by_keys={'type': 'fc', 'stepType': 'instant'})
             lon_norm = lon % 360
+            
+            # Debug: zobraz čo máme v datasete
+            print(f"    DEBUG {loc['name']}: lat={lat}, lon={lon_norm}")
+            print(f"    Dataset lat range: {float(ds.latitude.min().values):.2f} to {float(ds.latitude.max().values):.2f}")
+            print(f"    Dataset lon range: {float(ds.longitude.min().values):.2f} to {float(ds.longitude.max().values):.2f}")
+            
             point = ds.sel(latitude=lat, longitude=lon_norm, method='nearest')
+            actual_lat = float(point.latitude.values)
+            actual_lon = float(point.longitude.values)
+            print(f"    Selected: lat={actual_lat:.2f}, lon={actual_lon:.2f}")
+            
             # Konvertuj z Kelvinov na Celsius (ECMWF dáta sú v K)
             temps = [float(v) - 273.15 for v in point.t2m.values]
+            print(f"    Temp range: {min(temps):.1f} to {max(temps):.1f}")
             downloaded_data['temperature'] = temps
         except Exception as e:
             print(f"    Chyba teplota pre {loc['name']}: {e}")
+            import traceback
+            traceback.print_exc()
     
     # Parsuj zrážky
     if os.path.exists(grib_files['precip']):
