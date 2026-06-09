@@ -554,13 +554,23 @@ Map<String, dynamic> generateEcmwfDataForLocation(double lat, double lon, String
   
   final locName = locationName ?? 'Lokalita ${lat.toStringAsFixed(2)}, ${lon.toStringAsFixed(2)}';
   
+  // Výpočet timezone offset podľa zemepisnej dĺžky (približne)
+  // Slovensko/Európa: CEST (UTC+2) v lete, CET (UTC+1) v zime
+  final month = now.month;
+  final isSummerTime = month >= 3 && month <= 10;
+  final utcOffsetHours = isSummerTime ? 2 : 1;
+  final utcOffsetSeconds = utcOffsetHours * 3600;
+  final tzAbbreviation = isSummerTime ? 'CEST' : 'CET';
+  
   debugPrint('ECMWF: Vygenerované nové dáta pre $locName (lat: $lat, lon: $lon)');
   debugPrint('  Teploty: ${dailyMin.first.toStringAsFixed(1)}°C - ${dailyMax.first.toStringAsFixed(1)}°C');
   
   return {
     'latitude': lat,
     'longitude': lon,
-    'timezone': 'UTC',
+    'timezone': 'Europe/Bratislava',
+    'timezone_abbreviation': tzAbbreviation,
+    'utc_offset_seconds': utcOffsetSeconds,
     'source': 'ECMWF Open Data (Generated)',
     'model': 'IFS 0.4°',
     'resolution': '0.4°',
