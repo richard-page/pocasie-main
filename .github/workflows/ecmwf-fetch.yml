@@ -20,7 +20,7 @@ jobs:
         
     - name: Install Python dependencies
       run: |
-        pip install requests xarray cfgrib pandas numpy eccodes ecmwf-opendata
+        pip install requests xarray cfgrib pandas numpy eccodes ecmwf-opendata scipy
         
     - name: Fetch real ECMWF data from data.ecmwf.int
       run: |

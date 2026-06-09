@@ -125,34 +125,65 @@ def generate_forecast_for_location(loc, tmpdir):
                 downloaded_data['precipitation'] = data
                 print(f"    Načítaných {len(data)} hodnôt zrážok")
     
-    # Generuj časové značky (40 krokov = 120 hodín)
+    # Generuj časové značky (40 krokov = 120 hodín v 3h intervaloch)
     now = datetime.utcnow()
     base_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    times = [(base_date + timedelta(hours=h*3)).isoformat() for h in range(40)]
+    times_3h = [(base_date + timedelta(hours=h*3)) for h in range(40)]
     
     # Priprav dáta (fallback na simulované ak nemáme reálne)
-    temps = downloaded_data.get('temperature', [20.0 + (h % 24 - 12) * 0.5 for h in range(40)])
-    precip = downloaded_data.get('precipitation', [0.0] * 40)
-    pressure = [1013.0] * 40
-    cloud = [50] * 40  # Default
+    temps_3h = downloaded_data.get('temperature', [20.0 + (h % 24 - 12) * 0.5 for h in range(40)])
+    precip_3h = downloaded_data.get('precipitation', [0.0] * 40)
     
     # Orež na rovnakú dĺžku
-    min_len = min(len(times), len(temps), len(precip), 40)
-    times = times[:min_len]
-    temps = temps[:min_len]
-    precip = precip[:min_len]
-    pressure = pressure[:min_len]
+    min_len = min(len(times_3h), len(temps_3h), len(precip_3h), 40)
+    times_3h = times_3h[:min_len]
+    temps_3h = temps_3h[:min_len]
+    precip_3h = precip_3h[:min_len]
     
-    # Denné agregácie
+    # INTERPOLÁCIA na hodinové intervaly
+    from scipy.interpolate import interp1d
+    import numpy as np
+    
+    # Pre teplotu použijeme kubickú interpoláciu
+    hours_3h = [i * 3 for i in range(min_len)]
+    hours_1h = list(range(hours_3h[-1] + 1))  # 0, 1, 2, 3, ... do konca
+    
+    # Interpolácia teploty
+    if len(temps_3h) >= 4:
+        temp_interp = interp1d(hours_3h, temps_3h, kind='cubic', fill_value='extrapolate')
+        temps_1h = temp_interp(hours_1h).tolist()
+    else:
+        temps_1h = temps_3h  # fallback
+    
+    # Pre zrážky použijeme lineárnu interpoláciu (rozdelíme 3h úhrn rovnomerne)
+    precip_1h = []
+    for i in range(len(precip_3h)):
+        val = precip_3h[i]
+        # Rozdelíme 3-hodinový úhrn na 3 hodiny
+        precip_1h.extend([val / 3.0, val / 3.0, val / 3.0])
+    # Orež na správnu dĺžku
+    precip_1h = precip_1h[:len(hours_1h)]
+    
+    # Generuj ISO časy pre hodinové dáta
+    times = [(base_date + timedelta(hours=h)).isoformat() for h in hours_1h]
+    temps = [round(float(t), 1) for t in temps_1h]
+    precip = [round(float(p), 2) for p in precip_1h]
+    pressure = [1013.0] * len(times)
+    cloud = [50] * len(times)
+    
+    # Denné agregácie (z hodinových dát)
     daily_times = []
     daily_max = []
     daily_min = []
     daily_precip = []
     
-    for day in range(min_len // 8):  # 8 krokov = 24 hodín (každé 3h)
-        start = day * 8
-        end = min(start + 8, min_len)
-        if start < min_len:
+    hours_per_day = 24
+    num_days = len(times) // hours_per_day
+    
+    for day in range(num_days):
+        start = day * hours_per_day
+        end = min(start + hours_per_day, len(times))
+        if start < len(times):
             day_temps = temps[start:end]
             day_precip = precip[start:end]
             day_date = base_date + timedelta(days=day)
