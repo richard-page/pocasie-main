@@ -368,10 +368,12 @@ bool isGeoCityInEuropeanUnion(GeoCity city) {
 /// 
 /// MOŽNOSTI:
 /// 1. Lokálny JSON súbor: 'file' (číta backend/ecmwf_forecast.json)
-/// 2. Vlastný server: 'https://tvoj-server.com/forecast'
+/// 2. Lokálny Flask server: 'http://localhost:5000'
+/// 3. Vlastný server: 'https://tvoj-server.com/forecast'
 /// 
 /// POZNÁMKA: Open-Meteo fallback bol odstránený - appka používa LEN tvoj ECMWF zdroj
-const String kEcmwfBackendUrl = 'file'; // Použi lokálny súbor backend/ecmwf_forecast.json
+const String kEcmwfBackendUrl = 'http://localhost:5000'; // Flask server pre generovanie JSONov
+const String kGitHubRawUrl = 'https://raw.githubusercontent.com/richard-page/pocasie/main/backend'; // GitHub URL pre jednotlivé JSONy
 
 // Open-Meteo fallback FUNKCIA ODSTRÁNENÁ
 // Appka používa výhradne ECMWF Open Data z tvojho zdroja
