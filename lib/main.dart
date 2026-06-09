@@ -626,6 +626,32 @@ Map<String, dynamic> generateEcmwfDataForLocation(double lat, double lon, String
   };
 }
 
+/// Nájde najbližšiu známu lokalitu podľa súradníc pre GitHub JSON súbor
+String _findClosestLocationName(double lat, double lon) {
+  // Známe lokality s JSON súbormi na GitHube
+  final knownLocations = [
+    {'name': 'Hlohovec', 'lat': 48.43, 'lon': 17.8},
+    {'name': 'Bratislava', 'lat': 48.1482, 'lon': 17.1067},
+    {'name': 'Košice', 'lat': 48.7164, 'lon': 21.2611},
+  ];
+  
+  // Nájdi najbližšiu
+  String closest = 'hlohovec'; // default
+  double minDist = double.infinity;
+  
+  for (final loc in knownLocations) {
+    final dLat = (loc['lat'] as double) - lat;
+    final dLon = (loc['lon'] as double) - lon;
+    final dist = dLat * dLat + dLon * dLon;
+    if (dist < minDist) {
+      minDist = dist;
+      closest = (loc['name'] as String).toLowerCase();
+    }
+  }
+  
+  return closest;
+}
+
 /// Stiahne predpoveď z ECMWF backendu
 Future<Map<String, dynamic>?> _downloadEcmwfForecast(
   double lat,
@@ -696,6 +722,34 @@ Future<Map<String, dynamic>?> _downloadEcmwfForecast(
     } catch (e) {
       debugPrint('ECMWF backend failed: $e');
     }
+  }
+
+  // SKÚS GITHUB RAW URL - REÁLNE ECMWF DÁTA
+  try {
+    debugPrint('ECMWF: Skúšam načítať z GitHub...');
+    // Nájdi najbližšiu lokalitu v databáze
+    final locationName = _findClosestLocationName(lat, lon);
+    final url = Uri.parse('$kGitHubRawUrl/ecmwf_forecast_${locationName.toLowerCase().replaceAll(" ", "_")}.json');
+    debugPrint('ECMWF: GitHub URL: $url');
+    
+    final r = await http.get(
+      url,
+      headers: {
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache',
+      },
+    ).timeout(const Duration(seconds: 15));
+
+    if (r.statusCode == 200) {
+      final map = json.decode(r.body) as Map<String, dynamic>;
+      debugPrint('ECMWF: Úspešne načítané z GitHub! Source: ${map['source']}');
+      await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(map));
+      return map;
+    } else {
+      debugPrint('ECMWF: GitHub returned ${r.statusCode}');
+    }
+  } catch (e) {
+    debugPrint('ECMWF GitHub fetch failed: $e');
   }
 
   // AK NENÁJDEME LOKALITU V JSON, VYGENERUJEME NOVÉ DÁTA

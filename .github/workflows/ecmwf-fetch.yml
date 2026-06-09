@@ -1,4 +1,4 @@
-name: ECMWF Data Fetch
+name: ECMWF Real Data Fetch
 
 on:
   schedule:
@@ -20,35 +20,12 @@ jobs:
         
     - name: Install Python dependencies
       run: |
-        pip install requests
+        pip install requests xarray cfgrib pandas numpy eccodes
         
-    - name: Fetch ECMWF data from Open-Meteo
+    - name: Fetch real ECMWF data from data.ecmwf.int
       run: |
-        python -c "
-        import requests
-        import json
-        from datetime import datetime
-        
-        # Open-Meteo ECMWF endpoint (oficiálny ECMWF IFS model)
-        url = 'https://api.open-meteo.com/v1/ecmwf?latitude=48.8566&longitude=2.3522&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,rain,showers,snowfall,weather_code,cloud_cover,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,rain_sum,showers_sum,snowfall_sum&timezone=Europe/Bratislava&forecast_days=10'
-        
-        response = requests.get(url, timeout=60)
-        if response.status_code == 200:
-            data = response.json()
-            # Pridaj metadata
-            data['metadata'] = {
-                'source': 'ECMWF via Open-Meteo',
-                'model': 'IFS 0.4°',
-                'fetched_at': datetime.utcnow().isoformat(),
-                'url': 'https://open-meteo.com/en/docs/ecmwf-api'
-            }
-            with open('backend/ecmwf_forecast.json', 'w') as f:
-                json.dump(data, f, indent=2)
-            print('ECMWF data fetched successfully')
-        else:
-            print(f'Failed to fetch: {response.status_code}')
-            exit(1)
-        "
+        cd backend
+        python fetch_ecmwf_real.py
         
     - name: Commit and push if changes
       run: |
