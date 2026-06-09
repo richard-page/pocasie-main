@@ -396,7 +396,8 @@ def generate_forecast_for_location_with_grib(loc, grib_files):
                                 filter_by_keys={'type': 'fc', 'stepType': 'instant'})
             lon_norm = lon % 360
             point = ds.sel(latitude=lat, longitude=lon_norm, method='nearest')
-            temps = [float(v) for v in point.t2m.values]
+            # Konvertuj z Kelvinov na Celsius (ECMWF dáta sú v K)
+            temps = [float(v) - 273.15 for v in point.t2m.values]
             downloaded_data['temperature'] = temps
         except Exception as e:
             print(f"    Chyba teplota pre {loc['name']}: {e}")
