@@ -57,28 +57,43 @@ def download_with_ecmwf_opendata(loc, tmpdir):
         traceback.print_exc()
         return None
 
-def parse_grib_file(grib_file, param_name):
-    """Parsuje GRIB súbor pomocou xarray/cfgrib"""
+def parse_grib_file(grib_file, param_name, lat, lon):
+    """Parsuje GRIB súbor a extrahuje hodnoty pre danú lokalitu"""
     try:
         import xarray as xr
+        import numpy as np
         
         ds = xr.open_dataset(grib_file, engine='cfgrib',
                             backend_kwargs={'filter_by_keys': {'typeOfLevel': 'surface'}})
         
-        # Extrahuj hodnoty pre všetky časy
+        # Normalizuj longitude (0-360)
+        lon_norm = lon % 360
+        
+        # Extrahuj hodnoty pre konkrétne súradnice pomocou nearest
         if param_name == 'temperature':
-            if 't2m' in ds:
-                return ds.t2m.values - 273.15  # K na °C
+            var_name = 't2m' if 't2m' in ds else '2t'
+            if var_name in ds:
+                da = ds[var_name]
+                # Vyber najbližší bod
+                values = da.sel(latitude=lat, longitude=lon_norm, method='nearest')
+                # Konvertuj na °C
+                return (values.values - 273.15).tolist()
         elif param_name == 'precipitation':
-            if 'tp' in ds:
-                # Zrážky sú kumulatívne, potrebujeme rozdiely
-                tp = ds.tp.values * 1000  # m na mm
-                return [0.0] + [max(0, tp[i] - tp[i-1]) for i in range(1, len(tp))]
+            var_name = 'tp'
+            if var_name in ds:
+                da = ds[var_name]
+                values = da.sel(latitude=lat, longitude=lon_norm, method='nearest')
+                # Konvertuj z m na mm
+                tp_mm = values.values * 1000
+                # Spočítaj kumulatívne zrážky
+                return [0.0] + [max(0, tp_mm[i] - tp_mm[i-1]) for i in range(1, len(tp_mm))]
         
         return None
         
     except Exception as e:
         print(f"  Chyba pri parsovaní GRIB: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -96,17 +111,17 @@ def generate_forecast_for_location(loc, tmpdir):
     if grib_files:
         if os.path.exists(grib_files['temp']):
             print(f"  ✓ Stiahnuté: teplota")
-            data = parse_grib_file(grib_files['temp'], 'temperature')
+            data = parse_grib_file(grib_files['temp'], 'temperature', lat, lon)
             if data is not None:
                 downloaded_data['temperature'] = data
-                print(f"    Načítaných {len(data)} hodnôt")
+                print(f"    Načítaných {len(data)} hodnôt teploty")
         
         if os.path.exists(grib_files['precip']):
             print(f"  ✓ Stiahnuté: zrážky")
-            data = parse_grib_file(grib_files['precip'], 'precipitation')
+            data = parse_grib_file(grib_files['precip'], 'precipitation', lat, lon)
             if data is not None:
                 downloaded_data['precipitation'] = data
-                print(f"    Načítaných {len(data)} hodnôt")
+                print(f"    Načítaných {len(data)} hodnôt zrážok")
     
     # Generuj časové značky (40 krokov = 120 hodín)
     now = datetime.utcnow()
