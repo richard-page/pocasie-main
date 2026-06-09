@@ -372,7 +372,7 @@ bool isGeoCityInEuropeanUnion(GeoCity city) {
 /// 3. Vlastný server: 'https://tvoj-server.com/forecast'
 /// 
 /// POZNÁMKA: Open-Meteo fallback bol odstránený - appka používa LEN tvoj ECMWF zdroj
-const String kEcmwfBackendUrl = 'http://localhost:5000'; // Flask server pre generovanie JSONov
+const String kEcmwfBackendUrl = ''; // Prázdne = preskočiť localhost, použiť GitHub priamo
 const String kGitHubRawUrl = 'https://raw.githubusercontent.com/richard-page/pocasie/main/backend'; // GitHub URL pre jednotlivé JSONy
 
 // Open-Meteo fallback FUNKCIA ODSTRÁNENÁ
@@ -629,10 +629,11 @@ Map<String, dynamic> generateEcmwfDataForLocation(double lat, double lon, String
 /// Nájde najbližšiu známu lokalitu podľa súradníc pre GitHub JSON súbor
 String _findClosestLocationName(double lat, double lon) {
   // Známe lokality s JSON súbormi na GitHube
+  // Používame ASCII názvy súborov (bez špeciálnych znakov)
   final knownLocations = [
-    {'name': 'Hlohovec', 'lat': 48.43, 'lon': 17.8},
-    {'name': 'Bratislava', 'lat': 48.1482, 'lon': 17.1067},
-    {'name': 'Košice', 'lat': 48.7164, 'lon': 21.2611},
+    {'name': 'hlohovec', 'lat': 48.43, 'lon': 17.8},
+    {'name': 'bratislava', 'lat': 48.1482, 'lon': 17.1067},
+    {'name': 'kosice', 'lat': 48.7164, 'lon': 21.2611}, // bez diakritiky
   ];
   
   // Nájdi najbližšiu
@@ -645,7 +646,7 @@ String _findClosestLocationName(double lat, double lon) {
     final dist = dLat * dLat + dLon * dLon;
     if (dist < minDist) {
       minDist = dist;
-      closest = (loc['name'] as String).toLowerCase();
+      closest = loc['name'] as String;
     }
   }
   

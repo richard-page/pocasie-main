@@ -234,8 +234,10 @@ def main():
             try:
                 data = generate_forecast_for_location(loc, tmpdir)
                 
-                # Ulož JSON
-                output_file = f"ecmwf_forecast_{loc['name'].lower()}.json"
+                # Ulož JSON - použi ASCII názov súboru (bez diakritiky)
+                import unicodedata
+                ascii_name = unicodedata.normalize('NFKD', loc['name'].lower()).encode('ASCII', 'ignore').decode('ASCII')
+                output_file = f"ecmwf_forecast_{ascii_name}.json"
                 with open(output_file, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
                 
