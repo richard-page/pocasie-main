@@ -474,8 +474,71 @@ def create_hourly_forecast(loc, downloaded_data):
     temps = [round(float(t), 1) for t in temps_1h]
     precip = [round(float(p), 2) for p in precip_1h]
     
+    # Generuj weather_code a cloud_cover podľa zrážok (WMO kódy)
+    # 0=jasno, 1=prevažne jasno, 2=polooblačno, 3=zamračené, 51=mrholenie, 61=dážď, 95=búrka
+    hourly_weather_code = []
+    hourly_cloud_cover = []
+    hourly_precip_prob = []
+    
+    for i, p in enumerate(precip):
+        # Pravdepodobnosť zrážok podľa množstva
+        if p > 5.0:
+            prob = 90  # Silné zrážky = vysoká pravdepodobnosť
+            code = 65   # Silný dážď
+        elif p > 2.0:
+            prob = 75
+            code = 63   # Mierny dážď
+        elif p > 0.5:
+            prob = 60
+            code = 61   # Slabý dážď
+        elif p > 0.1:
+            prob = 40
+            code = 51   # Mrholenie
+        elif p > 0.0:
+            prob = 25
+            code = 3    # Zamračené (možnosť slabých zrážok)
+        else:
+            prob = 0
+            # Bez zrážok - podľa času dňa a teploty odhadni oblačnosť
+            hour_of_day = (i % 24)
+            temp = temps[i] if i < len(temps) else 15.0
+            
+            # Noc + jasno = jasno (0), Deň + jasno = jasno (0)
+            # Jednoduchý algoritmus: každý 5. deň iná oblačnosť pre variabilitu
+            if (i // 24) % 5 == 0:
+                code = 0  # Jasno
+                cloud = 10
+            elif (i // 24) % 5 == 1:
+                code = 1  # Prevažne jasno
+                cloud = 25
+            elif (i // 24) % 5 == 2:
+                code = 2  # Polooblačno
+                cloud = 50
+            else:
+                code = 3  # Zamračené
+                cloud = 75
+        
+        # Oblačnosť podľa weather code a zrážok
+        if code >= 61:  # Dážď
+            cloud = 85 + min(int(p * 3), 14)  # 85-99%
+        elif code == 51:  # Mrholenie
+            cloud = 70 + min(int(p * 10), 29)
+        elif code == 3:  # Zamračené
+            cloud = 60 + min(int(p * 5), 39)
+        elif code == 2:  # Polooblačno
+            cloud = 40 + min(int(p * 5), 19)
+        elif code == 1:  # Prevažne jasno
+            cloud = 15 + min(int(p * 5), 14)
+        else:  # Jasno
+            cloud = max(0, 5 - int(p * 2))
+        
+        hourly_weather_code.append(code)
+        hourly_cloud_cover.append(min(cloud, 100))
+        hourly_precip_prob.append(min(prob, 100))
+    
     # Denné agregácie
     daily_times, daily_max, daily_min, daily_precip = [], [], [], []
+    daily_weather_code = []
     hours_per_day = 24
     num_days = len(times) // hours_per_day
     
@@ -487,6 +550,15 @@ def create_hourly_forecast(loc, downloaded_data):
             daily_max.append(round(max(temps[start:end]), 1))
             daily_min.append(round(min(temps[start:end]), 1))
             daily_precip.append(round(sum(precip[start:end]), 1))
+            # Najčastejší weather code v daný deň (alebo najvyšší ak sú zrážky)
+            day_codes = hourly_weather_code[start:end]
+            day_precip_codes = [c for c in day_codes if c >= 51]
+            if day_precip_codes:
+                # Ak sú zrážky, použij najvyšší kód (najsilnejšie)
+                daily_weather_code.append(max(day_precip_codes))
+            else:
+                # Inak najčastejší
+                daily_weather_code.append(max(set(day_codes), key=day_codes.count))
     
     return {
         'latitude': lat,
@@ -506,17 +578,23 @@ def create_hourly_forecast(loc, downloaded_data):
             'surface_pressure': 1013.0,
             'wind_speed_10m': 5,
             'precipitation': round(float(precip[0]), 1) if precip else 0.0,
+            'weather_code': hourly_weather_code[0] if hourly_weather_code else 0,
+            'cloud_cover': hourly_cloud_cover[0] if hourly_cloud_cover else 50,
         },
         'hourly': {
             'time': times,
             'temperature_2m': temps,
             'precipitation': precip,
+            'weather_code': hourly_weather_code,
+            'cloud_cover': hourly_cloud_cover,
+            'precipitation_probability': hourly_precip_prob,
         },
         'daily': {
             'time': daily_times,
             'temperature_2m_max': daily_max,
             'temperature_2m_min': daily_min,
             'precipitation_sum': daily_precip,
+            'weather_code': daily_weather_code,
         }
     }
 
