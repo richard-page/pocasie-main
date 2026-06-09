@@ -21,42 +21,40 @@ def download_with_ecmwf_opendata(loc, tmpdir):
     try:
         from ecmwf.opendata import Client
         
-        client = Client(source="oper")
-        
-        lat, lon = loc['lat'], loc['lon']
+        client = Client(source="ecmwf")
         
         # Súbor pre teplotu
         target_temp = os.path.join(tmpdir, f"{loc['name']}_temp.grib2")
         
         client.retrieve(
-            param="2t",  # 2m teplota
-            target=target_temp,
-            lat=lat,
-            lon=lon,
+            date=0,  # Dnes
+            time=0,  # 00z
             step=[i for i in range(0, 121, 3)],  # 0-120 hodín, každé 3 hodiny
             stream="oper",
             type="fc",
-            time=0,
+            param="167",  # 2m teplota (ECMWF param code)
+            target=target_temp,
         )
         
         # Súbor pre zrážky
         target_precip = os.path.join(tmpdir, f"{loc['name']}_precip.grib2")
         
         client.retrieve(
-            param="tp",  # Total precipitation
-            target=target_precip,
-            lat=lat,
-            lon=lon,
+            date=0,
+            time=0,
             step=[i for i in range(0, 121, 3)],
             stream="oper",
             type="fc",
-            time=0,
+            param="228",  # Total precipitation
+            target=target_precip,
         )
         
         return {'temp': target_temp, 'precip': target_precip}
         
     except Exception as e:
         print(f"  Chyba s ecmwf-opendata: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def parse_grib_file(grib_file, param_name):
