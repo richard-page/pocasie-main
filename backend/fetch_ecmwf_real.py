@@ -39,38 +39,55 @@ def get_latest_run():
     return now.strftime('%Y%m%d'), '00'
 
 def download_grib_param(date_str, cycle, param, tmpdir):
-    """Stiahne jeden GRIB parameter"""
-    # ECMWF Open Data štruktúra
-    url = f"{ECMWF_BASE}/{date_str}/{cycle}z/ifs/0p4-beta/oper/sfc/{param}/index"
+    """Stiahne jeden GRIB parameter z ECMWF Open Data"""
+    # ECMWF Open Data štruktúra - parameter files
+    # Formát: {base}/{date}/{cycle}z/ifs/0p4-beta/oper/{YYYYMM}{DD}{cycle}00-{step}h-oper-fc.{param}.grib2
     
-    target = os.path.join(tmpdir, f"{param}.grib")
+    target = os.path.join(tmpdir, f"{param}.grib2")
     
     try:
-        # Skús priamo stiahnuť cez .grib endpoint
-        grib_url = f"{ECMWF_BASE}/{date_str}/{cycle}z/ifs/0p4-beta/oper/sfc/{param}/grib"
-        r = requests.get(grib_url, timeout=120, stream=True)
+        # Skús najprv zoznam súborov cez .idx
+        idx_url = f"{ECMWF_BASE}/{date_str}/{cycle}z/ifs/0p4-beta/oper/"
+        print(f"  Kontrolujem: {idx_url}")
         
+        r = requests.get(idx_url, timeout=30)
         if r.status_code == 200:
-            with open(target, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            return target
-        
-        # Ak zlyhalo, skús index a vyber prvý súbor
-        r = requests.get(url, timeout=30)
-        if r.status_code == 200:
-            lines = r.text.strip().split('\n')
-            if lines:
-                first_file = lines[0].split(':')[0]
-                file_url = f"{ECMWF_BASE}/{date_str}/{cycle}z/ifs/0p4-beta/oper/sfc/{param}/{first_file}"
-                r = requests.get(file_url, timeout=120, stream=True)
+            # Parsuj HTML pre odkazy na grib2 súbory
+            import re
+            # Hľadaj súbory pre daný parameter
+            pattern = rf'href="([^"]*{param}[^"]*\.grib2)"'
+            matches = re.findall(pattern, r.text)
+            
+            if matches:
+                # Stiahni prvý súbor (0h forecast)
+                grib_file = matches[0]
+                if not grib_file.startswith('http'):
+                    grib_file = f"{ECMWF_BASE}/{date_str}/{cycle}z/ifs/0p4-beta/oper/{grib_file}"
+                
+                print(f"  Sťahujem: {grib_file}")
+                r = requests.get(grib_file, timeout=120, stream=True)
                 if r.status_code == 200:
                     with open(target, 'wb') as f:
                         for chunk in r.iter_content(chunk_size=8192):
                             if chunk:
                                 f.write(chunk)
+                    print(f"  ✓ Stiahnuté: {os.path.getsize(target)} bytes")
                     return target
+        
+        # Fallback: skús priamu konštrukciu URL
+        # Typický formát: 20260609000000-0h-oper-fc.167.grib2
+        for step in ['0', '6', '12', '18', '24']:
+            grib_url = f"{ECMWF_BASE}/{date_str}/{cycle}z/ifs/0p4-beta/oper/{date_str}{cycle}00-{step}h-oper-fc.{param}.grib2"
+            print(f"  Skúšam: {grib_url}")
+            r = requests.get(grib_url, timeout=60, stream=True)
+            if r.status_code == 200:
+                with open(target, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                print(f"  ✓ Stiahnuté: {os.path.getsize(target)} bytes")
+                return target
+                
     except Exception as e:
         print(f"  Chyba pri sťahovaní {param}: {e}")
     
