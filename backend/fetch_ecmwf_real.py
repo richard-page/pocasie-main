@@ -32,7 +32,7 @@ def download_with_ecmwf_opendata(loc, tmpdir):
             step=[i for i in range(0, 121, 3)],  # 0-120 hodín, každé 3 hodiny
             stream="oper",
             type="fc",
-            param="167",  # 2m teplota (ECMWF param code)
+            param="2t",  # 2m teplota
             target=target_temp,
         )
         
@@ -45,7 +45,7 @@ def download_with_ecmwf_opendata(loc, tmpdir):
             step=[i for i in range(0, 121, 3)],
             stream="oper",
             type="fc",
-            param="228",  # Total precipitation
+            param="tp",  # Total precipitation
             target=target_precip,
         )
         
