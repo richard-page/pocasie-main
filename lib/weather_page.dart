@@ -4762,7 +4762,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       return const SizedBox.shrink();
     }
 
-    final timeLabel = formatTime(h.time[index]);
+    final timeLabel = formatTime(h.time[index], utcOffsetSeconds: weatherData?.utcOffsetSeconds);
     final tempLabel = _formatTemperature(smoothed.temperatures[smoothedIndex]);
     final tempColor = _temperatureScaleColor(smoothed.temperatures[smoothedIndex]);
 

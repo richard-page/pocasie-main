@@ -1538,7 +1538,7 @@ String windDirectionShort2(num? deg) {
   return shortDirMap[fullDir] ?? fullDir;
 }
 
-String formatTime(String iso, {String? timezone}) {
+String formatTime(String iso, {String? timezone, int? utcOffsetSeconds}) {
   try {
     String cleanIso = iso.trim();
     if (cleanIso.startsWith('as')) cleanIso = cleanIso.substring(2).trim();
@@ -1556,15 +1556,17 @@ String formatTime(String iso, {String? timezone}) {
 
     if (!cleanIso.contains(':')) return '--:--';
 
-    final timeParts = cleanIso.split('T');
-    if (timeParts.length < 2) return '--:--';
+    // Parse as UTC and apply offset if provided
+    DateTime? dt = DateTime.tryParse(cleanIso);
+    if (dt == null) return '--:--';
+    
+    // Apply UTC offset to get local time
+    if (utcOffsetSeconds != null && utcOffsetSeconds != 0) {
+      dt = dt.add(Duration(seconds: utcOffsetSeconds));
+    }
 
-    final timePart = timeParts[1];
-    final timeComponents = timePart.split(':');
-    if (timeComponents.length < 2) return '--:--';
-
-    final hour = int.tryParse(timeComponents[0]) ?? 0;
-    final minute = int.tryParse(timeComponents[1]) ?? 0;
+    final hour = dt.hour;
+    final minute = dt.minute;
 
     return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
   } catch (e) {
