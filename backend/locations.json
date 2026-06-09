@@ -5,6 +5,7 @@
     {"name": "Žilina", "lat": 49.2231, "lon": 18.7394},
     {"name": "Praha", "lat": 50.0755, "lon": 14.4378},
     {"name": "Viedeň", "lat": 48.2082, "lon": 16.3738},
-    {"name": "Budapešť", "lat": 47.4979, "lon": 19.0402}
+    {"name": "Budapešť", "lat": 47.4979, "lon": 19.0402},
+    {"name": "Hlohovec", "lat": 48.43, "lon": 17.80}
   ]
 }

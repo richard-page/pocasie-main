@@ -1,0 +1,54 @@
+name: Generate All Location Forecasts
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Každých 6 hodín
+  workflow_dispatch:  # Alebo ručne
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Generate forecasts for all locations
+        run: |
+          cd backend
+          
+          # Načítaj všetky lokality zo súboru locations.json
+          python -c "
+import json
+
+with open('locations.json', 'r', encoding='utf-8') as f:
+    data = json.load(f)
+    locations = data.get('locations', [])
+    
+print(f'Found {len(locations)} locations to process')
+
+# Vygeneruj JSON pre každú lokalitu
+import subprocess
+for loc in locations:
+    name = loc['name']
+    lat = loc['lat']
+    lon = loc['lon']
+    print(f'Generating: {name}')
+    subprocess.run(['python', 'fetch_ecmwf_official.py', name, str(lat), str(lon)], check=True)
+"
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add backend/ecmwf_forecast_*.json
+          git diff --staged --quiet || git commit -m "Update location forecasts $(date +'%Y-%m-%d %H:%M')"
+          git push
