@@ -2071,18 +2071,32 @@ Future<GeoCity?> reverseGeocode(double lat, double lon, {bool resolveTimezone = 
   );
 }
 
+/// Detekuje timezone podľa geografických súradníc bez externého API
 Future<String?> _getTimezoneForCoordinates(double lat, double lon) async {
-  try {
-    final uri = Uri.parse(
-        'https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current_weather=true&timezone=auto');
-    final r = await http.get(uri).timeout(const Duration(milliseconds: 5000));
-
-    if (r.statusCode == 200) {
-      final data = json.decode(r.body) as Map<String, dynamic>;
-      return data['timezone'] as String?;
-    }
-  // ignore: empty_catches
-  } catch (e) {}
+  // Slovensko a Česko
+  if (lat >= 47.5 && lat <= 52.0 && lon >= 12.0 && lon <= 23.0) {
+    return 'Europe/Bratislava';
+  }
+  // Maďarsko
+  if (lat >= 45.5 && lat <= 49.0 && lon >= 16.0 && lon <= 23.0) {
+    return 'Europe/Budapest';
+  }
+  // Rakúsko
+  if (lat >= 46.0 && lat <= 50.0 && lon >= 9.0 && lon <= 18.0) {
+    return 'Europe/Vienna';
+  }
+  // Poľsko
+  if (lat >= 49.0 && lat <= 55.0 && lon >= 14.0 && lon <= 25.0) {
+    return 'Europe/Warsaw';
+  }
+  // Nemecko
+  if (lat >= 47.0 && lat <= 55.0 && lon >= 6.0 && lon <= 15.0) {
+    return 'Europe/Berlin';
+  }
+  // EU fallback
+  if (lat >= 36.0 && lat <= 71.0 && lon >= -11.0 && lon <= 40.0) {
+    return 'Europe/London';
+  }
   return null;
 }
 
