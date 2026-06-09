@@ -626,6 +626,34 @@ Map<String, dynamic> generateEcmwfDataForLocation(double lat, double lon, String
   };
 }
 
+/// Nájde najbližší bod v ECMWF grid pre dané súradnice
+Map<String, dynamic>? _findNearestGridPoint(Map<String, dynamic> gridData, double lat, double lon) {
+  final locations = gridData['locations'] as List<dynamic>?;
+  if (locations == null || locations.isEmpty) return null;
+  
+  Map<String, dynamic>? nearest;
+  double minDist = double.infinity;
+  
+  for (final loc in locations) {
+    final locMap = loc as Map<String, dynamic>;
+    final locLat = (locMap['lat'] as num).toDouble();
+    final locLon = (locMap['lon'] as num).toDouble();
+    
+    // Vzdialenosť v stupňoch (približná)
+    final dLat = locLat - lat;
+    final dLon = locLon - lon;
+    final dist = dLat * dLat + dLon * dLon;
+    
+    if (dist < minDist) {
+      minDist = dist;
+      nearest = locMap;
+    }
+  }
+  
+  // Vráť forecast z najbližšieho bodu
+  return nearest?['forecast'] as Map<String, dynamic>?;
+}
+
 /// Nájde najbližšiu známu lokalitu podľa súradníc pre GitHub JSON súbor
 String _findClosestLocationName(double lat, double lon) {
   // Známe lokality s JSON súbormi na GitHube
@@ -729,12 +757,10 @@ Future<Map<String, dynamic>?> _downloadEcmwfForecast(
     }
   }
 
-  // SKÚS GITHUB RAW URL - REÁLNE ECMWF DÁTA
+  // SKÚS GITHUB RAW URL - SLOVAKIA GRID (všetky lokality v jednom súbore)
   try {
-    debugPrint('ECMWF: Skúšam načítať z GitHub...');
-    // Nájdi najbližšiu lokalitu v databáze
-    final locationName = _findClosestLocationName(lat, lon);
-    final url = Uri.parse('$kGitHubRawUrl/ecmwf_forecast_${locationName.toLowerCase().replaceAll(" ", "_")}.json');
+    debugPrint('ECMWF: Skúšam načítať grid z GitHub...');
+    final url = Uri.parse('$kGitHubRawUrl/ecmwf_forecast_slovakia_grid.json');
     debugPrint('ECMWF: GitHub URL: $url');
     
     final r = await http.get(
@@ -743,13 +769,19 @@ Future<Map<String, dynamic>?> _downloadEcmwfForecast(
         'Accept': 'application/json',
         'Cache-Control': 'no-cache',
       },
-    ).timeout(const Duration(seconds: 15));
+    ).timeout(const Duration(seconds: 30));
 
     if (r.statusCode == 200) {
-      final map = json.decode(r.body) as Map<String, dynamic>;
-      debugPrint('ECMWF: Úspešne načítané z GitHub! Source: ${map['source']}');
-      await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(map));
-      return map;
+      final gridData = json.decode(r.body) as Map<String, dynamic>;
+      debugPrint('ECMWF: Grid načítaný! Body: ${gridData['total_points']}');
+      
+      // Nájdi najbližší bod v gride
+      locationData = _findNearestGridPoint(gridData, lat, lon);
+      if (locationData != null) {
+        debugPrint('ECMWF: Nájdený najbližší bod pre $lat, $lon');
+        await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(locationData));
+        return locationData;
+      }
     } else {
       debugPrint('ECMWF: GitHub returned ${r.statusCode}');
     }
@@ -757,8 +789,8 @@ Future<Map<String, dynamic>?> _downloadEcmwfForecast(
     debugPrint('ECMWF GitHub fetch failed: $e');
   }
 
-  // AK NENÁJDEME LOKALITU V JSON, VYGENERUJEME NOVÉ DÁTA
-  debugPrint('ECMWF: Lokalita nenájdená v databáze, generujem nové dáta...');
+  // AK NENÁJDEME V GRIDE, POUŽIJ FALLBACK
+  debugPrint('ECMWF: Grid nenájdený, používam fallback...');
   locationData = generateEcmwfDataForLocation(lat, lon, null);
   await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(locationData));
   return locationData;
