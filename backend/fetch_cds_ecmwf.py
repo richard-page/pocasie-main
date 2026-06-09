@@ -69,7 +69,7 @@ def fetch_ecmwf_for_location(name, lat, lon):
         print(f"Sťahujem z CDS (môže trvať 1-2 minúty)...")
         
         c.retrieve(
-            'medium-range',  # Dataset - ECMWF IFS medium-range forecast
+            'medium-range-single-levels',  # Dataset - ECMWF IFS medium-range forecast
             request,
             target_file
         )
