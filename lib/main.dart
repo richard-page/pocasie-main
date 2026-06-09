@@ -473,7 +473,7 @@ Map<String, dynamic> generateEcmwfDataForLocation(double lat, double lon, String
   final hourlyTimes = <String>[];
   final hourlyTemps = <double>[];
   final hourlyPressure = <double>[];
-  final hourlyPrecip = <int>[];
+  final hourlyPrecip = <double>[];
   final hourlySnow = <int>[];
   final hourlyCloud = <int>[];
   final hourlyHumidity = <int>[];
@@ -509,7 +509,7 @@ Map<String, dynamic> generateEcmwfDataForLocation(double lat, double lon, String
     final temp = (tempBase + tempVar + lonVar + (nextInt(50) / 10 - 2.5));
     hourlyTemps.add(double.parse(temp.toStringAsFixed(1)));
     hourlyPressure.add(1013.0 + latOffset + (nextInt(200) / 10 - 10));
-    hourlyPrecip.add(nextInt(10) < 2 ? nextInt(3) : 0); // 20% šanca zrážok
+    hourlyPrecip.add(nextInt(10) < 3 ? (nextInt(50) / 10) : 0.0); // 30% šanca zrážok, 0-5mm
     hourlySnow.add(0);
     hourlyCloud.add(nextInt(100));
     hourlyHumidity.add(50 + nextInt(30));
@@ -527,7 +527,7 @@ Map<String, dynamic> generateEcmwfDataForLocation(double lat, double lon, String
   final dailyTimes = <String>[];
   final dailyMax = <double>[];
   final dailyMin = <double>[];
-  final dailyPrecip = <int>[];
+  final dailyPrecip = <double>[];
   final dailySunrise = <String>[];
   final dailySunset = <String>[];
   
