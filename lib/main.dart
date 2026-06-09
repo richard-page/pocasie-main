@@ -660,7 +660,10 @@ Future<Map<String, dynamic>?> _downloadEcmwfForecast(
   String timezone, {
   required bool forceRefresh,
 }) async {
-  const String cacheKey = 'ecmwf_ifs_fd$kForecastDays';
+  // Nájdi najbližšiu lokalitu a použi ju v cache key
+  final locationName = _findClosestLocationName(lat, lon);
+  final String cacheKey = 'ecmwf_${locationName}_fd$kForecastDays';
+  debugPrint('ECMWF: Cache key: $cacheKey for lat=$lat, lon=$lon');
 
   if (!forceRefresh) {
     final cachedJson = await CacheManager.getWeather(lat, lon, cacheKey);
@@ -670,6 +673,7 @@ Future<Map<String, dynamic>?> _downloadEcmwfForecast(
         if (cached['error'] != true &&
             cached.containsKey('hourly') &&
             forecastJsonDailyHorizonComplete(cached)) {
+          debugPrint('ECMWF: Using cached data for $locationName');
           return cached;
         }
       } catch (_) {}
