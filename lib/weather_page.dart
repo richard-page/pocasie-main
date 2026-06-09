@@ -4420,7 +4420,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final DateTime locTime = _getCurrentLocationTime();
 
     final stripByIdx =
-        _hourlyStripDisplayIconByIndex(h, locTime, current, daily);
+        _hourlyStripDisplayIconByIndex(h, locTime, current, daily, weatherData?.utcOffsetSeconds);
     if (stripByIdx == null || stripByIdx.isEmpty) {
       return const SliverToBoxAdapter(child: SizedBox.shrink());
     }

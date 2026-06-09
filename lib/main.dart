@@ -1308,10 +1308,14 @@ String _calendarDateStamp(DateTime d) =>
     '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
 /// Prvé `hourly.time` index s časovou pečatkou **`!parsed.isBefore(threshold)`** (rovnaká logika ako panel „24 h“).
-int? _hourlyForecastFirstIndexNotBefore(HourlyForecast h, DateTime threshold) {
+/// Konvertuje UTC časy z JSON na lokálny čas pomocou utcOffsetSeconds.
+int? _hourlyForecastFirstIndexNotBefore(HourlyForecast h, DateTime threshold, {int? utcOffsetSeconds}) {
   for (var i = 0; i < h.time.length; i++) {
     final t = DateTime.tryParse(h.time[i]);
-    if (t != null && !t.isBefore(threshold)) return i;
+    if (t == null) continue;
+    // Konvertuj UTC na lokálny čas
+    final localT = utcOffsetSeconds != null ? t.add(Duration(seconds: utcOffsetSeconds)) : t;
+    if (!localT.isBefore(threshold)) return i;
   }
   return null;
 }
@@ -1322,6 +1326,7 @@ Map<int, int>? _hourlyStripDisplayIconByIndex(
   DateTime locTime,
   CurrentWeather? current,
   DailyForecast? daily,
+  int? utcOffsetSeconds,
 ) {
   final visFloor = DateTime(
     locTime.year,
@@ -1329,7 +1334,7 @@ Map<int, int>? _hourlyStripDisplayIconByIndex(
     locTime.day,
     locTime.hour,
   ).add(const Duration(hours: 1));
-  final start = _hourlyForecastFirstIndexNotBefore(h, visFloor);
+  final start = _hourlyForecastFirstIndexNotBefore(h, visFloor, utcOffsetSeconds: utcOffsetSeconds);
   if (start == null) return null;
   final end = math.min(start + 24, h.time.length);
   if (end <= start) return null;
