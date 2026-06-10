@@ -410,6 +410,7 @@ def generate_forecast_for_location_with_grib(loc, grib_files):
             temps = [float(v) - 273.15 for v in point.t2m.values]
             print(f"    Temp range: {min(temps):.1f} to {max(temps):.1f}")
             downloaded_data['temperature'] = temps
+            ds.close()  # DÔLEŽITÉ: zatvor dataset!
         except Exception as e:
             print(f"    Chyba teplota pre {loc['name']}: {e}")
             import traceback
@@ -426,6 +427,7 @@ def generate_forecast_for_location_with_grib(loc, grib_files):
             # Konvertuj z kumulatívnych na 3-hodinové úhrny
             precip_3h = [precip[0]] + [precip[i] - precip[i-1] for i in range(1, len(precip))]
             downloaded_data['precipitation'] = precip_3h
+            ds.close()  # DÔLEŽITÉ: zatvor dataset!
         except Exception as e:
             print(f"    Chyba zrážky pre {loc['name']}: {e}")
     
