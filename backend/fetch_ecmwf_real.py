@@ -580,6 +580,7 @@ def create_hourly_forecast(loc, downloaded_data):
             'precipitation': round(float(precip[0]), 1) if precip else 0.0,
             'weather_code': hourly_weather_code[0] if hourly_weather_code else 0,
             'cloud_cover': hourly_cloud_cover[0] if hourly_cloud_cover else 50,
+            'is_day': 1 if (datetime.utcnow().hour >= 6 and datetime.utcnow().hour < 20) else 0,
         },
         'hourly': {
             'time': times,
