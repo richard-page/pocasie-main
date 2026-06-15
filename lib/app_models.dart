@@ -265,6 +265,8 @@ class WeatherData {
   final int? utcOffsetSeconds;
   /// Jedno-modelová predpoveď bola nedostupná — použil sa automatický vážený priemer troch výstupov API.
   final bool usedFallbackToBestMatch;
+  /// Hodinová pravdepodobnosť zrážok z modela (ECMWF Open Data GRIB ju nemá).
+  final bool precipitationProbabilityAvailable;
 
   const WeatherData({
     this.current,
@@ -275,6 +277,7 @@ class WeatherData {
     this.elevation,
     this.utcOffsetSeconds,
     this.usedFallbackToBestMatch = false,
+    this.precipitationProbabilityAvailable = false,
   });
 
   factory WeatherData.fromJson(Map<String, dynamic> json) => WeatherData(
@@ -292,6 +295,8 @@ class WeatherData {
         elevation: (json['elevation'] as num?)?.toDouble(),
         utcOffsetSeconds: json['utc_offset_seconds'] as int?,
         usedFallbackToBestMatch: json['used_fallback_to_best_match'] == true,
+        precipitationProbabilityAvailable:
+            json['precipitation_probability_available'] == true,
       );
 
   WeatherData copyWith({
@@ -303,6 +308,7 @@ class WeatherData {
     double? elevation,
     int? utcOffsetSeconds,
     bool? usedFallbackToBestMatch,
+    bool? precipitationProbabilityAvailable,
   }) {
     return WeatherData(
       current: current ?? this.current,
@@ -313,6 +319,8 @@ class WeatherData {
       elevation: elevation ?? this.elevation,
       utcOffsetSeconds: utcOffsetSeconds ?? this.utcOffsetSeconds,
       usedFallbackToBestMatch: usedFallbackToBestMatch ?? this.usedFallbackToBestMatch,
+      precipitationProbabilityAvailable:
+          precipitationProbabilityAvailable ?? this.precipitationProbabilityAvailable,
     );
   }
 
@@ -325,6 +333,8 @@ class WeatherData {
         if (elevation != null) 'elevation': elevation,
         if (utcOffsetSeconds != null) 'utc_offset_seconds': utcOffsetSeconds,
         if (usedFallbackToBestMatch) 'used_fallback_to_best_match': true,
+        if (precipitationProbabilityAvailable)
+          'precipitation_probability_available': true,
       };
 }
 
@@ -569,7 +579,7 @@ class DailyForecast {
 }
 
 const List<(String, double)> kBestMatchModelWeights = <(String, double)>[
-  ('ecmwf_ifs', 1.2),
+  ('ecmwf_ifs', 1.0),
   ('icon_seamless', 1.0),
   ('gfs_seamless', 0.8),
 ];

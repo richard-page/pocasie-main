@@ -5,17 +5,167 @@ Parsuje GRIB súbory a generuje JSON pre lokality
 """
 
 import json
+import math
 import os
 import tempfile
 from datetime import datetime, timedelta
 
 # Automatický grid pre Slovensko (0.4° rozlíšenie = ~44km)
 # Pokrýva celé územie SR s automatickou generáciou bodov
+# ECMWF Open Data oper/fc: natívne kroky 0–120 h po 3 h (1h GRIB neexistuje).
+FORECAST_STEPS_3H = list(range(0, 121, 3))
+
+
+def _hourly_precip_from_3h_step_deltas(cumulative_mm):
+    """Kumulatívne tp v krokoch 0,3,6,… → mm len v hodine kroku (bez falošného rozprestierania)."""
+    if not cumulative_mm:
+        return []
+    cum = [max(0.0, float(v)) for v in cumulative_mm]
+    for i in range(1, len(cum)):
+        cum[i] = max(cum[i], cum[i - 1])
+
+    n = min(len(cum), len(FORECAST_STEPS_3H))
+    max_h = FORECAST_STEPS_3H[n - 1] if n else 0
+    precip_1h = [0.0] * (max_h + 1)
+    prev = 0.0
+    for i in range(n):
+        step_h = FORECAST_STEPS_3H[i]
+        delta = max(0.0, cum[i] - prev)
+        prev = cum[i]
+        if step_h < len(precip_1h):
+            precip_1h[step_h] = round(delta, 2)
+    return precip_1h
+
+
+def _hourly_precip_from_cumulative_mm(cumulative_mm):
+    """Legacy — ponechané pre testy; produkcia používa [_hourly_precip_from_3h_step_deltas]."""
+    from scipy.interpolate import interp1d
+
+    if not cumulative_mm:
+        return []
+    n = len(cumulative_mm)
+    hours_3h = [i * 3 for i in range(n)]
+    max_h = hours_3h[-1]
+    hours_1h = list(range(max_h + 1))
+
+    # Kumulatíva musí byť nerastúca množina
+    cum = [max(0.0, float(v)) for v in cumulative_mm]
+    for i in range(1, len(cum)):
+        cum[i] = max(cum[i], cum[i - 1])
+
+    if n >= 2:
+        interp = interp1d(hours_3h, cum, kind='linear', fill_value='extrapolate')
+        cum_1h = [max(0.0, float(interp(h))) for h in hours_1h]
+    else:
+        cum_1h = [cum[0]] * len(hours_1h)
+
+    for i in range(1, len(cum_1h)):
+        cum_1h[i] = max(cum_1h[i], cum_1h[i - 1])
+
+    precip_1h = [max(0.0, cum_1h[0])]
+    for i in range(1, len(cum_1h)):
+        precip_1h.append(max(0.0, cum_1h[i] - cum_1h[i - 1]))
+    return [round(p, 2) for p in precip_1h]
+
+
+def _hourly_temps_from_3h(temps_3h, num_hours):
+    """Teplota 3h → každá hodina (kubická interpolácia)."""
+    from scipy.interpolate import interp1d
+
+    n = min(len(temps_3h), len(FORECAST_STEPS_3H))
+    if n == 0:
+        return [20.0] * num_hours
+    hours_3h = FORECAST_STEPS_3H[:n]
+    if n >= 4:
+        temp_interp = interp1d(hours_3h, temps_3h[:n], kind='cubic', fill_value='extrapolate')
+        return [round(float(temp_interp(h)), 1) for h in range(num_hours)]
+    return [round(float(t), 1) for t in temps_3h[:num_hours]]
+
+
+def _wind_from_uv_ms(u, v):
+    """Rýchlosť (km/h) a smer (°) z u/v komponentov v m/s."""
+    speed_kmh = math.hypot(float(u), float(v)) * 3.6
+    direction = (270.0 - math.degrees(math.atan2(float(v), float(u)))) % 360.0
+    return round(speed_kmh, 1), round(direction)
+
+
+def _estimate_hourly_wind_kmh(temps, num_hours):
+    """Odhad 10m vetra (km/h) — kým chýbajú u/v z GRIB."""
+    speeds = []
+    directions = []
+    for i in range(num_hours):
+        temp = temps[i] if i < len(temps) else 15.0
+        hour = i % 24
+        base = 5.0 + max(0.0, (temp - 8.0) * 0.35)
+        if 9 <= hour <= 17:
+            base += 3.0
+        elif hour >= 22 or hour <= 4:
+            base -= 1.5
+        speeds.append(round(max(2.0, base), 1))
+        directions.append(int((210 + (i * 23) % 100) % 360))
+    return speeds, directions
+
+
+def _hourly_winds_from_3h(u_3h, v_3h, num_hours):
+    """u/v v krokoch 3h → hodinové rýchlosť a smer."""
+    u_1h = _hourly_temps_from_3h(u_3h, num_hours)
+    v_1h = _hourly_temps_from_3h(v_3h, num_hours)
+    speeds = []
+    directions = []
+    for u, v in zip(u_1h, v_1h):
+        s, d = _wind_from_uv_ms(u, v)
+        speeds.append(s)
+        directions.append(d)
+    return speeds, directions
+
+
+def _sky_wmo_from_cloud_cover(cloud_pct):
+    """WMO 0–3 z total cloud cover (%), rovnaké prahy ako Flutter app."""
+    if cloud_pct is None:
+        return 1
+    c = float(cloud_pct)
+    if c < 12:
+        return 0
+    if c < 28:
+        return 1
+    if c < 62:
+        return 2
+    return 3
+
+
+def _wmo_from_precip_mm(p_mm, cloud_pct=None):
+    p = float(p_mm)
+    if p >= 5.0:
+        return 65
+    if p >= 2.0:
+        return 63
+    if p >= 0.5:
+        return 61
+    if p >= 0.1:
+        return 51
+    return _sky_wmo_from_cloud_cover(cloud_pct)
+
+
+def _weather_code_for_hour(p_mm, cloud_pct):
+    """Uložený WMO — obloha; dážď v appke len pri mm + šanca ≥ 50 %."""
+    if float(p_mm) >= 0.5:
+        return _wmo_from_precip_mm(p_mm, cloud_pct)
+    return _sky_wmo_from_cloud_cover(cloud_pct)
+
+
+def _hourly_cloud_from_3h(tcc_3h, num_hours):
+    """TCC 0–1 v krokoch 3h → percentá pre každú hodinu."""
+    if not tcc_3h:
+        return []
+    pct_3h = [max(0.0, min(100.0, float(v) * 100.0)) for v in tcc_3h]
+    pct_1h = _hourly_temps_from_3h(pct_3h, num_hours)
+    return [max(0.0, min(100.0, round(float(v), 1))) for v in pct_1h]
+
+
 def generate_slovakia_grid():
-    """Generuje grid bodov pokrývajúcich Slovensko"""
-    # Hranice Slovenska (+ malá rezerva)
-    lat_min, lat_max = 47.5, 49.5  # Zemepisná šírka
-    lon_min, lon_max = 16.5, 23.0  # Zemepisná dĺžka
+    """Grid — stredná Európa + Pobaltie (SK, PL, Baltikum vrátane Madony)."""
+    lat_min, lat_max = 47.5, 58.0
+    lon_min, lon_max = 16.5, 28.5
     step = 0.4  # ECMWF 0.4° rozlíšenie
     
     locations = []
@@ -34,7 +184,7 @@ def generate_slovakia_grid():
             lon += step
         lat += step
     
-    print(f"Generated {len(locations)} grid points covering Slovakia")
+    print(f"Generated {len(locations)} grid points (CE + Baltic)")
     return locations
 
 # Generuj grid automaticky
@@ -53,7 +203,7 @@ def download_with_ecmwf_opendata(loc, tmpdir):
         client.retrieve(
             date=0,  # Dnes
             time=0,  # 00z
-            step=[i for i in range(0, 121, 3)],  # 0-120 hodín, každé 3 hodiny
+            step=FORECAST_STEPS_3H,
             stream="oper",
             type="fc",
             param="2t",  # 2m teplota
@@ -66,14 +216,36 @@ def download_with_ecmwf_opendata(loc, tmpdir):
         client.retrieve(
             date=0,
             time=0,
-            step=[i for i in range(0, 121, 3)],
+            step=FORECAST_STEPS_3H,
             stream="oper",
             type="fc",
             param="tp",  # Total precipitation
             target=target_precip,
         )
-        
-        return {'temp': target_temp, 'precip': target_precip}
+
+        target_wind_u = os.path.join(tmpdir, f"{loc['name']}_wind_u.grib2")
+        target_wind_v = os.path.join(tmpdir, f"{loc['name']}_wind_v.grib2")
+        target_tcc = os.path.join(tmpdir, f"{loc['name']}_tcc.grib2")
+        client.retrieve(
+            date=0, time=0, step=FORECAST_STEPS_3H,
+            stream="oper", type="fc", param="10u", target=target_wind_u,
+        )
+        client.retrieve(
+            date=0, time=0, step=FORECAST_STEPS_3H,
+            stream="oper", type="fc", param="10v", target=target_wind_v,
+        )
+        client.retrieve(
+            date=0, time=0, step=FORECAST_STEPS_3H,
+            stream="oper", type="fc", param="tcc", target=target_tcc,
+        )
+
+        return {
+            'temp': target_temp,
+            'precip': target_precip,
+            'wind_u': target_wind_u,
+            'wind_v': target_wind_v,
+            'tcc': target_tcc,
+        }
         
     except Exception as e:
         print(f"  Chyba s ecmwf-opendata: {e}")
@@ -108,11 +280,7 @@ def parse_grib_file(grib_file, param_name, lat, lon):
             if var_name in ds:
                 da = ds[var_name]
                 values = da.sel(latitude=lat, longitude=lon_norm, method='nearest')
-                # Konvertuj z m na mm a potom na Python float
-                tp_mm = [float(v) for v in (values.values * 1000)]
-                # Spočítaj hodinové zrážky z kumulatívnych hodnôt
-                hourly_precip = [0.0] + [max(0.0, tp_mm[i] - tp_mm[i-1]) for i in range(1, len(tp_mm))]
-                return hourly_precip
+                return [max(0.0, float(v) * 1000.0) for v in values.values]
         
         return None
         
@@ -146,8 +314,8 @@ def generate_forecast_for_location(loc, tmpdir):
             print(f"  ✓ Stiahnuté: zrážky")
             data = parse_grib_file(grib_files['precip'], 'precipitation', lat, lon)
             if data is not None:
-                downloaded_data['precipitation'] = data
-                print(f"    Načítaných {len(data)} hodnôt zrážok")
+                downloaded_data['precipitation_cumulative'] = data
+                print(f"    Načítaných {len(data)} kumul. krokov zrážok (3h)")
     
     # Generuj časové značky (40 krokov = 120 hodín v 3h intervaloch)
     now = datetime.utcnow()
@@ -156,50 +324,35 @@ def generate_forecast_for_location(loc, tmpdir):
     
     # Priprav dáta (fallback na simulované ak nemáme reálne)
     temps_3h = downloaded_data.get('temperature', [20.0 + (h % 24 - 12) * 0.5 for h in range(40)])
-    precip_3h = downloaded_data.get('precipitation', [0.0] * 40)
+    precip_cum = downloaded_data.get('precipitation_cumulative')
+    if precip_cum is None:
+        precip_cum = downloaded_data.get('precipitation', [0.0] * 40)
     
-    # Orež na rovnakú dĺžku
-    min_len = min(len(times_3h), len(temps_3h), len(precip_3h), 40)
-    times_3h = times_3h[:min_len]
+    min_len = min(len(temps_3h), len(precip_cum), len(FORECAST_STEPS_3H))
     temps_3h = temps_3h[:min_len]
-    precip_3h = precip_3h[:min_len]
+    precip_cum = precip_cum[:min_len]
     
-    # INTERPOLÁCIA na hodinové intervaly
-    from scipy.interpolate import interp1d
-    import numpy as np
+    max_h = FORECAST_STEPS_3H[min_len - 1] if min_len else 0
+    hours_1h = list(range(max_h + 1))
     
-    # Pre teplotu použijeme kubickú interpoláciu
-    hours_3h = [i * 3 for i in range(min_len)]
-    hours_1h = list(range(hours_3h[-1] + 1))  # 0, 1, 2, 3, ... do konca
-    
-    # Interpolácia teploty
-    if len(temps_3h) >= 4:
-        temp_interp = interp1d(hours_3h, temps_3h, kind='cubic', fill_value='extrapolate')
-        temps_1h = temp_interp(hours_1h).tolist()
-    else:
-        temps_1h = temps_3h  # fallback
-    
-    # Pre zrážky použijeme lineárnu interpoláciu (rozdelíme 3h úhrn rovnomerne)
-    precip_1h = []
-    for i in range(len(precip_3h)):
-        val = precip_3h[i]
-        # Rozdelíme 3-hodinový úhrn na 3 hodiny
-        precip_1h.extend([val / 3.0, val / 3.0, val / 3.0])
-    # Orež na správnu dĺžku
+    temps_1h = _hourly_temps_from_3h(temps_3h, len(hours_1h))
+    precip_1h = _hourly_precip_from_3h_step_deltas(precip_cum)
     precip_1h = precip_1h[:len(hours_1h)]
     
-    # Generuj ISO časy pre hodinové dáta
     times = [(base_date + timedelta(hours=h)).isoformat() for h in hours_1h]
-    temps = [round(float(t), 1) for t in temps_1h]
-    precip = [round(float(p), 2) for p in precip_1h]
+    temps = temps_1h
+    precip = precip_1h
     pressure = [1013.0] * len(times)
-    cloud = [50] * len(times)
+    hourly_weather_code = [
+        _weather_code_for_hour(float(p), None) for p in precip
+    ]
     
     # Denné agregácie (z hodinových dát)
     daily_times = []
     daily_max = []
     daily_min = []
     daily_precip = []
+    daily_weather_code = []
     
     hours_per_day = 24
     num_days = len(times) // hours_per_day
@@ -216,6 +369,14 @@ def generate_forecast_for_location(loc, tmpdir):
             daily_max.append(round(max(day_temps), 1))
             daily_min.append(round(min(day_temps), 1))
             daily_precip.append(round(sum(day_precip), 1))
+            day_codes = hourly_weather_code[start:end]
+            day_precip_codes = [c for c in day_codes if c >= 51]
+            if day_precip_codes:
+                daily_weather_code.append(max(day_precip_codes))
+            elif day_codes:
+                daily_weather_code.append(max(set(day_codes), key=day_codes.count))
+            else:
+                daily_weather_code.append(2)
     
     now = datetime.utcnow()
     
@@ -250,7 +411,7 @@ def generate_forecast_for_location(loc, tmpdir):
             'temperature_2m': [round(float(t), 1) for t in temps],
             'pressure_msl': [round(float(p), 1) for p in pressure],
             'precipitation': [round(float(p), 1) for p in precip],
-            'cloud_cover': [50] * len(times),
+            'weather_code': hourly_weather_code,
             'relative_humidity_2m': [65] * len(times),
             'wind_speed_10m': [5] * len(times),
         },
@@ -259,6 +420,7 @@ def generate_forecast_for_location(loc, tmpdir):
             'temperature_2m_max': daily_max,
             'temperature_2m_min': daily_min,
             'precipitation_sum': daily_precip,
+            'weather_code': daily_weather_code,
         },
         'ecmwf_info': {
             'model_version': 'IFS CY48R1',
@@ -319,9 +481,9 @@ def main():
             'total_points': len(grid_data),
             'bounds': {
                 'lat_min': 47.5,
-                'lat_max': 49.5,
+                'lat_max': 58.0,
                 'lon_min': 16.5,
-                'lon_max': 23.0
+                'lon_max': 28.5
             },
             'locations': grid_data
         }
@@ -339,43 +501,83 @@ def main():
     print("=" * 60)
 
 
-def download_global_grib(tmpdir):
-    """Stiahne global GRIB súbory raz pre všetky lokality"""
+def download_global_grib(tmpdir, dates_to_try=None):
+    """Stiahne global GRIB súbory raz pre všetky lokality."""
+    if dates_to_try is None:
+        dates_to_try = [0, -1, -2]
+
     try:
         from ecmwf.opendata import Client
-        
+
         client = Client(source="ecmwf")
-        
-        # Súbor pre teplotu
         target_temp = os.path.join(tmpdir, "global_temp.grib2")
-        print("  Sťahujem teplotu...")
-        client.retrieve(
-            date=0,
-            time=0,
-            step=[i for i in range(0, 121, 3)],
-            stream="oper",
-            type="fc",
-            param="2t",
-            target=target_temp,
-        )
-        
-        # Súbor pre zrážky
         target_precip = os.path.join(tmpdir, "global_precip.grib2")
-        print("  Sťahujem zrážky...")
-        client.retrieve(
-            date=0,
-            time=0,
-            step=[i for i in range(0, 121, 3)],
-            stream="oper",
-            type="fc",
-            param="tp",
-            target=target_precip,
-        )
-        
-        return {
-            'temp': target_temp,
-            'precip': target_precip
-        }
+
+        for date in dates_to_try:
+            try:
+                print(f"  Sťahujem teplotu (date={date})...")
+                client.retrieve(
+                    date=date,
+                    time=0,
+                    step=FORECAST_STEPS_3H,
+                    stream="oper",
+                    type="fc",
+                    param="2t",
+                    target=target_temp,
+                )
+                print(f"  Sťahujem zrážky (date={date})...")
+                client.retrieve(
+                    date=date,
+                    time=0,
+                    step=FORECAST_STEPS_3H,
+                    stream="oper",
+                    type="fc",
+                    param="tp",
+                    target=target_precip,
+                )
+                target_wind_u = os.path.join(tmpdir, "global_wind_u.grib2")
+                target_wind_v = os.path.join(tmpdir, "global_wind_v.grib2")
+                print(f"  Sťahujem vietor u/v (date={date})...")
+                client.retrieve(
+                    date=date,
+                    time=0,
+                    step=FORECAST_STEPS_3H,
+                    stream="oper",
+                    type="fc",
+                    param="10u",
+                    target=target_wind_u,
+                )
+                client.retrieve(
+                    date=date,
+                    time=0,
+                    step=FORECAST_STEPS_3H,
+                    stream="oper",
+                    type="fc",
+                    param="10v",
+                    target=target_wind_v,
+                )
+                target_tcc = os.path.join(tmpdir, "global_tcc.grib2")
+                print(f"  Sťahujem oblačnosť tcc (date={date})...")
+                client.retrieve(
+                    date=date,
+                    time=0,
+                    step=FORECAST_STEPS_3H,
+                    stream="oper",
+                    type="fc",
+                    param="tcc",
+                    target=target_tcc,
+                )
+                return {
+                    'temp': target_temp,
+                    'precip': target_precip,
+                    'wind_u': target_wind_u,
+                    'wind_v': target_wind_v,
+                    'tcc': target_tcc,
+                }
+            except Exception as e:
+                print(f"  GRIB date={date} zlyhal: {e}")
+                continue
+        return None
     except Exception as e:
         print(f"Chyba pri sťahovaní: {e}")
         return None
@@ -423,120 +625,118 @@ def generate_forecast_for_location_with_grib(loc, grib_files):
                                 filter_by_keys={'type': 'fc', 'stepType': 'accum'})
             lon_norm = lon % 360
             point = ds.sel(latitude=lat, longitude=lon_norm, method='nearest')
-            precip = [float(v) for v in point.tp.values]
-            # Konvertuj z kumulatívnych na 3-hodinové úhrny
-            precip_3h = [precip[0]] + [precip[i] - precip[i-1] for i in range(1, len(precip))]
-            downloaded_data['precipitation'] = precip_3h
+            precip_m = [float(v) for v in point.tp.values]
+            precip_cum_mm = [max(0.0, v * 1000.0) for v in precip_m]
+            downloaded_data['precipitation_cumulative'] = precip_cum_mm
+            print(
+                f"    Zrážky kumul. mm: max={max(precip_cum_mm):.2f}, "
+                f"krokov={len(precip_cum_mm)} (3h → 1h)"
+            )
             ds.close()  # DÔLEŽITÉ: zatvor dataset!
         except Exception as e:
             print(f"    Chyba zrážky pre {loc['name']}: {e}")
+    
+    if os.path.exists(grib_files.get('wind_u', '')):
+        try:
+            ds = xr.open_dataset(
+                grib_files['wind_u'],
+                engine='cfgrib',
+                filter_by_keys={'type': 'fc', 'stepType': 'instant'},
+            )
+            lon_norm = lon % 360
+            point = ds.sel(latitude=lat, longitude=lon_norm, method='nearest')
+            var = 'u10' if 'u10' in ds else '10u'
+            downloaded_data['wind_u'] = [float(v) for v in point[var].values]
+            ds.close()
+        except Exception as e:
+            print(f"    Chyba vetor u pre {loc['name']}: {e}")
+
+    if os.path.exists(grib_files.get('wind_v', '')):
+        try:
+            ds = xr.open_dataset(
+                grib_files['wind_v'],
+                engine='cfgrib',
+                filter_by_keys={'type': 'fc', 'stepType': 'instant'},
+            )
+            lon_norm = lon % 360
+            point = ds.sel(latitude=lat, longitude=lon_norm, method='nearest')
+            var = 'v10' if 'v10' in ds else '10v'
+            downloaded_data['wind_v'] = [float(v) for v in point[var].values]
+            ds.close()
+        except Exception as e:
+            print(f"    Chyba vetor v pre {loc['name']}: {e}")
+
+    if os.path.exists(grib_files.get('tcc', '')):
+        try:
+            ds = xr.open_dataset(
+                grib_files['tcc'],
+                engine='cfgrib',
+                filter_by_keys={'type': 'fc', 'stepType': 'instant'},
+            )
+            lon_norm = lon % 360
+            point = ds.sel(latitude=lat, longitude=lon_norm, method='nearest')
+            var = 'tcc' if 'tcc' in ds else next(iter(ds.data_vars))
+            downloaded_data['tcc'] = [float(v) for v in point[var].values]
+            print(
+                f"    TCC: min={min(downloaded_data['tcc']):.2f}, "
+                f"max={max(downloaded_data['tcc']):.2f}"
+            )
+            ds.close()
+        except Exception as e:
+            print(f"    Chyba oblačnosť tcc pre {loc['name']}: {e}")
     
     # Generuj hodinovú predpoveď s interpoláciou (rovnaká logika ako predtým)
     return create_hourly_forecast(loc, downloaded_data)
 
 
 def create_hourly_forecast(loc, downloaded_data):
-    """Vytvorí hodinovú predpoveď z 3-hodinových dát"""
-    from scipy.interpolate import interp1d
-    import numpy as np
-    
+    """Vytvorí hodinovú predpoveď — teplota + zrážky po 1 h (z 3h GRIB krokov)."""
     lat, lon = loc['lat'], loc['lon']
     
-    # Základné dáta
     now = datetime.utcnow()
     base_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # 3-hodinové dáta z ECMWF
-    temps_3h = downloaded_data.get('temperature', [20.0] * 41)
-    precip_3h = downloaded_data.get('precipitation', [0.0] * 41)
+    temps_3h = downloaded_data.get('temperature', [20.0] * len(FORECAST_STEPS_3H))
+    precip_cum = downloaded_data.get('precipitation_cumulative')
+    if precip_cum is None:
+        # Spätná kompatibilita: staré JSON mali 3h úhrny
+        legacy = downloaded_data.get('precipitation', [0.0] * len(FORECAST_STEPS_3H))
+        precip_cum = [0.0]
+        for val in legacy:
+            precip_cum.append(precip_cum[-1] + max(0.0, float(val)))
+        precip_cum = precip_cum[1:]
     
-    min_len = min(len(temps_3h), len(precip_3h), 41)
+    min_len = min(len(temps_3h), len(precip_cum), len(FORECAST_STEPS_3H))
     temps_3h = temps_3h[:min_len]
-    precip_3h = precip_3h[:min_len]
+    precip_cum = precip_cum[:min_len]
     
-    # INTERPOLÁCIA na hodinové intervaly
-    hours_3h = [i * 3 for i in range(min_len)]
-    hours_1h = list(range(hours_3h[-1] + 1))
+    max_h = FORECAST_STEPS_3H[min_len - 1] if min_len else 0
+    hours_1h = list(range(max_h + 1))
     
-    # Teplota - kubická interpolácia
-    if len(temps_3h) >= 4:
-        temp_interp = interp1d(hours_3h, temps_3h, kind='cubic', fill_value='extrapolate')
-        temps_1h = temp_interp(hours_1h).tolist()
-    else:
-        temps_1h = temps_3h
+    temps_1h = _hourly_temps_from_3h(temps_3h, len(hours_1h))
+    precip_1h = _hourly_precip_from_3h_step_deltas(precip_cum)[:len(hours_1h)]
     
-    # Zrážky - rozdelenie 3h úhrnu na 3 hodiny
-    precip_1h = []
-    for val in precip_3h:
-        precip_1h.extend([val / 3.0, val / 3.0, val / 3.0])
-    precip_1h = precip_1h[:len(hours_1h)]
-    
-    # ISO časy
     times = [(base_date + timedelta(hours=h)).isoformat() for h in hours_1h]
-    temps = [round(float(t), 1) for t in temps_1h]
-    precip = [round(float(p), 2) for p in precip_1h]
-    
-    # Generuj weather_code a cloud_cover podľa zrážok (WMO kódy)
-    # 0=jasno, 1=prevažne jasno, 2=polooblačno, 3=zamračené, 51=mrholenie, 61=dážď, 95=búrka
+    temps = temps_1h
+    precip = precip_1h
+
+    tcc_3h = downloaded_data.get('tcc')
+    hourly_cloud_cover = _hourly_cloud_from_3h(tcc_3h, len(hours_1h))
+
     hourly_weather_code = []
-    hourly_cloud_cover = []
-    hourly_precip_prob = []
-    
     for i, p in enumerate(precip):
-        # Pravdepodobnosť zrážok podľa množstva
-        if p > 5.0:
-            prob = 90  # Silné zrážky = vysoká pravdepodobnosť
-            code = 65   # Silný dážď
-        elif p > 2.0:
-            prob = 75
-            code = 63   # Mierny dážď
-        elif p > 0.5:
-            prob = 60
-            code = 61   # Slabý dážď
-        elif p > 0.1:
-            prob = 40
-            code = 51   # Mrholenie
-        elif p > 0.0:
-            prob = 25
-            code = 3    # Zamračené (možnosť slabých zrážok)
-        else:
-            prob = 0
-            # Bez zrážok - podľa času dňa a teploty odhadni oblačnosť
-            hour_of_day = (i % 24)
-            temp = temps[i] if i < len(temps) else 15.0
-            
-            # Noc + jasno = jasno (0), Deň + jasno = jasno (0)
-            # Jednoduchý algoritmus: každý 5. deň iná oblačnosť pre variabilitu
-            if (i // 24) % 5 == 0:
-                code = 0  # Jasno
-                cloud = 10
-            elif (i // 24) % 5 == 1:
-                code = 1  # Prevažne jasno
-                cloud = 25
-            elif (i // 24) % 5 == 2:
-                code = 2  # Polooblačno
-                cloud = 50
-            else:
-                code = 3  # Zamračené
-                cloud = 75
-        
-        # Oblačnosť podľa weather code a zrážok
-        if code >= 61:  # Dážď
-            cloud = 85 + min(int(p * 3), 14)  # 85-99%
-        elif code == 51:  # Mrholenie
-            cloud = 70 + min(int(p * 10), 29)
-        elif code == 3:  # Zamračené
-            cloud = 60 + min(int(p * 5), 39)
-        elif code == 2:  # Polooblačno
-            cloud = 40 + min(int(p * 5), 19)
-        elif code == 1:  # Prevažne jasno
-            cloud = 15 + min(int(p * 5), 14)
-        else:  # Jasno
-            cloud = max(0, 5 - int(p * 2))
-        
-        hourly_weather_code.append(code)
-        hourly_cloud_cover.append(min(cloud, 100))
-        hourly_precip_prob.append(min(prob, 100))
+        cloud = hourly_cloud_cover[i] if i < len(hourly_cloud_cover) else None
+        hourly_weather_code.append(_weather_code_for_hour(float(p), cloud))
+    
+    u_3h = downloaded_data.get('wind_u')
+    v_3h = downloaded_data.get('wind_v')
+    if u_3h and v_3h:
+        w_len = min(len(u_3h), len(v_3h), min_len)
+        wind_speed_1h, wind_dir_1h = _hourly_winds_from_3h(
+            u_3h[:w_len], v_3h[:w_len], len(hours_1h)
+        )
+    else:
+        wind_speed_1h, wind_dir_1h = _estimate_hourly_wind_kmh(temps, len(hours_1h))
     
     # Denné agregácie
     daily_times, daily_max, daily_min, daily_precip = [], [], [], []
@@ -571,6 +771,8 @@ def create_hourly_forecast(loc, downloaded_data):
         'source': 'ECMWF IFS 0.4° (real GRIB data)',
         'model': 'IFS 0.4°',
         'resolution': '0.4°',
+        'temporal_resolution': '1h (from 3h GRIB steps)',
+        'precipitation_probability_available': False,
         'date': now.strftime('%Y%m%d'),
         'cycle': '00z',
         'fetched_at': now.isoformat(),
@@ -578,7 +780,8 @@ def create_hourly_forecast(loc, downloaded_data):
             'time': times[0] if times else now.isoformat(),
             'temperature_2m': round(float(temps[0]), 1) if temps else 20.0,
             'surface_pressure': 1013.0,
-            'wind_speed_10m': 5,
+            'wind_speed_10m': wind_speed_1h[0] if wind_speed_1h else 5,
+            'wind_direction_10m': wind_dir_1h[0] if wind_dir_1h else 180,
             'precipitation': round(float(precip[0]), 1) if precip else 0.0,
             'weather_code': hourly_weather_code[0] if hourly_weather_code else 0,
             'cloud_cover': hourly_cloud_cover[0] if hourly_cloud_cover else 50,
@@ -590,7 +793,8 @@ def create_hourly_forecast(loc, downloaded_data):
             'precipitation': precip,
             'weather_code': hourly_weather_code,
             'cloud_cover': hourly_cloud_cover,
-            'precipitation_probability': hourly_precip_prob,
+            'wind_speed_10m': wind_speed_1h,
+            'wind_direction_10m': wind_dir_1h,
         },
         'daily': {
             'time': daily_times,

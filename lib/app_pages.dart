@@ -195,7 +195,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                   _fmtTime(t),
                   style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
                 ),
-                trailing: selected ? const Icon(Icons.check, color: Color(0xFF3498DB)) : null,
+                trailing: selected ? const Icon(Icons.check, color: _kChartLineBlue) : null,
                 onTap: () => Navigator.of(context).pop(t),
               );
             }).toList(),
@@ -399,13 +399,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-              Container(
-                margin: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF3A4551),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color.fromRGBO(255, 255, 255, 0.2)),
-                ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
                 child: Column(
                   children: [
                     Padding(
@@ -415,7 +410,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                         children: [
                           const Padding(
                             padding: EdgeInsets.only(top: 2),
-                            child: Icon(Icons.my_location, color: Color(0xFF3498DB)),
+                            child: Icon(Icons.my_location, color: _kChartLineBlue),
                           ),
                           const SizedBox(width: 12),
                           Expanded(
@@ -424,14 +419,13 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                               children: [
                                 const Text(
                                   'Moja lokalita',
-                                  style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                                  style: TextStyle(color: _kChartTextPrimary, fontSize: 16, fontWeight: FontWeight.w500),
                                 ),
                                 const SizedBox(height: 8),
                                 Text(
                                   'Keď je táto funkcia zapnutá, aplikácia pri spustení a po potiahnutí nadol automaticky získa vašu aktuálnu GPS polohu. Ak je vypnutá, používa sa iba posledná vybraná poloha.',
-                                  style: TextStyle(
-                                    color: Colors.white.withAlpha(179),
-                                    fontSize: 14,
+                                  style: _chartCaptionStyle(size: 14).copyWith(
+                                    color: _kChartTextSecondary,
                                     height: 1.4,
                                   ),
                                 ),
@@ -446,8 +440,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                               onChanged: (value) async {
                                 await _saveMyLocationEnabled(value);
                               },
-                              activeThumbColor: const Color(0xFF3498DB),
-                              activeTrackColor: const Color(0xFF3498DB).withAlpha(128),
+                              activeThumbColor: _kChartLineBlue,
+                              activeTrackColor: _kChartLineBlue.withAlpha(128),
                             ),
                           ),
                         ],
@@ -457,28 +451,23 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                 ),
               ),
 
-              Container(
-                margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF3A4551),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color.fromRGBO(255, 255, 255, 0.2)),
-                ),
+              _chartSectionDivider(),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Padding(
-                      padding: EdgeInsets.fromLTRB(16, 14, 16, 8),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
                       child: Row(
                         children: [
-                          Icon(Icons.widgets_outlined, color: Color(0xFF3498DB), size: 22),
-                          SizedBox(width: 12),
+                          const Icon(Icons.widgets_outlined, color: _kChartLineBlue, size: 22),
+                          const SizedBox(width: 12),
                           Expanded(
                             child: Text(
                               'Aktualizácia widgetov',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 16,
+                              style: _chartLabelStyle(size: 16).copyWith(
+                                color: _kChartTextPrimary,
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
@@ -490,9 +479,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
                       child: Text(
                         'Častejšie intervaly znamenajú presnejšie údaje na domovskej obrazovke, ale vyššiu spotrebu batérie.',
-                        style: TextStyle(
-                          color: Colors.white.withAlpha(165),
-                          fontSize: 13,
+                        style: _chartCaptionStyle(size: 13).copyWith(
+                          color: _kChartTextSecondary,
                           height: 1.35,
                         ),
                       ),
@@ -532,13 +520,9 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                 ),
               ),
 
-              Container(
-                margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF3A4551),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color.fromRGBO(255, 255, 255, 0.2)),
-                ),
+              _chartSectionDivider(),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -546,21 +530,21 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
                       child: Row(
                         children: <Widget>[
-                          const Icon(Icons.air_rounded, color: Color(0xFF3498DB)),
+                          const Icon(Icons.air_rounded, color: _kChartLineBlue),
                           const SizedBox(width: 12),
-                          const Expanded(
+                          Expanded(
                             child: Text(
                               'Jednotky vetra',
-                              style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                              style: _chartLabelStyle(size: 16).copyWith(
+                                color: _kChartTextPrimary,
+                                fontWeight: FontWeight.w500,
+                              ),
                             ),
                           ),
                           const SizedBox(width: 12),
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF3A4551),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
+                            decoration: _chartStatTileDecoration(),
                             child: Text(
                               _selectedWindUnit.symbol,
                               style: const TextStyle(
@@ -600,14 +584,13 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                         ),
                         title: Text(
                           unit.symbol,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
+                          style: _chartLabelStyle(size: 16).copyWith(
+                            color: _kChartTextPrimary,
                             fontWeight: FontWeight.w500,
                           ),
                         ),
                         trailing: isSelected
-                            ? const Icon(Icons.check, color: Color(0xFF3498DB), size: 20)
+                            ? const Icon(Icons.check, color: _kChartLineBlue, size: 20)
                             : null,
                         onTap: () async {
                           await _saveWindUnit(unit);
@@ -618,29 +601,24 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                 ),
               ),
 
-              if (!kIsWeb && Platform.isAndroid)
-                Container(
-                  margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF3A4551),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color.fromRGBO(255, 255, 255, 0.2)),
-                  ),
+              if (!kIsWeb && Platform.isAndroid) ...[
+                _chartSectionDivider(),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Padding(
-                        padding: EdgeInsets.fromLTRB(16, 14, 16, 8),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
                         child: Row(
                           children: [
-                            Icon(Icons.battery_saver_outlined, color: Color(0xFF3498DB), size: 22),
-                            SizedBox(width: 12),
+                            const Icon(Icons.battery_saver_outlined, color: _kChartLineBlue, size: 22),
+                            const SizedBox(width: 12),
                             Expanded(
                               child: Text(
                                 'Upozornenia a úspora batérie',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 16,
+                                style: _chartLabelStyle(size: 16).copyWith(
+                                  color: _kChartTextPrimary,
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
@@ -652,9 +630,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                         padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
                         child: Text(
                           'Ak systém aplikáciu príliš šetrí v pozadí, naplánované upozornenia nemusia prísť včas. Tu môžete povoliť výnimku (bez obmedzení batérie) pre Meteo Počasie.',
-                          style: TextStyle(
-                            color: Colors.white.withAlpha(165),
-                            fontSize: 13,
+                          style: _chartCaptionStyle(size: 13).copyWith(
+                            color: _kChartTextSecondary,
                             height: 1.35,
                           ),
                         ),
@@ -665,7 +642,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                           width: double.infinity,
                           child: FilledButton(
                             style: FilledButton.styleFrom(
-                              backgroundColor: const Color(0xFF3498DB),
+                              backgroundColor: _kChartLineBlue,
                               foregroundColor: Colors.white,
                               padding: const EdgeInsets.symmetric(vertical: 12),
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -686,14 +663,11 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                     ],
                   ),
                 ),
+              ],
 
-              Container(
-                margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF3A4551),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color.fromRGBO(255, 255, 255, 0.2)),
-                ),
+              _chartSectionDivider(),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
                 child: !_alertSettingsLoaded
                     ? const Padding(
                         padding: EdgeInsets.symmetric(vertical: 16),
@@ -703,7 +677,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                             height: 20,
                             child: CircularProgressIndicator(
                               strokeWidth: 2.2,
-                              color: Color(0xFF3498DB),
+                              color: _kChartLineBlue,
                             ),
                           ),
                         ),
@@ -712,17 +686,16 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Padding(
-                      padding: EdgeInsets.fromLTRB(16, 14, 16, 10),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
                       child: Row(
                         children: <Widget>[
-                          Icon(Icons.warning_amber_rounded, color: Color(0xFF3498DB), size: 20),
-                          SizedBox(width: 12),
+                          const Icon(Icons.warning_amber_rounded, color: _kChartLineBlue, size: 20),
+                          const SizedBox(width: 12),
                           Text(
                             'Typy výstrah',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 16,
+                            style: _chartLabelStyle(size: 16).copyWith(
+                              color: _kChartTextPrimary,
                               fontWeight: FontWeight.w500,
                             ),
                           ),
@@ -738,13 +711,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                             Container(
                               width: double.infinity,
                               padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF3A4551),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: const Color(0xFF5B6777).withAlpha(100),
-                                ),
-                              ),
+                              decoration: _chartStatTileDecoration(radius: 10),
                               child: const Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
@@ -811,7 +778,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                             padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
                             child: Row(
                               children: [
-                                Icon(setting.icon, color: const Color(0xFF3498DB), size: 20),
+                                Icon(setting.icon, color: _kChartLineBlue, size: 20),
                                 const SizedBox(width: 12),
                                 Expanded(
                                   child: Column(
@@ -839,10 +806,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                                           onTap: () => _pickSummaryTime(evening: isEveningSummary),
                                           child: Container(
                                             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                            decoration: BoxDecoration(
-                                              color: const Color(0xFF3A4551),
-                                              borderRadius: BorderRadius.circular(8),
-                                            ),
+                                            decoration: _chartStatTileDecoration(),
                                             child: Text(
                                               'Každý deň o ${_fmtTime(isDailySummary ? _dailySummaryTime : _eveningSummaryTime)}',
                                               style: TextStyle(
@@ -862,8 +826,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                                   onChanged: (value) async {
                                     await _saveAlertTypeEnabled(setting, value);
                                   },
-                                  activeThumbColor: const Color(0xFF3498DB),
-                                  activeTrackColor: const Color(0xFF3498DB).withAlpha(128),
+                                  activeThumbColor: _kChartLineBlue,
+                                  activeTrackColor: _kChartLineBlue.withAlpha(128),
                                 ),
                               ],
                             ),
@@ -907,10 +871,10 @@ class _WidgetPresetMinuteButton extends StatelessWidget {
           alignment: Alignment.center,
           padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
           decoration: BoxDecoration(
-            color: selected ? const Color(0xFF3498DB) : Colors.transparent,
+            color: selected ? _kChartLineBlue : Colors.transparent,
             borderRadius: BorderRadius.circular(20),
             border: Border.all(
-              color: selected ? const Color(0xFF3498DB) : Colors.white.withAlpha(77),
+              color: selected ? _kChartLineBlue : Colors.white.withValues(alpha: 0.28),
               width: 1.2,
             ),
           ),
@@ -1072,7 +1036,7 @@ class _WebcamDetailPageState extends State<_WebcamDetailPage> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.videocam_rounded, size: 48, color: Color(0xFF3498DB)),
+                    const Icon(Icons.videocam_rounded, size: 48, color: _kChartLineBlue),
                     const SizedBox(height: 16),
                     const Text(
                       'Informácie o kamere',
@@ -1504,7 +1468,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                           ? null
                           : _checkInternetAndContinue,
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF3498DB),
+                        backgroundColor: _kChartLineBlue,
                         padding: const EdgeInsets.symmetric(
                             vertical: 14, horizontal: 20),
                         shape: RoundedRectangleBorder(
@@ -1736,7 +1700,7 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
                             ));
                           },
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF3498DB),
+                            backgroundColor: _kChartLineBlue,
                             foregroundColor: Colors.white,
                             padding: const EdgeInsets.symmetric(vertical: 16),
                             shape: RoundedRectangleBorder(
@@ -1795,7 +1759,7 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
             width: 32,
             height: 32,
             decoration: BoxDecoration(
-              color: const Color(0xFF3498DB),
+              color: _kChartLineBlue,
               shape: BoxShape.circle,
               boxShadow: [
                 BoxShadow(
@@ -1907,7 +1871,7 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
                     child: ElevatedButton(
                       onPressed: _isProcessing ? null : _enableNotifications,
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF3498DB),
+                        backgroundColor: _kChartLineBlue,
                         padding: const EdgeInsets.symmetric(
                             vertical: 16, horizontal: 20),
                         shape: RoundedRectangleBorder(
@@ -1994,12 +1958,17 @@ class PollenForecastPage extends StatelessWidget {
 
   Color _getPollenColor(int level) {
     switch (level) {
-      case 1: return const Color(0xFFA6D05E); 
-      case 2: return const Color(0xFFE9B54A); 
-      case 3: return const Color(0xFFE6743A); 
-      case 4: return const Color(0xFFB5235A); 
+      case 1:
+        return _kChartLineBlue;
+      case 2:
+        return _chartTemperatureColor(20);
+      case 3:
+        return _chartTemperatureColor(30);
+      case 4:
+        return _chartTemperatureColor(40);
       case 0:
-      default: return Colors.white30; 
+      default:
+        return _kChartTextMuted;
     }
   }
 
@@ -2086,41 +2055,40 @@ class PollenForecastPage extends StatelessWidget {
             type: MaterialType.transparency,
             child: Container(
               margin: const EdgeInsets.symmetric(horizontal: 24),
-              decoration: BoxDecoration(
-                color: const Color(0xFF2A3848),
-                borderRadius: BorderRadius.circular(20),
-              ),
+              decoration: _chartStatTileDecoration(radius: 16),
               child: Padding(
                 padding: const EdgeInsets.all(20.0),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.spa_outlined, size: 48, color: Color(0xFF3498DB)),
+                    const Icon(Icons.spa_outlined, size: 48, color: _kChartLineBlue),
                     const SizedBox(height: 16),
-                    const Text(
+                    Text(
                       'Legenda úrovne peľu',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
+                      style: _chartLabelStyle(size: 18, weight: FontWeight.w700).copyWith(
+                        color: _kChartTextPrimary,
                       ),
                     ),
                     const SizedBox(height: 24),
-                    _buildLegendRow('Žiadna', Colors.white30),
-                    _buildLegendRow('Nízka', const Color(0xFFA6D05E)),
-                    _buildLegendRow('Stredná', const Color(0xFFE9B54A)),
-                    _buildLegendRow('Vysoká', const Color(0xFFE6743A)),
-                    _buildLegendRow('Veľmi vysoká', const Color(0xFFB5235A)),
+                    _buildLegendRow('Žiadna', _kChartTextMuted),
+                    _buildLegendRow('Nízka', _getPollenColor(1)),
+                    _buildLegendRow('Stredná', _getPollenColor(2)),
+                    _buildLegendRow('Vysoká', _getPollenColor(3)),
+                    _buildLegendRow('Veľmi vysoká', _getPollenColor(4)),
                     const SizedBox(height: 24),
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
                         onPressed: () => Navigator.of(context).pop(),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF34495E),
+                          backgroundColor: Color.alphaBlend(
+                            Colors.white.withValues(alpha: 0.12),
+                            kAmbientBlendColor,
+                          ),
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(10),
+                            side: BorderSide(color: Colors.white.withValues(alpha: 0.28)),
                           ),
                           elevation: 0,
                           shadowColor: Colors.transparent,
@@ -2128,7 +2096,12 @@ class PollenForecastPage extends StatelessWidget {
                         ).copyWith(
                           overlayColor: WidgetStateProperty.all(Colors.transparent),
                         ),
-                        child: const Text('Zavrieť', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
+                        child: Text(
+                          'Zavrieť',
+                          style: _chartLabelStyle(size: 14).copyWith(
+                            color: _kChartTextSecondary,
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -2157,7 +2130,7 @@ class PollenForecastPage extends StatelessWidget {
           const SizedBox(width: 16),
           Text(
             label,
-            style: const TextStyle(fontSize: 16, color: Colors.white, fontWeight: FontWeight.w500),
+            style: _chartLabelStyle(size: 16).copyWith(color: _kChartTextPrimary),
           ),
         ],
       ),
@@ -2170,40 +2143,47 @@ class PollenForecastPage extends StatelessWidget {
     final label = _getPollenLabel(level);
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10.0),
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: Row(
         children: [
           Container(
             width: 36,
             height: 36,
             decoration: BoxDecoration(
-              color: level > 0 ? color.withAlpha(38) : Colors.white.withAlpha(12),
+              color: Colors.white.withValues(alpha: level > 0 ? 0.1 : 0.06),
               shape: BoxShape.circle,
+              border: Border.all(
+                color: level > 0
+                    ? color.withValues(alpha: 0.5)
+                    : Colors.white.withValues(alpha: 0.2),
+              ),
             ),
             child: Center(
               child: Icon(
-                Icons.eco_rounded, 
-                size: 18, 
-                color: level > 0 ? color : Colors.white38
+                Icons.eco_rounded,
+                size: 18,
+                color: level > 0 ? color : _kChartTextMuted,
               ),
             ),
           ),
-          const SizedBox(width: 16),
+          const SizedBox(width: 14),
           Expanded(
             child: Text(
-              name, 
-              style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500)
+              name,
+              style: _chartLabelStyle(size: 16).copyWith(
+                color: _kChartTextPrimary,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
           Text(
             label,
-            style: TextStyle(
-              color: level > 0 ? color : Colors.white54,
-              fontSize: 14,
+            style: _chartLabelStyle(size: 14).copyWith(
+              color: level > 0 ? color : _kChartTextMuted,
               fontWeight: FontWeight.w700,
             ),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 12),
           Row(
             children: List.generate(4, (index) {
               return Container(
@@ -2211,66 +2191,53 @@ class PollenForecastPage extends StatelessWidget {
                 height: 5,
                 margin: const EdgeInsets.only(left: 3),
                 decoration: BoxDecoration(
-                  color: index < level ? color : Colors.white.withAlpha(20),
+                  color: index < level
+                      ? color
+                      : Colors.white.withValues(alpha: 0.07),
                   borderRadius: BorderRadius.circular(2),
                 ),
               );
             }),
-          )
+          ),
         ],
       ),
     );
   }
 
   Widget _buildDayCard(DailyPollen dayData) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      decoration: BoxDecoration(
-        color: const Color(0x15FFFFFF), 
-        border: Border.all(color: const Color(0x28FFFFFF)), 
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(38),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.only(bottom: 12),
-              decoration: BoxDecoration(
-                border: Border(bottom: BorderSide(color: Colors.white.withAlpha(38), width: 1))
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.calendar_today_rounded, size: 18, color: Color(0xFF81D4FA)),
-                  const SizedBox(width: 10),
-                  Text(
-                    _formatPollenDate(dayData.dateStr),
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Row(
+              children: [
+                const Icon(Icons.calendar_today_rounded, size: 18, color: _kChartIconBlue),
+                const SizedBox(width: 10),
+                Text(
+                  _formatPollenDate(dayData.dateStr),
+                  style: _chartLabelStyle(size: 16).copyWith(
+                    color: _kChartTextPrimary,
+                    fontWeight: FontWeight.w700,
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-            _buildAllergenRow('Breza', dayData.birch),
-            _buildAllergenRow('Olša', dayData.alder),
-            _buildAllergenRow('Tráva', dayData.grass),
-            _buildAllergenRow('Palina', dayData.mugwort),
-            _buildAllergenRow('Ambrózia', dayData.ragweed),
-            _buildAllergenRow('Oliva', dayData.olive),
-            _buildAllergenRow('Lieska', null),
-            _buildAllergenRow('Dub', null),
-            _buildAllergenRow('Jaseň', null),
-            _buildAllergenRow('Skorocel', null),
-          ],
-        ),
+          ),
+          _buildAllergenRow('Breza', dayData.birch),
+          _buildAllergenRow('Olša', dayData.alder),
+          _buildAllergenRow('Tráva', dayData.grass),
+          _buildAllergenRow('Palina', dayData.mugwort),
+          _buildAllergenRow('Ambrózia', dayData.ragweed),
+          _buildAllergenRow('Oliva', dayData.olive),
+          _buildAllergenRow('Lieska', null),
+          _buildAllergenRow('Dub', null),
+          _buildAllergenRow('Jaseň', null),
+          _buildAllergenRow('Skorocel', null),
+          _chartSectionDivider(),
+        ],
       ),
     );
   }
@@ -2290,29 +2257,30 @@ class PollenForecastPage extends StatelessWidget {
             height: 36,
             margin: const EdgeInsets.only(top: 8, bottom: 8, right: 12, left: 4),
             decoration: BoxDecoration(
-              color: const Color.fromRGBO(255, 255, 255, 0.1),
+              color: Colors.white.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
             ),
-            child: const Center(child: Icon(Icons.info_outline, size: 20, color: Colors.white)),
+            child: const Center(
+              child: Icon(Icons.info_outline, size: 20, color: Colors.white),
+            ),
           ),
         ),
       ],
       body: hasData
           ? ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+              padding: const EdgeInsets.fromLTRB(4, 12, 4, 16),
               itemCount: dailyPollen.length + 1,
               itemBuilder: (context, index) {
                 if (index == 0) {
                   return Padding(
-                    padding: const EdgeInsets.only(bottom: 24, left: 4),
+                    padding: const EdgeInsets.only(bottom: 16, left: 8, right: 8),
                     child: Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
                         city.name,
-                        style: const TextStyle(
-                          fontSize: 18,
+                        style: _chartValueStyle(size: 18).copyWith(
                           fontWeight: FontWeight.w600,
-                          color: Colors.white,
                           letterSpacing: 0.2,
                         ),
                       ),
@@ -2328,23 +2296,28 @@ class PollenForecastPage extends StatelessWidget {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.spa_outlined, size: 64, color: Colors.white.withAlpha(128)),
+                    Icon(
+                      Icons.spa_outlined,
+                      size: 64,
+                      color: _kChartTextMuted.withValues(alpha: 0.85),
+                    ),
                     const SizedBox(height: 24),
                     Text(
                       city.name,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 18,
+                      style: _chartValueStyle(size: 18).copyWith(
                         fontWeight: FontWeight.w600,
-                        color: Colors.white,
                         letterSpacing: 0.2,
                       ),
                     ),
                     const SizedBox(height: 16),
-                    const Text(
+                    Text(
                       'Pre túto lokalitu nie sú bohužiaľ dostupné údaje o peľoch.',
                       textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white70, fontSize: 16, height: 1.5),
+                      style: _chartCaptionStyle(size: 16).copyWith(
+                        color: _kChartTextSecondary,
+                        height: 1.5,
+                      ),
                     ),
                   ],
                 ),
@@ -2502,7 +2475,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
               height: 36,
               margin: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: _editMode ? const Color(0xFF3498DB) : const Color.fromRGBO(255, 255, 255, 0.1),
+                color: _editMode ? _kChartLineBlue : const Color.fromRGBO(255, 255, 255, 0.1),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: const Center(
@@ -2562,7 +2535,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
             const LinearProgressIndicator(
               minHeight: 2,
               backgroundColor: Colors.transparent,
-              valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF3498DB)),
+              valueColor: AlwaysStoppedAnimation<Color>(_kChartLineBlue),
             ),
           Expanded(
             child: _forecastGlassBody(
@@ -2610,10 +2583,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
               final c = _searchHistory[i];
               return Container(
                 margin: const EdgeInsets.only(bottom: 6),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF3A4551),
-                  borderRadius: BorderRadius.circular(10),
-                ),
+                decoration: _chartStatTileDecoration(radius: 10),
                 child: Material(
                   color: Colors.transparent,
                   child: InkWell(
@@ -2630,10 +2600,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
                           Container(
                             width: 36,
                             height: 36,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF3A4551),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
+                            decoration: _chartStatTileDecoration(),
                             child: const Center(
                               child: Icon(Icons.history, size: 16, color: Colors.white),
                             ),
@@ -2713,10 +2680,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
 
         return Container(
           margin: const EdgeInsets.only(bottom: 6),
-          decoration: BoxDecoration(
-            color: const Color(0xFF3A4551),
-            borderRadius: BorderRadius.circular(10),
-          ),
+          decoration: _chartStatTileDecoration(radius: 10),
           child: Material(
             color: Colors.transparent,
             child: InkWell(
@@ -3107,7 +3071,7 @@ class OfflineScreen extends StatelessWidget {
                 child: ElevatedButton(
                   onPressed: isRetrying ? null : onRetry,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF3498DB),
+                    backgroundColor: _kChartLineBlue,
                     padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 32),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -3219,7 +3183,7 @@ class FullscreenRadarPage extends StatelessWidget {
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                const Icon(Icons.info_outline, size: 48, color: Color(0xFF3498DB)),
+                                const Icon(Icons.info_outline, size: 48, color: _kChartLineBlue),
                                 const SizedBox(height: 16),
                                 const Text(
                                   'Zdroj dát',
@@ -3257,7 +3221,7 @@ class FullscreenRadarPage extends StatelessWidget {
                                     textAlign: TextAlign.center,
                                     style: TextStyle(
                                       fontSize: 14,
-                                      color: Color(0xFF3498DB),
+                                      color: _kChartLineBlue,
                                       decoration: TextDecoration.underline,
                                     ),
                                   ),
@@ -3292,7 +3256,7 @@ class FullscreenRadarPage extends StatelessWidget {
                                           Navigator.of(context).pop();
                                         },
                                         style: ElevatedButton.styleFrom(
-                                          backgroundColor: const Color(0xFF3498DB),
+                                          backgroundColor: _kChartLineBlue,
                                           padding: const EdgeInsets.symmetric(vertical: 12),
                                           shape: RoundedRectangleBorder(
                                             borderRadius: BorderRadius.circular(10),
@@ -3323,8 +3287,9 @@ class FullscreenRadarPage extends StatelessWidget {
                 height: 36,
                 margin: const EdgeInsets.only(top: 8, bottom: 8, right: 12, left: 4),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF3A4551),
+                  color: Colors.white.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
                 ),
                 child: const Center(child: Icon(Icons.info_outline, size: 20, color: Colors.white)),
               ),

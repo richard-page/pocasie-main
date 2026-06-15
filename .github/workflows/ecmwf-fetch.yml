@@ -25,13 +25,19 @@ jobs:
     - name: Fetch real ECMWF data from data.ecmwf.int
       run: |
         cd backend
+        python fetch_ecmwf_baltic.py
         python fetch_ecmwf_real.py
+        python fetch_ecmwf_eu_grid.py --tile all
+        python fetch_ecmwf_point.py --lat 56.85 --lon 26.22 --name Madona --output ecmwf_point_56.85_26.22.json
+        python fetch_ecmwf_point.py --lat 54.71 --lon 20.51 --name Kaliningrad --output ecmwf_point_54.71_20.51.json
+        python fetch_ecmwf_point.py --lat 50.12 --lon 8.68 --name Frankfurt --output ecmwf_point_50.12_8.68.json
+        python fetch_ecmwf_point.py --lat 48.43 --lon 17.80 --name Hlohovec --output ecmwf_point_48.43_17.80.json
         
     - name: Commit and push if changes
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add backend/ecmwf_forecast_slovakia_grid.json backend/ecmwf_forecast_*.json
+        git add backend/ecmwf_forecast_*.json backend/ecmwf_point_*.json
         git diff --staged --quiet || git commit -m "Update ECMWF forecast [$(date)]"
         git pull origin main --rebase || true
         git push

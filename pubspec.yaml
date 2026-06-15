@@ -24,6 +24,7 @@ dependencies:
   webview_flutter: ^4.13.1
   home_widget: ^0.9.0
   workmanager: ^0.9.0+3
+  path_provider: ^2.1.5
   android_intent_plus: ^6.0.0
   
 dev_dependencies:
@@ -47,7 +48,6 @@ flutter:
     - assets/snow.svg
     - assets/snow-drizzle.svg
     - assets/partly-cloudy.svg
-    - backend/ecmwf_forecast.json
 
 flutter_launcher_icons:
   android: true

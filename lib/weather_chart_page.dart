@@ -35,6 +35,39 @@ const _kChartTextPrimary = Color(0xFFF2F6FA);
 const _kChartTextSecondary = Color(0xFFD4DEE9);
 const _kChartTextMuted = Color(0xFFAEBBCC);
 
+const _kChartLineBlue = Color(0xFF42A5F5);
+const _kChartIconBlue = Color(0xFF64B5F6);
+
+/// Malé dlaždice v grafe (Najteplejšie, legenda teploty) — nie pozadie celej stránky.
+BoxDecoration _chartStatTileDecoration({double radius = 12}) {
+  return BoxDecoration(
+    color: Color.alphaBlend(
+      Colors.white.withValues(alpha: 0.18),
+      const Color(0xFF152433),
+    ),
+    borderRadius: BorderRadius.circular(radius),
+    border: Border.all(color: Colors.white.withValues(alpha: 0.28)),
+    boxShadow: [
+      BoxShadow(
+        color: Colors.black.withValues(alpha: 0.18),
+        blurRadius: 8,
+        offset: const Offset(0, 3),
+      ),
+    ],
+  );
+}
+
+Widget _chartSectionDivider() {
+  return Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+    child: Divider(
+      height: 1,
+      thickness: 1,
+      color: Colors.white.withValues(alpha: 0.14),
+    ),
+  );
+}
+
 TextStyle _chartLabelStyle({double size = 12, FontWeight weight = FontWeight.w600}) {
   return TextStyle(
     color: _kChartTextSecondary,
@@ -63,7 +96,7 @@ TextStyle _chartCaptionStyle({double size = 11.5}) {
   );
 }
 
-const _kDayColumnHeight = 346.0;
+const _kChartDayStripHeight = 274.0;
 
 const _kThunderWmoCodes = <int>{95, 96, 99};
 
@@ -1057,46 +1090,22 @@ class WeatherChartPage extends StatelessWidget {
               )
             else
               Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                  child: _chartGlassPanel(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _ChartSummaryStrip(data: data),
-                        Expanded(
-                          child: Center(
-                            child: SizedBox(
-                              height: _kDayColumnHeight,
-                              child: ListView.separated(
-                                scrollDirection: Axis.horizontal,
-                                padding: const EdgeInsets.symmetric(horizontal: 8),
-                                itemCount: dayCount,
-                                separatorBuilder: (_, __) => const SizedBox(width: 6),
-                                itemBuilder: (context, index) => SizedBox(
-                                  height: _kDayColumnHeight,
-                                  child: _ChartDayColumn(
-                                    data: data,
-                                    dayIndex: index,
-                                  ),
-                                ),
-                              ),
-                            ),
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 32, 12, 12),
+                    child: _chartGlassPanel(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _ChartSummaryStrip(data: data),
+                          _ChartDaysScroller(
+                            data: data,
+                            dayCount: dayCount,
                           ),
-                        ),
-                        const _ChartTempLegend(),
-                        if (dayCount > 7)
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
-                            child: Text(
-                              'Potiahnite vľavo pre ďalšie dni →',
-                              textAlign: TextAlign.center,
-                              style: _chartLabelStyle(size: 12).copyWith(
-                                color: _kChartTextSecondary,
-                              ),
-                            ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -1306,7 +1315,7 @@ class _ChartTempLegend extends StatelessWidget {
     });
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         decoration: BoxDecoration(
@@ -1381,12 +1390,17 @@ class _ChartDayColumn extends StatelessWidget {
 
   static const _weekdayShort = <String>['Po', 'Ut', 'St', 'Št', 'Pi', 'So', 'Ne'];
 
+  static String dateLabelFor(DailyForecast d, int dayIndex) {
+    final dt = DateTime.tryParse(d.time[dayIndex]);
+    if (dt == null) return '--';
+    return '${_weekdayShort[dt.weekday - 1]} ${dt.day.toString().padLeft(2, '0')}.${dt.month.toString().padLeft(2, '0')}.';
+  }
+
   @override
   Widget build(BuildContext context) {
     final d = data.daily!;
     final h = data.hourly;
     final dateStr = d.time[dayIndex];
-    final dt = DateTime.tryParse(dateStr);
 
     double? max = d.tempMax?[dayIndex];
     double? min = d.tempMin?[dayIndex];
@@ -1401,11 +1415,6 @@ class _ChartDayColumn extends StatelessWidget {
       data: data,
       dayIndex: dayIndex,
     );
-
-    final weekday = dt != null ? _weekdayShort[dt.weekday - 1] : '--';
-    final dateLabel = dt != null
-        ? '${dt.day.toString().padLeft(2, '0')}.${dt.month.toString().padLeft(2, '0')}.'
-        : '--';
 
     return SizedBox(
       width: 54,
@@ -1430,7 +1439,7 @@ class _ChartDayColumn extends StatelessWidget {
             daily: d,
             hourTime: '${dateStr}T23:00',
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 2),
           if (precip.thunder != null) ...[
             _PrecipChip(
               percent: precip.thunder!,
@@ -1441,19 +1450,6 @@ class _ChartDayColumn extends StatelessWidget {
           _PrecipChip(
             percent: precip.rain,
             thunder: false,
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '$weekday $dateLabel',
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.82),
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              height: 1.2,
-            ),
           ),
         ],
       ),
@@ -1472,6 +1468,303 @@ class _ChartDayColumn extends StatelessWidget {
     }
     return {'min': minT, 'max': maxT};
   }
+}
+
+List<({double? max, double? min})> _chartDailyTempsForCurve(
+  WeatherData data,
+  int dayCount,
+) {
+  final d = data.daily!;
+  final h = data.hourly;
+  final rows = <({double? max, double? min})>[];
+  for (var i = 0; i < dayCount; i++) {
+    final dateStr = d.time[i];
+    double? max = d.tempMax?[i];
+    double? min = d.tempMin?[i];
+    if ((max == null || min == null) && h != null) {
+      double? minT;
+      double? maxT;
+      for (var j = 0; j < h.time.length; j++) {
+        if (!h.time[j].startsWith(dateStr)) continue;
+        final t = h.temperature?[j];
+        if (t == null) continue;
+        minT = minT == null ? t : math.min(minT, t);
+        maxT = maxT == null ? t : math.max(maxT, t);
+      }
+      max ??= maxT;
+      min ??= minT;
+    }
+    rows.add((max: max, min: min));
+  }
+  return rows;
+}
+
+List<double?> _chartDailyMaxTemps(WeatherData data, int dayCount) =>
+    _chartDailyTempsForCurve(data, dayCount).map((e) => e.max).toList();
+
+({double yMin, double yMax}) _chartTempYRange(List<double?> temps) {
+  final vals = temps.whereType<double>().toList();
+  if (vals.isEmpty) return (yMin: 0, yMax: 1);
+  var yMin = vals.reduce(math.min);
+  var yMax = vals.reduce(math.max);
+  if ((yMax - yMin).abs() < 4) {
+    yMin -= 2;
+    yMax += 2;
+  } else {
+    yMin -= 1;
+    yMax += 1;
+  }
+  return (yMin: yMin, yMax: yMax);
+}
+
+class _ChartDaysScroller extends StatefulWidget {
+  final WeatherData data;
+  final int dayCount;
+
+  const _ChartDaysScroller({
+    required this.data,
+    required this.dayCount,
+  });
+
+  @override
+  State<_ChartDaysScroller> createState() => _ChartDaysScrollerState();
+}
+
+class _ChartDaysScrollerState extends State<_ChartDaysScroller> {
+  late final ScrollController _columnsCtrl;
+  late final ScrollController _datesCtrl;
+  late final ScrollController _chartCtrl;
+  bool _syncing = false;
+
+  static const _itemWidth = 54.0;
+  static const _separator = 6.0;
+  static const _hPad = 8.0;
+  static const _chartHeight = 84.0;
+  static const _chartTopPad = 8.0;
+  static const _chartBottomPad = 4.0;
+
+  double _contentWidth(int dayCount) {
+    if (dayCount <= 0) return 0;
+    return dayCount * _itemWidth + (dayCount - 1) * _separator;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _columnsCtrl = ScrollController()..addListener(() => _syncScroll(_columnsCtrl));
+    _datesCtrl = ScrollController()..addListener(() => _syncScroll(_datesCtrl));
+    _chartCtrl = ScrollController()..addListener(() => _syncScroll(_chartCtrl));
+  }
+
+  void _syncScroll(ScrollController source) {
+    if (_syncing || !source.hasClients) return;
+    _syncing = true;
+    final offset = source.offset;
+    for (final ctrl in [_columnsCtrl, _datesCtrl, _chartCtrl]) {
+      if (ctrl != source && ctrl.hasClients && (ctrl.offset - offset).abs() > 0.5) {
+        ctrl.jumpTo(offset);
+      }
+    }
+    _syncing = false;
+  }
+
+  @override
+  void dispose() {
+    _columnsCtrl.dispose();
+    _datesCtrl.dispose();
+    _chartCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final d = widget.data.daily!;
+    final maxTemps = _chartDailyMaxTemps(widget.data, widget.dayCount);
+    final yRange = _chartTempYRange(maxTemps);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SizedBox(
+          height: _kChartDayStripHeight,
+          child: ListView.separated(
+            controller: _columnsCtrl,
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: _hPad),
+            itemCount: widget.dayCount,
+            separatorBuilder: (_, __) => const SizedBox(width: _separator),
+            itemBuilder: (context, index) => SizedBox(
+              width: _itemWidth,
+              child: _ChartDayColumn(
+                data: widget.data,
+                dayIndex: index,
+              ),
+            ),
+          ),
+        ),
+        SizedBox(
+          height: 20,
+          child: ListView.separated(
+            controller: _datesCtrl,
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: _hPad),
+            itemCount: widget.dayCount,
+            separatorBuilder: (_, __) => const SizedBox(width: _separator),
+            itemBuilder: (context, index) => SizedBox(
+              width: _itemWidth,
+              child: Text(
+                _ChartDayColumn.dateLabelFor(d, index),
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.78),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  height: 1.2,
+                ),
+              ),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: SizedBox(
+            height: _chartHeight,
+            child: ListView(
+              controller: _chartCtrl,
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: _hPad),
+              children: [
+                SizedBox(
+                  width: _contentWidth(widget.dayCount),
+                  height: _chartHeight,
+                  child: CustomPaint(
+                    painter: _ChartTemperatureCurvePainter(
+                      temps: maxTemps,
+                      itemWidth: _itemWidth,
+                      separator: _separator,
+                      yMin: yRange.yMin,
+                      yMax: yRange.yMax,
+                      topPad: _chartTopPad,
+                      bottomPad: _chartBottomPad,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const _ChartTempLegend(),
+        if (widget.dayCount > 7)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+            child: Text(
+              'Potiahnite vľavo pre ďalšie dni →',
+              textAlign: TextAlign.center,
+              style: _chartLabelStyle(size: 12).copyWith(
+                color: _kChartTextSecondary,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _ChartTemperatureCurvePainter extends CustomPainter {
+  final List<double?> temps;
+  final double itemWidth;
+  final double separator;
+  final double yMin;
+  final double yMax;
+  final double topPad;
+  final double bottomPad;
+
+  _ChartTemperatureCurvePainter({
+    required this.temps,
+    required this.itemWidth,
+    required this.separator,
+    required this.yMin,
+    required this.yMax,
+    required this.topPad,
+    required this.bottomPad,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (temps.isEmpty || size.width <= 0 || size.height <= 0) return;
+
+    final plotH = size.height - topPad - bottomPad;
+    if (plotH <= 0) return;
+
+    double xFor(int i) => i * (itemWidth + separator) + itemWidth / 2;
+    double yFor(double t) => topPad + (1 - (t - yMin) / (yMax - yMin)) * plotH;
+
+    final gridPaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.07)
+      ..strokeWidth = 1;
+    for (var g = 0; g < 4; g++) {
+      final gy = topPad + (g / 3) * plotH;
+      canvas.drawLine(Offset(0, gy), Offset(size.width, gy), gridPaint);
+    }
+
+    Offset? pointAt(int i) {
+      final v = temps[i];
+      if (v == null) return null;
+      return Offset(xFor(i), yFor(v));
+    }
+
+    final linePath = Path();
+    var started = false;
+    for (var i = 0; i < temps.length; i++) {
+      final p = pointAt(i);
+      if (p == null) {
+        started = false;
+        continue;
+      }
+      if (!started) {
+        linePath.moveTo(p.dx, p.dy);
+        started = true;
+      } else {
+        linePath.lineTo(p.dx, p.dy);
+      }
+    }
+    if (!started) return;
+
+    const lineColor = Color(0xFF42A5F5);
+
+    canvas.drawPath(
+      linePath,
+      Paint()
+        ..color = lineColor.withValues(alpha: 0.92)
+        ..strokeWidth = 2
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round,
+    );
+
+    for (var i = 0; i < temps.length; i++) {
+      final p = pointAt(i);
+      if (p == null) continue;
+      canvas.drawCircle(p, 3, Paint()..color = lineColor);
+      canvas.drawCircle(
+        p,
+        3,
+        Paint()
+          ..color = Colors.white.withValues(alpha: 0.4)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ChartTemperatureCurvePainter oldDelegate) =>
+      oldDelegate.temps != temps ||
+      oldDelegate.yMin != yMin ||
+      oldDelegate.yMax != yMax;
 }
 
 class _TempPill extends StatelessWidget {

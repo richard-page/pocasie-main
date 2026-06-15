@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Meteo Radar Slovensko</title>
+
+    <script>
+        if (new URLSearchParams(window.location.search).get('hideUI') === 'true') {
+            document.documentElement.classList.add('hide-ui');
+        }
+    </script>
+    
+    <link rel="preload" href="https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.js" as="script">
+    
+    <style>
+        :root { --primary: #3b82f6; --primary-hover: #2563eb; --app-bg: #2A3848; }
+        html, body { background: var(--app-bg); margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+        
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        * { box-sizing: border-box; font-family: 'Poppins', sans-serif; -webkit-tap-highlight-color: transparent !important; -webkit-touch-callout: none !important; user-select: none !important; }
+        #mapa { position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; z-index: 1; transition: opacity 0.2s ease; will-change: opacity; }
+
+        /* LEGENDA HORE */
+        .legend-panel { position: absolute; top: 0; left: 50%; transform: translateX(-50%) translateZ(0); z-index: 9999; padding: 0; background: rgba(0, 0, 0, 1); border-bottom: 1px solid rgba(255, 255, 255, 0.2); display: flex; align-items: center; justify-content: center; width: 100%; max-width: 1000px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6); will-change: transform; }
+        .legend-panel img { width: 100%; height: auto; display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+        @media (max-width: 768px) { .legend-panel img { height: 25px; object-fit: fill; } }
+
+        /* OVLÁDANIE DOLE */
+        .controls-wrapper { position: absolute; bottom: 45px; left: 50%; transform: translateX(-50%) translateZ(0); z-index: 9999; width: 92%; max-width: 600px; padding: 12px 18px; border-radius: 50px; display: flex; align-items: center; gap: 15px; background: #243341; border: 1px solid rgba(255, 255, 255, 0.15); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8); color: white; transition: transform 0.2s; will-change: transform; }
+        
+        .play-btn, .refresh-btn { width: 44px; height: 44px; border-radius: 50%; background: var(--primary); border: none; color: white; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.2s, transform 0.2s; flex-shrink: 0; }
+        .play-btn:hover:not(:disabled), .refresh-btn:hover:not(:disabled) { background: var(--primary-hover); transform: scale(1.05); }
+        .play-btn:disabled, .refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .play-btn.playing { background: #ef4444; }
+        .play-btn svg, .refresh-btn svg { width: 20px; height: 20px; fill: white; }
+        
+        .refresh-btn.spinning svg { animation: spin 1s linear infinite; }
+
+        .slider-container { flex-grow: 1; display: flex; align-items: center; }
+        input[type=range] { width: 100%; -webkit-appearance: none; background: transparent; cursor: pointer; }
+        input[type=range]:disabled { opacity: 0.5; cursor: not-allowed; }
+        input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 6px; background: rgba(255, 255, 255, 0.2); border-radius: 10px; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 22px; width: 22px; border-radius: 50%; background: var(--primary); border: 2px solid white; margin-top: -8px; box-shadow: 0 0 12px rgba(59, 130, 246, 0.9); transition: transform 0.1s; }
+
+        .time-display { font-size: 1.1rem; font-weight: 600; color: #93c5fd; min-width: 55px; text-align: right; font-variant-numeric: tabular-nums; }
+        
+        /* TLAČIDLO NASTAVENÍ */
+        .settings-btn {
+            position: absolute; top: 50px; right: 10px; z-index: 9999;
+            width: 44px; height: 44px; border-radius: 50%;
+            background: #243341; border: 1px solid rgba(255, 255, 255, 0.2);
+            cursor: pointer; display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 6px 15px rgba(0, 0, 0, 0.5); 
+            transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+            will-change: transform;
+        }
+        .settings-btn:hover { transform: scale(1.05); background: #2A3848; border-color: rgba(255, 255, 255, 0.4); }
+        .settings-btn svg { width: 22px; height: 22px; fill: white; transition: transform 0.15s ease; will-change: transform; }
+        .settings-btn.active svg { transform: rotate(90deg); }
+
+        .settings-menu {
+            position: absolute; top: 100px; right: 10px; z-index: 10000;
+            background: #243341; border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 20px; width: 220px; box-shadow: 0 15px 35px rgba(0, 0, 0, 0.6);
+            opacity: 0; visibility: hidden; transform: scale(0.9) translateY(-15px);
+            transform-origin: top right; 
+            transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
+            will-change: transform, opacity;
+            padding: 8px;
+        }
+        .settings-menu.show { opacity: 1; visibility: visible; transform: scale(1) translateY(0); }
+        
+        .settings-header { padding: 10px 12px 8px; font-size: 0.75rem; text-transform: uppercase; color: #94a3b8; letter-spacing: 0.5px; font-weight: 600; margin-top: 0; }
+        
+        .settings-option {
+            padding: 12px 14px; margin-bottom: 4px; color: #f8fafc; cursor: pointer;
+            font-size: 0.95rem; border-radius: 14px; transition: background 0.15s;
+            display: flex; align-items: center; gap: 12px;
+        }
+        .settings-option:hover { background: rgba(255, 255, 255, 0.1); }
+
+        .checkbox-box {
+            width: 18px; height: 18px; border-radius: 4px; border: 2px solid rgba(255, 255, 255, 0.4);
+            display: flex; align-items: center; justify-content: center; transition: all 0.2s ease;
+        }
+        .settings-option.active .checkbox-box { border-color: #f59e0b; background: rgba(245, 158, 11, 0.15); }
+        .settings-option.active .checkbox-box::after {
+            content: '⚡'; font-size: 12px; color: #f59e0b;
+            animation: popIn 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+
+        @keyframes popIn { 0% { transform: scale(0); } 100% { transform: scale(1); } }
+
+        /* MAPBOX LOGO UPLNE DOLE VŽDY */
+        .mapboxgl-ctrl-bottom-left { bottom: 10px !important; left: 10px !important; z-index: 10 !important; }
+        .mapboxgl-ctrl-attrib { display: none !important; }
+        .mapboxgl-ctrl-logo { pointer-events: none !important; } 
+
+        .location-dot { width: 14px; height: 14px; background-color: #3498DB; border: 2px solid white; border-radius: 50%; box-shadow: 0 0 6px rgba(0, 0, 0, 0.6); cursor: pointer; }
+
+        .shmu-attribution {
+            position: absolute; bottom: 15px; right: 15px; z-index: 1000;
+            background: rgba(0, 0, 0, 0.85); color: #ffffff; padding: 8px 14px; 
+            border-radius: 6px; font-size: 14px; font-weight: 600; 
+            border: 1px solid rgba(255, 255, 255, 0.2); box-shadow: 0 4px 10px rgba(0, 0, 0, 0.6); 
+            pointer-events: none; display: none; 
+        }
+
+        /* ⚡ ČISTÝ NÁHĽAD (WIDGET): Ak má okno výšku menšiu ako 380px */
+        @media (max-height: 380px) { 
+            .legend-panel, 
+            .controls-wrapper, 
+            .settings-btn, 
+            .settings-menu,
+            html.hide-ui .legend-panel, 
+            html.hide-ui .controls-wrapper, 
+            html.hide-ui .settings-btn, 
+            html.hide-ui .settings-menu { 
+                display: none !important; 
+                opacity: 0 !important; 
+                visibility: hidden !important; 
+            }
+            .mapboxgl-ctrl-bottom-left,
+            html.hide-ui .mapboxgl-ctrl-bottom-left { 
+                bottom: 4px !important; 
+                left: 10px !important; 
+            }
+        }
+
+        @media (max-height: 480px) and (min-height: 381px) {
+            .controls-wrapper { transform: translateX(-50%) scale(0.85); bottom: 15px; }
+            .settings-btn { top: 15px; right: 15px; }
+            .legend-panel img { height: 20px; }
+        }
+
+        @media (min-width: 1025px) {
+            .shmu-attribution { display: block; }
+            .controls-wrapper { bottom: 50px; }
+        }
+        
+        html.hide-ui .shmu-attribution { display: none !important; }
+    </style>
+    
+    <link rel="preconnect" href="https://api.mapbox.com">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.css" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet" />
+</head>
+<body>
+    <div class="legend-panel">
+        <img id="radarLegendImg" src="/radar/data.cmax.png?v=3" alt="Legenda radaru CMAX">
+    </div>
+    
+    <button id="settingsBtn" class="settings-btn" title="Nastavenia zobrazenia">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.06-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.73,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.06,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.43-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.49-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/></svg>
+    </button>
+
+    <div id="settingsMenu" class="settings-menu">
+        <div class="settings-header">Typ radarových dát</div>
+        <div class="settings-option" data-mode="1hrain">
+            <div class="radio-circle"></div>
+            <span>1h úhrn zrážok</span>
+        </div>
+        <div class="settings-option" data-mode="cappi">
+            <div class="radio-circle"></div>
+            <span>CAPPI 2 km</span>
+        </div>
+        <div class="settings-option" data-mode="cmax">
+            <div class="radio-circle"></div>
+            <span>Maximum (CMAX)</span>
+        </div>
+
+        <div class="settings-header">Prídavné vrstvy</div>
+        <div class="settings-option toggle-btn" id="toggleBleskyBtn">
+            <div class="checkbox-box"></div>
+            <span>Detekcia Bleskov</span>
+        </div>
+    </div>
+    
+    <div id="mapa"></div>
+    
+    <div class="shmu-attribution">Zdroj dát: SHMÚ & Blitzortung</div>
+
+    <div class="controls-wrapper">
+        <button id="playBtn" class="play-btn" disabled>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M8 5.14v14l11-7-11-7z"/></svg>
+        </button>
+        <div class="slider-container">
+            <input type="range" id="slider" min="0" max="11" step="1" value="11" disabled autocomplete="off">
+        </div>
+        <div id="cas" class="time-display">--:--</div>
+        
+        <button id="refreshBtn" class="refresh-btn" title="Obnoviť radarové dáta">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
+        </button>
+    </div>
+
+    <script src="https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.js"></script>
+    
+    <script>
+        mapboxgl.accessToken = 'pk.eyJ1IjoibWV0ZW9wb2Nhc2llIiwiYSI6ImNtbzkzaDdieTA3OHUycnF1MTVnbDQ2bWkifQ.rpiKRKhj6NNgJAKvXI2ZQQ';
+        
+        const mapExtentCoordinates = [
+            [0.0, 58.0],    
+            [30.0, 58.0],   
+            [30.0, 43.0],  
+            [0.0, 43.0]    
+        ];
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const userLat = parseFloat(urlParams.get('lat'));
+        const userLon = parseFloat(urlParams.get('lon'));
+        const requestedZoom = parseFloat(urlParams.get('zoom')) || 6;
+
+        let mapLoaded = false;
+        let isFirstLoad = true; 
+        
+        var radarUrls = []; 
+        var radarUnix = [];
+        var casy = [];
+        var pridaneVrstvyMapbox = [];
+        
+        var bleskyUrls = [];
+        var bleskyUnix = [];
+        var pridaneBleskyMapbox = [];
+        var zobraziBlesky = localStorage.getItem('zobraziBlesky') !== 'false'; 
+        
+        var currentIndex = -1; 
+        var playing = false;
+        var timer;
+        var poslednyCas = null; 
+        var userMarker = null;
+        var firstSymbolId = null;
+        var aktualnyMod = localStorage.getItem('zvolenyRadarMod') || 'cmax'; 
+        
+        const iconPlay = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M8 5.14v14l11-7-11-7z"/></svg>';
+        const iconPause = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
+
+        const settingsBtn = document.getElementById('settingsBtn');
+        const settingsMenu = document.getElementById('settingsMenu');
+        const toggleBleskyBtn = document.getElementById('toggleBleskyBtn');
+        const radarLegendImg = document.getElementById('radarLegendImg');
+        const modeOptions = document.querySelectorAll('.settings-option[data-mode]');
+
+        function updateLegend(mode) {
+            radarLegendImg.src = mode === '1hrain' ? '/radar/data.1hrain.png' : '/radar/data.cmax.png';
+        }
+        updateLegend(aktualnyMod);
+
+        modeOptions.forEach(opt => {
+            if(opt.getAttribute('data-mode') === aktualnyMod) opt.classList.add('active');
+        });
+
+        if (zobraziBlesky) toggleBleskyBtn.classList.add('active');
+        toggleBleskyBtn.addEventListener('click', function() {
+            zobraziBlesky = !zobraziBlesky;
+            localStorage.setItem('zobraziBlesky', zobraziBlesky);
+            this.classList.toggle('active', zobraziBlesky);
+            updateRadar(); 
+        });
+
+        const mapCenter = (!isNaN(userLon) && !isNaN(userLat)) ? [userLon, userLat] : [19.6, 48.7];
+        
+        const newMapBounds = [
+            [-5.0, 40.0], 
+            [35.0, 60.0]  
+        ];
+
+        const map = new mapboxgl.Map({
+            container: 'mapa',
+            style: 'mapbox://styles/mapbox/dark-v11',
+            center: mapCenter, 
+            zoom: requestedZoom,
+            minZoom: 4.0, 
+            maxZoom: 14, 
+            maxBounds: newMapBounds, 
+            projection: 'mercator', 
+            attributionControl: false,
+            dragRotate: false, 
+            touchPitch: false, 
+            keyboard: false,
+            fadeDuration: 0
+        });
+        map.touchZoomRotate.disableRotation();
+        
+        // ⚡ OPRAVA: Pamätáme si, či sme v náhľade
+        let wasWidgetMode = window.innerHeight <= 380;
+
+        window.addEventListener('resize', () => {
+            if (map && mapLoaded) {
+                requestAnimationFrame(() => { 
+                    map.resize(); 
+                    // ODSTRÁNENÉ map.triggerRepaint() PRE ZVÝŠENIE VÝKONU
+                    
+                    let isWidgetMode = window.innerHeight <= 380;
+                    
+                    // Ak sa okno zmenšilo späť do náhľadu (widgetu), vrátime mapu OKAMŽITE (jumpTo)
+                    if (isWidgetMode && !wasWidgetMode) {
+                        map.jumpTo({ 
+                            center: mapCenter, 
+                            zoom: requestedZoom
+                        });
+                    }
+                    
+                    wasWidgetMode = isWidgetMode;
+                });
+            }
+        });
+
+        settingsBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            settingsMenu.classList.toggle('show');
+            settingsBtn.classList.toggle('active');
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!settingsMenu.contains(e.target) && !settingsBtn.contains(e.target)) {
+                settingsMenu.classList.remove('show');
+                settingsBtn.classList.remove('active');
+            }
+        });
+
+        modeOptions.forEach(option => {
+            option.addEventListener('click', function() {
+                const novyMod = this.getAttribute('data-mode');
+                if (aktualnyMod !== novyMod) {
+                    aktualnyMod = novyMod;
+                    localStorage.setItem('zvolenyRadarMod', novyMod);
+                    modeOptions.forEach(opt => opt.classList.remove('active'));
+                    this.classList.add('active');
+                    updateLegend(novyMod);
+                    if (playing) document.getElementById('playBtn').click();
+                    window.stiahniData(true);
+                }
+                settingsMenu.classList.remove('show');
+                settingsBtn.classList.remove('active');
+            });
+        });
+
+        map.on('style.load', () => {
+            mapLoaded = true;
+            const layers = map.getStyle().layers;
+            for (let i = 0; i < layers.length; i++) {
+                if (layers[i].type === 'symbol') {
+                    firstSymbolId = layers[i].id;
+                    break;
+                }
+            }
+            layers.forEach(layer => {
+                const layerId = layer.id.toLowerCase();
+                if (layerId.includes('island') || layerId.includes('poi') || layerId.includes('natural') || layerId.includes('park')) {
+                    try { map.setLayoutProperty(layer.id, 'visibility', 'none'); } catch(e) {}
+                }
+                if (layer.type === 'symbol' && layer.layout && layer.layout['text-field']) {
+                    if (!layerId.includes('natural') && !layerId.includes('poi') && !layerId.includes('park') && (layerId.includes('label') || layerId.includes('place') || layerId.includes('settlement'))) {
+                        map.setLayoutProperty(layer.id, 'text-field', ['get', 'name']);
+                        map.setLayoutProperty(layer.id, 'text-size', 13);
+                        map.setLayoutProperty(layer.id, 'text-font', ['DIN Pro Regular', 'Arial Unicode MS Regular']);
+                        
+                        try { 
+                            map.setPaintProperty(layer.id, 'text-color', '#FFFFFF'); 
+                            map.setPaintProperty(layer.id, 'text-halo-color', 'rgba(0, 0, 0, 0.8)'); 
+                            map.setPaintProperty(layer.id, 'text-halo-width', 1.5); 
+                        } catch(e) {}
+                    }
+                }
+            });
+
+            // --- SLOVENSKO ---
+            map.addSource('sk-borders', {
+                'type': 'geojson',
+                'data': 'slovakia.geojson' 
+            });
+
+            map.addLayer({
+                'id': 'sk-borders-glow',
+                'type': 'line', 
+                'source': 'sk-borders',
+                'paint': {
+                    'line-color': '#1d4ed8', 
+                    'line-width': 8.0,       
+                    'line-opacity': 0.4,     
+                    'line-blur': 4           
+                }
+            }, firstSymbolId); 
+
+            map.addLayer({
+                'id': 'sk-borders-layer',
+                'type': 'line', 
+                'source': 'sk-borders',
+                'paint': {
+                    'line-color': '#3b82f6', 
+                    'line-width': 2.0,       
+                    'line-opacity': 1.0      
+                }
+            }, firstSymbolId); 
+            
+            // --- RUMUNSKO ---
+            map.addSource('ro-borders', {
+                'type': 'geojson',
+                'data': 'romania.geojson' 
+            });
+
+            map.addLayer({
+                'id': 'ro-borders-glow',
+                'type': 'line', 
+                'source': 'ro-borders',
+                'paint': {
+                    'line-color': '#1d4ed8', 
+                    'line-width': 8.0,       
+                    'line-opacity': 0.4,     
+                    'line-blur': 4           
+                }
+            }, firstSymbolId); 
+
+            map.addLayer({
+                'id': 'ro-borders-layer',
+                'type': 'line', 
+                'source': 'ro-borders',
+                'paint': {
+                    'line-color': '#3b82f6', 
+                    'line-width': 2.0,       
+                    'line-opacity': 1.0      
+                }
+            }, firstSymbolId); 
+            
+            if (!isNaN(userLat) && !isNaN(userLon)) {
+                const el = document.createElement('div');
+                el.className = 'location-dot';
+                userMarker = new mapboxgl.Marker(el).setLngLat([userLon, userLat]).addTo(map);
+            }
+            window.stiahniData(false);
+        });
+
+        window.stiahniData = function(manualnyRefresh = false) {
+            const refreshBtn = document.getElementById('refreshBtn');
+            if (manualnyRefresh && refreshBtn) refreshBtn.classList.add('spinning');
+
+            let jsonSubor = 'radar_history_cmax.json';
+            if (aktualnyMod === 'cappi') jsonSubor = 'radar_history_cappi.json';
+            if (aktualnyMod === '1hrain') jsonSubor = 'radar_history_1hrain.json';
+
+            Promise.all([
+                fetch('/radar/' + jsonSubor + '?v=' + Date.now()).then(r => r.json()),
+                fetch('/blesky/blesky.json?v=' + Date.now()).then(r => r.ok ? r.json() : []).catch(() => []) 
+            ]).then(([radarData, bleskyData]) => {
+                if (manualnyRefresh && refreshBtn) setTimeout(() => refreshBtn.classList.remove('spinning'), 500);
+                if (!radarData || radarData.length === 0) return;
+                
+                var najnovsiZoServera = radarData[radarData.length - 1].unix_time;
+                if (najnovsiZoServera !== poslednyCas || manualnyRefresh) {
+                    poslednyCas = najnovsiZoServera;
+                    spracujDavaZJOSN(radarData, bleskyData);
+                }
+            }).catch(err => {
+                if (manualnyRefresh && refreshBtn) refreshBtn.classList.remove('spinning');
+            });
+        };
+        
+        setInterval(() => window.stiahniData(false), 300000); 
+        document.getElementById('refreshBtn').addEventListener('click', () => { window.stiahniData(true); });
+
+        function spracujDavaZJOSN(radarData, bleskyData) {
+            radarUrls = []; casy = []; radarUnix = []; bleskyUrls = []; bleskyUnix = [];
+            
+            radarData.forEach(polozka => {
+                let date = new Date(polozka.unix_time * 1000);
+                let coeff = 1000 * 60 * 5;
+                let roundedDate = new Date(Math.round(date.getTime() / coeff) * coeff);
+                let lokalnyCas = roundedDate.toLocaleTimeString('sk-SK', { hour: '2-digit', minute: '2-digit' });
+                casy.push(lokalnyCas);
+                
+                radarUrls.push(polozka.url);
+                radarUnix.push(polozka.unix_time);
+                
+                if (polozka.blesky_url) {
+                    bleskyUrls.push(polozka.blesky_url);
+                    bleskyUnix.push(polozka.unix_time);
+                }
+            });
+
+            if (bleskyData && bleskyData.length > 0) {
+                bleskyUrls = []; bleskyUnix = []; 
+                bleskyData.forEach(b => {
+                    bleskyUrls.push(b.url);
+                    bleskyUnix.push(b.unix_time);
+                });
+            }
+
+            if (mapLoaded) vybudujVrstvyVMapboxe();
+        }
+
+       function vybudujVrstvyVMapboxe() {
+            if (casy.length === 0) return;
+            
+            let maxIndex = casy.length - 1;
+            document.getElementById('slider').disabled = false;
+            document.getElementById('playBtn').disabled = false;
+            document.getElementById('slider').max = maxIndex;
+
+            if (!playing) currentIndex = maxIndex;
+
+            let insertBeforeId = map.getLayer('sk-borders-glow') ? 'sk-borders-glow' : firstSymbolId;
+
+            let coverageUrl = '/radar/coverage_' + aktualnyMod + '.png?v=' + Date.now();
+            if (map.getSource('coverage-source')) {
+                map.getSource('coverage-source').updateImage({ url: coverageUrl, coordinates: mapExtentCoordinates });
+            } else {
+                map.addSource('coverage-source', { type: 'image', url: coverageUrl, coordinates: mapExtentCoordinates });
+                map.addLayer({
+                    id: 'coverage-layer', type: 'raster', source: 'coverage-source',
+                    layout: { 'visibility': 'visible' },
+                    paint: { 
+                        'raster-opacity': 1.0, 
+                        'raster-fade-duration': 0,
+                        'raster-resampling': 'linear' 
+                    }
+                }, insertBeforeId); 
+            }
+
+            for (let i = 0; i < casy.length; i++) {
+                let sourceId = 'radar-source-' + i;
+                let layerId = 'radar-layer-' + i;
+
+                if (map.getSource(sourceId)) {
+                    map.getSource(sourceId).updateImage({ url: radarUrls[i], coordinates: mapExtentCoordinates });
+                } else {
+                    map.addSource(sourceId, { type: 'image', url: radarUrls[i], coordinates: mapExtentCoordinates });
+                    
+                    map.addLayer({
+                        id: layerId, type: 'raster', source: sourceId,
+                        layout: { 'visibility': 'visible' },
+                        paint: { 
+                            'raster-opacity': 0, 
+                            'raster-opacity-transition': { duration: 0 },
+                            'raster-fade-duration': 0,
+                            'raster-resampling': 'linear' 
+                        }
+                    }, insertBeforeId); 
+                    if (!pridaneVrstvyMapbox.includes(i)) pridaneVrstvyMapbox.push(i);
+                }
+            }
+
+            for (let j = 0; j < bleskyUnix.length; j++) {
+                let bSourceId = 'blesky-source-' + j;
+                let bLayerId = 'blesky-layer-' + j;
+
+                if (map.getSource(bSourceId)) {
+                    map.getSource(bSourceId).updateImage({ url: bleskyUrls[j], coordinates: mapExtentCoordinates });
+                } else {
+                    map.addSource(bSourceId, { type: 'image', url: bleskyUrls[j], coordinates: mapExtentCoordinates });
+                    map.addLayer({
+                        id: bLayerId, type: 'raster', source: bSourceId,
+                        layout: { 'visibility': 'visible' },
+                        paint: { 
+                            'raster-opacity': 0, 
+                            'raster-opacity-transition': { duration: 0 },
+                            'raster-fade-duration': 0,
+                            'raster-resampling': 'linear' 
+                        }
+                    }, firstSymbolId); 
+                    if (!pridaneBleskyMapbox.includes(j)) pridaneBleskyMapbox.push(j);
+                }
+            }
+
+            for (let i = casy.length; i < pridaneVrstvyMapbox.length; i++) {
+                if (map.getLayer('radar-layer-' + i)) map.removeLayer('radar-layer-' + i);
+                if (map.getSource('radar-source-' + i)) map.removeSource('radar-source-' + i);
+            }
+            pridaneVrstvyMapbox = pridaneVrstvyMapbox.slice(0, casy.length);
+
+            for (let j = bleskyUnix.length; j < pridaneBleskyMapbox.length; j++) {
+                if (map.getLayer('blesky-layer-' + j)) map.removeLayer('blesky-layer-' + j);
+                if (map.getSource('blesky-source-' + j)) map.removeSource('blesky-source-' + j);
+            }
+            pridaneBleskyMapbox = pridaneBleskyMapbox.slice(0, bleskyUnix.length);
+
+            updateRadar();
+
+            if (isFirstLoad) {
+                isFirstLoad = false;
+                setTimeout(() => {
+                    document.getElementById('slider').disabled = false;
+                    document.getElementById('playBtn').disabled = false;
+                }, 1000);
+            }
+        }
+
+        function updateRadar() {
+            if (casy.length === 0 || currentIndex >= casy.length || currentIndex < 0) return;
+            
+            let aktualnyRadarUnix = radarUnix[currentIndex];
+            document.getElementById('cas').innerText = casy[currentIndex] || "--:--";
+            document.getElementById('slider').value = currentIndex;
+
+            requestAnimationFrame(() => {
+                for (let i = 0; i < casy.length; i++) {
+                    let layerId = 'radar-layer-' + i;
+                    if (map.getLayer(layerId)) {
+                        map.setPaintProperty(layerId, 'raster-opacity', (i === currentIndex) ? 0.7 : 0);
+                    }
+                }
+
+                if (zobraziBlesky && bleskyUnix.length > 0) {
+                    let bestDiff = Infinity;
+                    let bestIndex = -1;
+                    
+                    for (let j = 0; j < bleskyUnix.length; j++) {
+                        let diff = Math.abs(bleskyUnix[j] - aktualnyRadarUnix);
+                        if (diff < bestDiff && diff <= 1800) { 
+                            bestDiff = diff;
+                            bestIndex = j;
+                        }
+                    }
+
+                    for (let j = 0; j < bleskyUnix.length; j++) {
+                        let layerId = 'blesky-layer-' + j;
+                        if (map.getLayer(layerId)) {
+                            map.setPaintProperty(layerId, 'raster-opacity', (j === bestIndex) ? 1.0 : 0);
+                        }
+                    }
+                } else {
+                    for (let j = 0; j < bleskyUnix.length; j++) {
+                        let layerId = 'blesky-layer-' + j;
+                        if (map.getLayer(layerId)) {
+                            map.setPaintProperty(layerId, 'raster-opacity', 0);
+                        }
+                    }
+                }
+            });
+        }
+
+        document.getElementById('slider').addEventListener('input', (e) => {
+            let newVal = parseInt(e.target.value);
+            if (newVal >= 0 && newVal < casy.length) {
+                currentIndex = newVal;
+                updateRadar(); 
+            }
+        });
+
+        document.getElementById('playBtn').addEventListener('click', function() {
+            if (playing) {
+                clearInterval(timer); playing = false; this.innerHTML = iconPlay;
+            } else {
+                playing = true; this.innerHTML = iconPause;
+                if (currentIndex >= casy.length - 1) currentIndex = 0;
+                
+                timer = setInterval(() => {
+                    currentIndex++;
+                    if (currentIndex >= casy.length) currentIndex = 0;
+                    document.getElementById('slider').value = currentIndex;
+                    updateRadar();
+                }, 250); 
+            }
+        });
+    </script>
+</body>
+</html>

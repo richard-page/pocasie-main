@@ -1,0 +1,16 @@
+{
+  "current": {
+    "weather_code": 0,
+    "cloud_cover": 10
+  },
+  "hourly": {
+    "weather_code": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  }
+}
