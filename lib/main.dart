@@ -1448,6 +1448,14 @@ List<int> _smoothFairWeatherHourlyIconCodes(List<int> icons) {
 String _calendarDateStamp(DateTime d) =>
     '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
+/// UTC pečiatka z `hourly.time` → lokálna (offset z API).
+DateTime _hourlyParsedLocal(DateTime parsedUtc, int? utcOffsetSeconds) {
+  if (utcOffsetSeconds != null && utcOffsetSeconds != 0) {
+    return parsedUtc.add(Duration(seconds: utcOffsetSeconds));
+  }
+  return parsedUtc;
+}
+
 /// Prvé `hourly.time` index s časovou pečatkou **`!parsed.isBefore(threshold)`** (rovnaká logika ako panel „24 h“).
 /// Konvertuje UTC časy z JSON na lokálny čas pomocou utcOffsetSeconds.
 int? _hourlyForecastFirstIndexNotBefore(HourlyForecast h, DateTime threshold, {int? utcOffsetSeconds}) {
@@ -1517,11 +1525,13 @@ class HourlyStripDisplayState {
     required this.icons,
     required this.precipMm,
     required this.probs,
+    required this.showRainPrecip,
   });
 
   final Map<int, int> icons;
   final Map<int, double> precipMm;
   final Map<int, int> probs;
+  final Map<int, bool> showRainPrecip;
 }
 
 HourlyStripDisplayState? _hourlyStripFinalDisplayState(
@@ -1576,6 +1586,11 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
     precipMmList[i] = rawMm;
   }
 
+  final preRadarIcons = List<int>.from(displayIcons);
+  final preRadarShowRain = List<bool>.from(showRainPrecip);
+  final preRadarProbs = List<int>.from(storedProbs);
+  final preRadarMm = List<double>.from(precipMmList);
+
   applyRadarPrecipEndToHourlyStrip(
     displayIcons: displayIcons,
     showRainPrecip: showRainPrecip,
@@ -1587,6 +1602,43 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
     locTime: locTime,
     utcOffsetSeconds: utcOffsetSeconds,
     radarCoverageActive: radarCoverageActive,
+  );
+
+  if (radarNowcast.eligible) {
+    final trimStop = radarEcmwfTrimHardStopLocal(locTime, radarNowcast);
+    for (var i = 0; i < stripIndices.length; i++) {
+      final idx = stripIndices[i];
+      final parsed = DateTime.tryParse(h.time[idx]);
+      if (parsed == null) continue;
+      final localT = utcOffsetSeconds != null
+          ? parsed.add(Duration(seconds: utcOffsetSeconds))
+          : parsed;
+      final slotHour = DateTime(
+        localT.year,
+        localT.month,
+        localT.day,
+        localT.hour,
+      );
+      if (!slotHour.isAfter(trimStop)) continue;
+      if (radarNowcast.authorizesPrecipAtLocalHour(slotHour, locTime)) continue;
+
+      displayIcons[i] = preRadarIcons[i];
+      showRainPrecip[i] = preRadarShowRain[i];
+      storedProbs[i] = preRadarProbs[i];
+      precipMmList[i] = preRadarMm[i];
+    }
+  }
+
+  _syncHourlyStripPrecipMmFromEcmwf(
+    precipMm: precipMmList,
+    storedProbs: storedProbs,
+    showRainPrecip: showRainPrecip,
+    displayIcons: displayIcons,
+    stripIndices: stripIndices,
+    h: h,
+    radarCtx: radarNowcast,
+    locTime: locTime,
+    utcOffsetSeconds: utcOffsetSeconds,
   );
 
   if (lightningNearby) {
@@ -1609,20 +1661,23 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
   final icons = <int, int>{};
   final precipMm = <int, double>{};
   final probs = <int, int>{};
+  final showRainPrecipByIdx = <int, bool>{};
   for (var i = 0; i < stripIndices.length; i++) {
     final idx = stripIndices[i];
     icons[idx] = displayIcons[i];
     precipMm[idx] = precipMmList[i];
     probs[idx] = storedProbs[i];
+    showRainPrecipByIdx[idx] = showRainPrecip[i];
   }
   return HourlyStripDisplayState(
     icons: icons,
     precipMm: precipMm,
     probs: probs,
+    showRainPrecip: showRainPrecipByIdx,
   );
 }
 
-/// Noc = 22–23 dňa kartičky + skoré ráno **pred** 6:00 (0–5) toho istého kalendárneho dňa
+/// Noc = 23–5 dňa kartičky + skoré ráno **pred** 6:00 (0–5) toho istého kalendárneho dňa
 /// a skoré ráno nasledujúceho dňa (0–5), aby dážď o 4–5 nepadol do „rána“ (6–12).
 bool _dailyTileNightContainsParsed(DateTime slot, String tileCalendarIso) {
   final stamp = _calendarDateStamp(slot);
@@ -1630,7 +1685,7 @@ bool _dailyTileNightContainsParsed(DateTime slot, String tileCalendarIso) {
   final followingStamp =
       _calendarDateStamp(tileAnchor.add(const Duration(days: 1)));
   final hour = slot.hour;
-  return (stamp == tileCalendarIso && (hour >= 22 || hour < 6)) ||
+  return (stamp == tileCalendarIso && (hour >= 23 || hour < 6)) ||
       (stamp == followingStamp && hour < 6);
 }
 
@@ -1650,7 +1705,7 @@ bool _dailyTileSegmentMatchesParsed(
     case 'evening':
       return _calendarDateStamp(parsed) == calendarTileIso &&
           hour >= 18 &&
-          hour < 22;
+          hour < 23;
     case 'night':
       return _dailyTileNightContainsParsed(parsed, calendarTileIso);
     default:
@@ -1663,6 +1718,108 @@ DateTime? _tryParseHourlyTimestamp(String timeStr) {
   var p = DateTime.tryParse(timeStr);
   p ??= DateTime.tryParse(timeStr.replaceFirst(' ', 'T'));
   return p;
+}
+
+/// Má aspoň jedna hodina v dennom úseku radarom potvrdené zrážky?
+bool _dayPartHasRadarPrecip(
+  HourlyForecast hourly,
+  String datePrefix,
+  String part,
+  DateTime locTime,
+  RadarNowcastContext radarCtx, {
+  int? utcOffsetSeconds,
+}) {
+  if (!radarCtx.eligible) return false;
+  for (var i = 0; i < hourly.time.length; i++) {
+    final parsed = _tryParseHourlyTimestamp(hourly.time[i]);
+    if (parsed == null) continue;
+    final localParsed = _hourlyParsedLocal(parsed, utcOffsetSeconds);
+    if (!_dailyTileSegmentMatchesParsed(localParsed, datePrefix, part)) continue;
+    final slotHour = DateTime(
+      localParsed.year,
+      localParsed.month,
+      localParsed.day,
+      localParsed.hour,
+    );
+    if (radarCtx.authorizesPrecipAtLocalHour(slotHour, locTime)) return true;
+  }
+  return false;
+}
+
+List<int> _mergeStripIconsIntoDayIconList(
+  List<int> dayIcons,
+  int dayStartIdx,
+  HourlyStripDisplayState? stripState,
+) {
+  if (stripState == null || stripState.icons.isEmpty) return dayIcons;
+  final merged = List<int>.from(dayIcons);
+  for (final entry in stripState.icons.entries) {
+    final off = entry.key - dayStartIdx;
+    if (off >= 0 && off < merged.length) merged[off] = entry.value;
+  }
+  return merged;
+}
+
+int _applyDayPartPrecipIconIntensity(
+  int code, {
+  required int iconProb,
+  required double intensityMm,
+  required bool useDailyIntensityScale,
+  required bool dailyIntensityScale,
+  required bool dailySnowIntensityScale,
+  required double intensitySnowCm,
+}) {
+  var result = _clampPrecipitationIconIntensity(
+    code,
+    iconProb,
+    intensityMm,
+    isDailyContext: useDailyIntensityScale,
+    snowfallCm: intensitySnowCm,
+  );
+  if (dailyIntensityScale &&
+      intensityMm > 0 &&
+      intensityMm < _kModeratePrecipMmDaily &&
+      kPrecipitationCodes.contains(result) &&
+      !kSnowWeatherCodes.contains(result)) {
+    result = lightDailyPrecipVisualCode(result);
+  }
+  if (dailySnowIntensityScale &&
+      intensitySnowCm > 0 &&
+      intensitySnowCm < _kModerateSnowCmDaily &&
+      kSnowWeatherCodes.contains(result)) {
+    result = lightDailySnowVisualCode(result);
+  }
+  return result;
+}
+
+/// Dominantná zrážková ikona z finálneho 24 h pásu pre daný úsek dňa (ráno / večer / …).
+int? _dominantPrecipIconForDayPartFromStrip(
+  HourlyForecast hourly,
+  String datePrefix,
+  String part,
+  HourlyStripDisplayState stripState, {
+  int? utcOffsetSeconds,
+}) {
+  final precipIcons = <int>[];
+  for (final entry in stripState.icons.entries) {
+    final i = entry.key;
+    if (i < 0 || i >= hourly.time.length) continue;
+    final parsed = _tryParseHourlyTimestamp(hourly.time[i]);
+    if (parsed == null) continue;
+    final localParsed = _hourlyParsedLocal(parsed, utcOffsetSeconds);
+    if (!_dailyTileSegmentMatchesParsed(localParsed, datePrefix, part)) continue;
+
+    final icon = entry.value;
+    final mm = stripState.precipMm[i] ?? hourly.precipitation?[i] ?? 0.0;
+    final prob = stripState.probs[i] ?? hourly.precipitationProbability?[i] ?? 0;
+    if (kPrecipitationCodes.contains(icon)) {
+      precipIcons.add(icon);
+    } else if (ecmwfHourPrecipShowsInUi(mm: mm, prob: prob)) {
+      precipIcons.add(61);
+    }
+  }
+  if (precipIcons.isEmpty) return null;
+  return _dominantFromHourlyDisplayedCodes(precipIcons);
 }
 
 /// Väčšinový WMO/medziprahový výstup z hodiniek (priorita medzi zrážkovými ikonami ako v `_getDayPartWeather`).
@@ -1908,6 +2065,7 @@ Map<String, dynamic> _getDayPartWeather(
   double dailyTotalSnowCm = 0.0,
   HourlyStripDisplayState? stripState,
   int? utcOffsetSeconds,
+  RadarNowcastContext radarNowcast = RadarNowcastContext.inactive,
 }) {
 
   bool forceDayForBlock = part == 'morning' || part == 'afternoon';
@@ -1965,7 +2123,9 @@ Map<String, dynamic> _getDayPartWeather(
     final parsedSlot = _tryParseHourlyTimestamp(timeStr);
     if (parsedSlot == null) continue;
 
-    final bool matchesPart = _dailyTileSegmentMatchesParsed(parsedSlot, datePrefix, part);
+    final localSlot = _hourlyParsedLocal(parsedSlot, utcOffsetSeconds);
+    final matchesPart =
+        _dailyTileSegmentMatchesParsed(localSlot, datePrefix, part);
 
     if (matchesPart) {
       temps.add(hourly.temperature?[i]);
@@ -2002,23 +2162,43 @@ Map<String, dynamic> _getDayPartWeather(
 
       times.add(timeStr);
 
+      var iconForPart = processed.code;
       if (slicesFair != null) {
-        final dayStampLocal = _calendarDateStamp(parsedSlot);
+        final dayStampLocal = _calendarDateStamp(localSlot);
         final fk = sliceEnsure(dayStampLocal);
         if (fk != null) {
           final (dsBk, iconsBk) = fk;
           final offBk = i - dsBk;
           if (offBk >= 0 && offBk < iconsBk.length) {
-            var icon = iconsBk[offBk];
-            final stripIcon = stripIconsByIdx?[i];
-            if (stripIcon != null) {
-              icon = stripIcon;
-              partGridStripOnlyCodes.add(icon);
-            }
-            partGridDisplayedCodes.add(icon);
+            iconForPart = iconsBk[offBk];
           }
         }
       }
+
+      final stripIcon = stripIconsByIdx?[i];
+      if (stripIcon != null) {
+        iconForPart = stripIcon;
+        partGridStripOnlyCodes.add(iconForPart);
+      } else if (radarNowcast.eligible && locationTime != null) {
+        final slotHour = DateTime(
+          localSlot.year,
+          localSlot.month,
+          localSlot.day,
+          localSlot.hour,
+        );
+        if (radarNowcast.authorizesPrecipAtLocalHour(slotHour, locationTime)) {
+          final slotTemp = hourly.temperature?[i];
+          final dbz = radarNowcast.precipNow
+              ? radarNowcast.precipIntensityDbz
+              : radarNowcast.stripDisplayDbz;
+          iconForPart = wmoFromRadarDbz(
+            dbz,
+            snow: radarSnowLikely(tempC: slotTemp),
+          );
+          partGridStripOnlyCodes.add(iconForPart);
+        }
+      }
+      partGridDisplayedCodes.add(iconForPart);
     }
   }
 
@@ -2182,32 +2362,62 @@ Map<String, dynamic> _getDayPartWeather(
           hourlyPrecipitationMm: iconMaxMm,
           snowfallCm: suppressWetDayIcons ? 0.0 : dailyTotalSnowCm,
         );
-  var blockIconCode = _clampPrecipitationIconIntensity(
+  var blockIconCode = _applyDayPartPrecipIconIntensity(
     afterPrecipThreshold,
-    iconProb,
-    intensityMm,
-    isDailyContext: useDailyIntensityScale,
-    snowfallCm: intensitySnowCm,
+    iconProb: iconProb,
+    intensityMm: intensityMm,
+    useDailyIntensityScale: useDailyIntensityScale,
+    dailyIntensityScale: dailyIntensityScale,
+    dailySnowIntensityScale: dailySnowIntensityScale,
+    intensitySnowCm: intensitySnowCm,
   );
-
-  if (dailyIntensityScale &&
-      intensityMm > 0 &&
-      intensityMm < _kModeratePrecipMmDaily &&
-      kPrecipitationCodes.contains(blockIconCode) &&
-      !kSnowWeatherCodes.contains(blockIconCode)) {
-    blockIconCode = lightDailyPrecipVisualCode(blockIconCode);
-  }
-
-  if (dailySnowIntensityScale &&
-      intensitySnowCm > 0 &&
-      intensitySnowCm < _kModerateSnowCmDaily &&
-      kSnowWeatherCodes.contains(blockIconCode)) {
-    blockIconCode = lightDailySnowVisualCode(blockIconCode);
-  }
 
   if (suppressWetDayIcons) {
     blockIconCode = _precipIconForcedDryWhenSuppressed(blockIconCode, cloudCoverPercent: avgCloudInPart);
   }
+
+  if (!suppressWetDayIcons &&
+      radarNowcast.eligible &&
+      locationTime != null) {
+    final partRadar = _dayPartHasRadarPrecip(
+      hourly,
+      date,
+      part,
+      locationTime,
+      radarNowcast,
+      utcOffsetSeconds: utcOffsetSeconds,
+    );
+    blockIconCode = applyRadarPrecipToDayPartIcon(
+      blockIconCode,
+      radarCtx: radarNowcast,
+      partHasRadarPrecip: partRadar,
+      tempC: avgTemp,
+    );
+  }
+
+  // Ak 24 h pás pre tento úsek hlási zrážky, doplni ikonu (neprepisuj sucho z ECMWF).
+  if (stripState != null) {
+    final stripPartIcon = _dominantPrecipIconForDayPartFromStrip(
+      hourly,
+      date,
+      part,
+      stripState,
+      utcOffsetSeconds: utcOffsetSeconds,
+    );
+    if (stripPartIcon != null && kPrecipitationCodes.contains(stripPartIcon)) {
+      blockIconCode = stripPartIcon;
+    }
+  }
+
+  blockIconCode = _applyDayPartPrecipIconIntensity(
+    blockIconCode,
+    iconProb: iconProb,
+    intensityMm: intensityMm,
+    useDailyIntensityScale: useDailyIntensityScale,
+    dailyIntensityScale: dailyIntensityScale,
+    dailySnowIntensityScale: dailySnowIntensityScale,
+    intensitySnowCm: intensitySnowCm,
+  );
 
   Widget iconWidget = getWeatherIcon(
     blockIconCode,

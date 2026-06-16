@@ -204,26 +204,31 @@ int _dailyMainIconSkyTextCode(WeatherData data, int dayIndex) {
           : apiDailyPrecip;
 
   final locTime = DateTime.now().toUtc().add(Duration(seconds: data.utcOffsetSeconds ?? 0));
+  final utcOff = data.utcOffsetSeconds;
   final morningWeather = _getDayPartWeather(
       dateStr, h, 'morning', daily, fallbackDailyCode, dailyApiProb, current, locTime,
       suppressWetDayIcons: suppressWetDayIcons,
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
-      dailyTotalSnowCm: apiDailySnow);
+      dailyTotalSnowCm: apiDailySnow,
+      utcOffsetSeconds: utcOff);
   final afternoonWeather = _getDayPartWeather(
       dateStr, h, 'afternoon', daily, fallbackDailyCode, dailyApiProb, current, locTime,
       suppressWetDayIcons: suppressWetDayIcons,
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
-      dailyTotalSnowCm: apiDailySnow);
+      dailyTotalSnowCm: apiDailySnow,
+      utcOffsetSeconds: utcOff);
   final eveningWeather = _getDayPartWeather(
       dateStr, h, 'evening', daily, fallbackDailyCode, dailyApiProb, current, locTime,
       suppressWetDayIcons: suppressWetDayIcons,
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
-      dailyTotalSnowCm: apiDailySnow);
+      dailyTotalSnowCm: apiDailySnow,
+      utcOffsetSeconds: utcOff);
   final nightWeather = _getDayPartWeather(
       dateStr, h, 'night', daily, fallbackDailyCode, dailyApiProb, current, locTime,
       suppressWetDayIcons: suppressWetDayIcons,
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
-      dailyTotalSnowCm: apiDailySnow);
+      dailyTotalSnowCm: apiDailySnow,
+      utcOffsetSeconds: utcOff);
 
   return resolveDailyCardMainIconCode(
     displayedDayIcons: displayedDayIcons,
@@ -264,6 +269,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   bool _lightningNearby = false;
   RadarNowcastContext _radarNowcastContext = RadarNowcastContext.inactive;
   DateTime? _lastRadarStripRefreshAt;
+  DateTime? _lastRadarTrackerRefreshAt;
   List<bool> _expandedStates = [];
 
   List<WarningData> _warnings = [];
@@ -680,13 +686,15 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
   void _restartPeriodicTimers() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       unawaited(_maybeRecoverFromOffline());
       _maybeRefreshNearbyWebcams();
       final city = currentCity;
       if (city != null) {
         unawaited(_refreshLightningForCity(city));
-        unawaited(_refreshRadarNowcastForCity(city));
+        if (radarCoverageForCity(city)) {
+          unawaited(_refreshRadarNowcastForCity(city));
+        }
       }
     });
 
@@ -903,120 +911,110 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     );
   }
 
-  Widget? _buildRadarPrecipTrackerCard() {
+  RadarPrecipTrackerInfo? _radarPrecipTrackerInfoOrNull() {
     final city = currentCity;
     if (city == null || !radarCoverageForCity(city)) return null;
 
     final ctx = _radarNowcastContext;
-    if (!ctx.eligible) return null;
-
     final hourly = weatherData?.hourly;
     final tempC = weatherData?.current?.temperature ??
         (hourly?.temperature != null && hourly!.temperature!.isNotEmpty
             ? hourly.temperature!.first
             : null);
-    final info = ctx.precipTrackerInfo(
+    final cloudCover = weatherData?.current?.cloudCover ??
+        (hourly?.cloudCover != null && hourly!.cloudCover!.isNotEmpty
+            ? hourly.cloudCover!.first
+            : null);
+
+    if (!ctx.eligible) {
+      return const RadarPrecipTrackerInfo(
+        phase: RadarPrecipTrackerPhase.loading,
+        title: '',
+        detail: 'Načítavam live radar…',
+        iconCode: 2,
+      );
+    }
+
+    return ctx.precipTrackerInfo(
       _getCurrentLocationTime(),
       tempC: tempC,
+      cloudCoverPercent: cloudCover,
     );
-    if (info == null) return null;
+  }
 
-    return _heroGlassCard(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 12, 12, 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Sledovač zrážok podľa radaru',
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.72),
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.1,
-                    ),
-                  ),
-                ),
-                GestureDetector(
-                  onTap: _showRadarPrecipTrackerInfo,
-                  behavior: HitTestBehavior.opaque,
-                  child: Padding(
-                    padding: const EdgeInsets.all(4),
-                    child: Icon(
-                      Icons.info_outline_rounded,
-                      size: 18,
-                      color: Colors.white.withValues(alpha: 0.55),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                getWeatherIcon(info.iconCode, size: 44),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        info.title,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w800,
-                          height: 1.2,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        info.detail,
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.88),
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                          height: 1.35,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+  Widget _radarGlassBadge(IconData icon, String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: <Color>[
+            Color.fromRGBO(80, 97, 124, 0.88),
+            Color.fromRGBO(50, 65, 88, 0.84),
           ],
         ),
+        border: Border.all(color: const Color.fromRGBO(255, 255, 255, 0.18)),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white, size: 14),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  void _showRadarPrecipTrackerInfo() {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF2A3848),
-        title: const Text(
-          'Sledovač zrážok',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+  Widget _buildRadarPrecipTrackerSection(RadarPrecipTrackerInfo info) {
+    return _heroGlassCard(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            getWeatherIcon(info.iconCode, size: 52),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (info.title.isNotEmpty)
+                    Text(
+                      info.title,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15.5,
+                        fontWeight: FontWeight.w800,
+                        height: 1.2,
+                      ),
+                    ),
+                  if (info.detail.isNotEmpty) ...[
+                    if (info.title.isNotEmpty) const SizedBox(height: 4),
+                    Text(
+                      info.detail,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.78),
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w500,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
         ),
-        content: Text(
-          'Odhad začiatku a konca zrážok podľa live CMAX radaru (posledných približne 30 minút). '
-          'Nejde o presnú predpoveď — bunka môže zrýchliť, spomaliť alebo zmeniť smer.',
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: 0.85),
-            height: 1.4,
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Rozumiem'),
-          ),
-        ],
       ),
     );
   }
@@ -1057,25 +1055,28 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   }
 
   Future<RadarNowcastContext> _fetchRadarNowcastForCity(GeoCity city) async {
-    final httpCtx = await fetchRadarNowcastContextForCity(city);
-    if (_radarController == null || _radarLoadFailed) {
-      return httpCtx;
+    if (_radarController != null && !_radarLoadFailed) {
+      try {
+        final webCtx =
+            await fetchRadarNowcastViaWebView(_radarController!, city);
+        if (webCtx.eligible) return webCtx;
+      } catch (e) {
+        debugPrint('_fetchRadarNowcastForCity web: $e');
+      }
     }
-    try {
-      final webCtx =
-          await fetchRadarNowcastViaWebView(_radarController!, city);
-      if (!webCtx.eligible) return httpCtx;
-      if (webCtx.precipNow && !httpCtx.precipNow) return webCtx;
-      if (httpCtx.precipNow && !webCtx.precipNow) return httpCtx;
-      if (webCtx.wetScore > httpCtx.wetScore) return webCtx;
-      if (httpCtx.wetScore > webCtx.wetScore) return httpCtx;
-      final webDbz = webCtx.dbz ?? 0;
-      final httpDbz = httpCtx.dbz ?? 0;
-      return webDbz >= httpDbz ? webCtx : httpCtx;
-    } catch (e) {
-      debugPrint('_fetchRadarNowcastForCity web: $e');
-      return httpCtx;
+    return fetchRadarNowcastContextForCity(city);
+  }
+
+  void _maybeRefreshRadarTracker(GeoCity city) {
+    if (!radarCoverageForCity(city)) return;
+    final now = DateTime.now();
+    if (_lastRadarTrackerRefreshAt != null &&
+        now.difference(_lastRadarTrackerRefreshAt!) <
+            const Duration(seconds: 20)) {
+      return;
     }
+    _lastRadarTrackerRefreshAt = now;
+    unawaited(_refreshRadarNowcastForCity(city));
   }
 
   Future<void> _refreshRadarNowcastForCity(GeoCity city) async {
@@ -3992,15 +3993,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     return _supportsRadarForCity(currentCity);
   }
 
-  Widget _buildRadarCard() {
-    if (!_shouldShowRadarHomeCard()) {
-      return const SizedBox.shrink();
-    }
-
-    _setupRadarController(currentCity!);
-
+  Widget _buildRadarMapPanel() {
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 0, 12, 0),
       height: 220,
       decoration: BoxDecoration(
         color: const Color(0xFF2A3848),
@@ -4057,15 +4051,23 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF3498DB),
                         foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 8,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
                         splashFactory: NoSplash.splashFactory,
                       ).copyWith(
                         overlayColor: WidgetStateProperty.all(Colors.transparent),
                       ),
                       child: const Text(
                         'Skúsiť znova',
-                        style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
                       ),
                     ),
                   ],
@@ -4094,7 +4096,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                   ),
                 ],
               ),
-
             if (!_isRadarFullscreen && _radarWebViewWidget != null)
               AnimatedOpacity(
                 opacity: _isRadarReturning ? 0.0 : 1.0,
@@ -4105,54 +4106,46 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
               )
             else if (!_isRadarReturning)
               Container(color: const Color(0xFF2A3848)),
-
             Positioned.fill(
               child: GestureDetector(
                 onTap: () => unawaited(_openRadarFullscreen()),
-                child: Container(
-                  color: Colors.transparent,
-                ),
+                child: Container(color: Colors.transparent),
               ),
             ),
-
             Positioned(
               top: 12,
               left: 12,
               child: IgnorePointer(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: <Color>[
-                        Color.fromRGBO(80, 97, 124, 0.88),
-                        Color.fromRGBO(50, 65, 88, 0.84),
-                      ],
-                    ),
-                    border: Border.all(color: const Color.fromRGBO(255, 255, 255, 0.18)),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.radar, color: Colors.white, size: 14),
-                      SizedBox(width: 6),
-                      Text(
-                        'Meteo Radar',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                child: _radarGlassBadge(Icons.radar, 'Meteo Radar'),
               ),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildRadarCard() {
+    if (!_shouldShowRadarHomeCard()) {
+      return const SizedBox.shrink();
+    }
+
+    final city = currentCity!;
+    _setupRadarController(city);
+    _maybeRefreshRadarTracker(city);
+
+    final trackerInfo = _radarPrecipTrackerInfoOrNull();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildRadarPrecipTrackerSection(trackerInfo!),
+          const SizedBox(height: _kHomeForecastSectionGap),
+          _buildRadarMapPanel(),
+        ],
       ),
     );
   }
@@ -4403,20 +4396,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     }
 
     final uvWarning = _getTodayUvWarning();
-    final radarTracker = _buildRadarPrecipTrackerCard();
     final homeInsightTiles = _buildHomeInsightTilesRow(uvWarning: uvWarning);
 
     return CustomScrollView(
       physics: const AlwaysScrollableScrollPhysics(parent: ClampingScrollPhysics()),
       slivers: [
-        if (radarTracker != null)
-          SliverToBoxAdapter(
-            child: Container(
-              color: Colors.transparent,
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, _kHomeForecastSectionGap),
-              child: radarTracker,
-            ),
-          ),
         if (homeInsightTiles != null)
           SliverToBoxAdapter(
             child: Container(
@@ -4650,17 +4634,37 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     if (h == null) return const SliverToBoxAdapter(child: SizedBox.shrink());
 
     final DateTime locTime = _getCurrentLocationTime();
+    final radarCtx = _radarNowcastContext;
+    final city = currentCity;
+    if (city != null && radarCoverageForCity(city)) {
+      final now = DateTime.now();
+      if (_lastRadarStripRefreshAt == null ||
+          now.difference(_lastRadarStripRefreshAt!) >
+              const Duration(seconds: 20)) {
+        _lastRadarStripRefreshAt = now;
+        unawaited(_refreshRadarNowcastForCity(city));
+      }
+    }
 
-    final stripByIdx =
-        _hourlyStripDisplayIconByIndex(h, locTime, current, daily, weatherData?.utcOffsetSeconds,
-            lightningNearby: _lightningNearby);
-    if (stripByIdx == null || stripByIdx.isEmpty) {
+    final stripState = _hourlyStripFinalDisplayState(
+      h,
+      locTime,
+      current,
+      daily,
+      weatherData?.utcOffsetSeconds,
+      radarNowcast: radarCtx,
+      radarCoverageActive: city != null && radarCoverageForCity(city),
+      lightningNearby: _lightningNearby,
+    );
+    if (stripState == null || stripState.icons.isEmpty) {
       return const SliverToBoxAdapter(child: SizedBox.shrink());
     }
-    final stripIndices = stripByIdx.keys.toList()..sort();
+
+    final stripIndices = stripState.icons.keys.toList()..sort();
     final start = stripIndices.first;
     final count = stripIndices.length;
-    var displayIcons = stripIndices.map((idx) => stripByIdx[idx]!).toList();
+    final displayIcons =
+        stripIndices.map((idx) => stripState.icons[idx]!).toList();
 
     if (_expandedStates.length != count) {
       _expandedStates = List.filled(count, false);
@@ -4679,61 +4683,65 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final stripShowRainPrecip = <bool>[];
     final stripApiWeatherCodes = <int?>[];
     final stripCloudPcts = <double?>[];
-    final stripHoursFrom = <int>[];
     final stripPrecipMm = <double>[];
-    final radarCtx = _radarNowcastContext;
-    final city = currentCity;
-    if (kRadarOnlyPrecipTestMode &&
-        city != null &&
-        radarCoverageForCity(city) &&
-        !radarCtx.precipNow) {
-      final now = DateTime.now();
-      if (_lastRadarStripRefreshAt == null ||
-          now.difference(_lastRadarStripRefreshAt!) >
-              const Duration(seconds: 12)) {
-        _lastRadarStripRefreshAt = now;
-        unawaited(_refreshRadarNowcastForCity(city));
-      }
-    }
+    final nowHour = DateTime(
+      locTime.year,
+      locTime.month,
+      locTime.day,
+      locTime.hour,
+    );
 
     for (var i = 0; i < count; i++) {
       final idx = stripIndices[i];
-      final hoursFrom = _hourlySlotHoursFromLocalTime(h, idx, locTime);
-      stripHoursFrom.add(hoursFrom);
       final iconCode = displayIcons[i];
       final hasProb = h.precipitationProbability != null &&
           idx < h.precipitationProbability!.length;
-      final rawMm = smoothed.precipitation[i] ??
-          h.precipitation?[idx] ??
-          0.0;
-      final storedProb =
-          hasProb ? (h.precipitationProbability![idx] ?? 0) : 0;
+      final storedProb = stripState.probs[idx] ??
+          (hasProb ? (h.precipitationProbability![idx] ?? 0) : 0);
+
+      final parsed = DateTime.tryParse(h.time[idx]);
+      final localT = parsed != null && weatherData?.utcOffsetSeconds != null
+          ? parsed.add(Duration(seconds: weatherData!.utcOffsetSeconds!))
+          : parsed;
+      final slotHour = localT != null
+          ? DateTime(
+              localT.year,
+              localT.month,
+              localT.day,
+              localT.hour,
+            )
+          : null;
+      final pinNow = slotHour == nowHour && radarCtx.precipNow;
+      final wetIcon = kPrecipitationCodes.contains(
+        normalizeDisplayWeatherCode(iconCode),
+      );
+      final pipelineMm = stripState.precipMm[idx] ?? 0.0;
+      final displayMm = pipelineMm >= kMeaningfulPrecipMmPerHour
+          ? pipelineMm
+          : resolveHourlyStripPrecipMm(
+              h,
+              idx,
+              radarPinMm: pinNow ? pipelineMm : null,
+              stripProb: storedProb,
+              wetDisplayIcon: wetIcon,
+            );
+      final probForShow = wetIcon
+          ? math.max(storedProb, kMinPrecipProbPercent)
+          : storedProb;
+
       stripStoredProbs.add(storedProb);
-      stripPrecipMm.add(rawMm);
+      stripPrecipMm.add(displayMm);
       stripShowRainPrecip.add(
-        hourlyStripShowRainPrecip(
-          iconCode: iconCode,
-          precipMm: rawMm,
-          precipProb: storedProb,
-        ),
+        stripState.showRainPrecip[idx] ??
+            hourlyStripShowRainPrecip(
+              iconCode: iconCode,
+              precipMm: displayMm,
+              precipProb: probForShow,
+            ),
       );
       stripApiWeatherCodes.add(h.weatherCode?[idx]);
       stripCloudPcts.add(h.cloudCover?[idx] ?? smoothed.cloudCover[i]);
     }
-
-    applyRadarPrecipEndToHourlyStrip(
-      displayIcons: displayIcons,
-      showRainPrecip: stripShowRainPrecip,
-      storedProbs: stripStoredProbs,
-      precipMm: stripPrecipMm,
-      stripIndices: stripIndices,
-      h: h,
-      radarCtx: radarCtx,
-      locTime: locTime,
-      utcOffsetSeconds: weatherData?.utcOffsetSeconds,
-      radarCoverageActive:
-          city != null && radarCoverageForCity(city),
-    );
 
     final stripPrecipPercents = hourlyStripPrecipPercentsForHours(
       storedProbs: stripStoredProbs,
@@ -4741,9 +4749,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       iconCodes: displayIcons,
       apiWeatherCodes: stripApiWeatherCodes,
       cloudCoverPercents: stripCloudPcts,
-      radarOnlyPrecip: kRadarOnlyPrecipTestMode &&
-          (radarCtx.eligible ||
-              (city != null && radarCoverageForCity(city))),
+      radarOnlyPrecip: false,
     );
 
     return SliverPadding(
@@ -5088,7 +5094,10 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final int iconCode = displayIconCode;
 
     final String precipPercent = '$precipColumnPercent%';
-    final bool showPrecipAmount = showRainPrecipColumn && precipDisplayMm > 0.0;
+    final bool wetPrecipColumn = showRainPrecipColumn ||
+        kPrecipitationCodes.contains(normalizeDisplayWeatherCode(displayIconCode));
+    final bool showPrecipAmount =
+        wetPrecipColumn && precipDisplayMm >= kMeaningfulPrecipMmPerHour;
 
     final windWithDirection = _formatWindWithDirection(h.windSpeed?[index], h.windDirection?[index]);
 
@@ -5447,6 +5456,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
     const dateWidth = 96.0;
     final dateStr = d.time[dayIndex];
+    final radarForDay = dayIndex == 0
+        ? _radarNowcastContext
+        : RadarNowcastContext.inactive;
 
     final locTime = _getCurrentLocationTime();
     final radarCoverageActive =
@@ -5458,7 +5470,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
             current,
             d,
             weatherData?.utcOffsetSeconds,
-            radarNowcast: _radarNowcastContext,
+            radarNowcast: radarForDay,
             radarCoverageActive: radarCoverageActive,
             lightningNearby: _lightningNearby,
           )
@@ -5494,9 +5506,17 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         dateStr,
         current,
         d,
-        _getCurrentLocationTime(),
+        locTime,
       );
-      if (fair != null) displayedDayIcons = fair.$2;
+      if (fair != null) {
+        displayedDayIcons = dayIndex == 0
+            ? _mergeStripIconsIntoDayIconList(
+                fair.$2,
+                fair.$1,
+                stripState,
+              )
+            : fair.$2;
+      }
     }
 
     final int fallbackDailyCode = d.weatherCode?[dayIndex] ?? 0;
@@ -5507,6 +5527,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       apiDailyPrecip,
       apiDailySnow,
       dailyApiProb,
+      stripState: dayIndex == 0 ? stripState : null,
     );
 
     final showableDayPrecip = dayShowablePrecipFromHourlyAligned(
@@ -5533,32 +5554,36 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         suppressWetDayIcons: suppressWetDayIcons,
         dailyTotalPrecipMm: effectiveDailyPrecipMm,
         dailyTotalSnowCm: apiDailySnow,
-        stripState: stripState,
-        utcOffsetSeconds: weatherData?.utcOffsetSeconds);
+        stripState: dayIndex == 0 ? stripState : null,
+        utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+        radarNowcast: radarForDay);
     final afternoonWeather = _getDayPartWeather(
         dateStr, h, 'afternoon', d, fallbackDailyCode, dailyApiProb, current,
         locTime,
         suppressWetDayIcons: suppressWetDayIcons,
         dailyTotalPrecipMm: effectiveDailyPrecipMm,
         dailyTotalSnowCm: apiDailySnow,
-        stripState: stripState,
-        utcOffsetSeconds: weatherData?.utcOffsetSeconds);
+        stripState: dayIndex == 0 ? stripState : null,
+        utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+        radarNowcast: radarForDay);
     final eveningWeather = _getDayPartWeather(
         dateStr, h, 'evening', d, fallbackDailyCode, dailyApiProb, current,
         locTime,
         suppressWetDayIcons: suppressWetDayIcons,
         dailyTotalPrecipMm: effectiveDailyPrecipMm,
         dailyTotalSnowCm: apiDailySnow,
-        stripState: stripState,
-        utcOffsetSeconds: weatherData?.utcOffsetSeconds);
+        stripState: dayIndex == 0 ? stripState : null,
+        utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+        radarNowcast: radarForDay);
     final nightWeather = _getDayPartWeather(
         dateStr, h, 'night', d, fallbackDailyCode, dailyApiProb, current,
         locTime,
         suppressWetDayIcons: suppressWetDayIcons,
         dailyTotalPrecipMm: effectiveDailyPrecipMm,
         dailyTotalSnowCm: apiDailySnow,
-        stripState: stripState,
-        utcOffsetSeconds: weatherData?.utcOffsetSeconds);
+        stripState: dayIndex == 0 ? stripState : null,
+        utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+        radarNowcast: radarForDay);
 
     final dailyMainIconCode = finalizeDailyCardIconCode(
       resolveDailyCardMainIconCode(

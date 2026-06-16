@@ -6,6 +6,18 @@ const int kRadarImageCols = 4000;
 const int kRadarImageRows = 2000;
 
 const double kRadarMinDbzForUi = 10.0;
+/// Min. dBZ pre zmysluplné echo — pod tým ide o šum / slabý artefakt.
+const double kRadarMinDbzSignificantEcho = 20.0;
+/// Jedna snímka bez histórie — musí byť aspoň takto silná.
+const double kRadarMinDbzCoherentEcho = 24.0;
+/// Sledovač „blíži sa“ — len pri reálnom echo, nie izolovaných bodoch.
+const double kRadarMinDbzTrackerIncoming = 22.0;
+/// Koľko posledných snímok musí echo potvrdiť (odfiltruje mŕtve pixely).
+const int kRadarNoiseMinPersistFrames = 2;
+/// Min. pixelov ≥18 dBZ v okolí 14 px — súvislá oblasť, nie bodka.
+const int kRadarMinCoherentAreaPx = 5;
+/// Min. pixelov ≥16 dBZ v jadre 3 px pri pine.
+const int kRadarMinCoherentCorePx = 2;
 /// „Už prší u mňa“ — nie len okraj blížiacej sa bunky.
 const double kRadarMinDbzPrecipNow = 22.0;
 const int kRadarCoreSampleRadiusPx = 3;
@@ -41,8 +53,13 @@ const List<_RadarCmaxStop> _kRadarCmaxLegendStops = [
   _RadarCmaxStop(56, 252, 176, 252),
 ];
 
-const int kRadarHistoryFramesToSample = 6;
-const Duration _kRadarNowcastCacheTtl = Duration(seconds: 30);
+/// Počet snímok z [radar_history_cmax.json] — server ~5 min interval, typicky až ~24 (= cca 2 h).
+const int kRadarHistoryFramesMin = 3;
+const int kRadarHistoryFramesMax = 24;
+const int kRadarHistoryFramesToSample = kRadarHistoryFramesMax;
+/// Trend / transient — len posledných N snímok, aby stará dažďová hodina neskresľovala stav.
+const int kRadarNowcastTrendFrames = 10;
+const Duration _kRadarNowcastCacheTtl = Duration(seconds: 20);
 
 class RadarFrameSample {
   const RadarFrameSample({
@@ -51,6 +68,8 @@ class RadarFrameSample {
     this.precipAtPoint = false,
     this.dbz,
     this.peakDbz,
+    this.coherentPx14 = 0,
+    this.coherentCorePx = 0,
     this.northDbz,
     this.southDbz,
     this.eastDbz,
@@ -66,6 +85,10 @@ class RadarFrameSample {
   final double? dbz;
   /// Max dBZ v okolí ~14 px — intenzita blížiacej sa bunky.
   final double? peakDbz;
+  /// Počet pixelov ≥18 dBZ v okolí 14 px.
+  final int coherentPx14;
+  /// Počet pixelov ≥16 dBZ v jadre ~3 px.
+  final int coherentCorePx;
   final double? northDbz;
   final double? southDbz;
   final double? eastDbz;
@@ -79,10 +102,14 @@ class RadarFrameSample {
         _ => null,
       };
 }
+ 
+/// Fáza karty sledovača — ovplyvňuje layout (kompaktný vs. rozšírený).
+enum RadarPrecipTrackerPhase { idle, loading, watching, active, incoming }
 
-/// Krátky text pre kartu „Sledovač zrážok podľa radaru“.
+/// Krátky text pre kartu „Sledovač zrážok“.
 class RadarPrecipTrackerInfo {
   const RadarPrecipTrackerInfo({
+    required this.phase,
     required this.title,
     required this.detail,
     required this.iconCode,
@@ -90,14 +117,19 @@ class RadarPrecipTrackerInfo {
     this.endLocal,
   });
 
+  final RadarPrecipTrackerPhase phase;
   final String title;
   final String detail;
   final int iconCode;
   final DateTime? startLocal;
   final DateTime? endLocal;
+
+  bool get isExpanded =>
+      phase == RadarPrecipTrackerPhase.active ||
+      phase == RadarPrecipTrackerPhase.incoming;
 }
 
-/// Radarový kontext — trend z ~30 min histórie. Cieľ: odhad **kedy zrážky skončia**.
+/// Radarový kontext — trend z posledných ~2 h histórie (podľa servera). Cieľ: odhad **kedy zrážky skončia**.
 class RadarNowcastContext {
   const RadarNowcastContext({
     required this.eligible,
@@ -111,7 +143,90 @@ class RadarNowcastContext {
 
   RadarFrameSample? get latest => history.isEmpty ? null : history.last;
 
-  bool get precipNow => latest?.precipAtPoint ?? false;
+  /// Posledných [kRadarNowcastTrendFrames] snímok — motion / „práve prestalo“ / transient.
+  List<RadarFrameSample> get _recentHistory {
+    if (history.length <= kRadarNowcastTrendFrames) return history;
+    return history.sublist(history.length - kRadarNowcastTrendFrames);
+  }
+
+  /// Surový stav pixelu — trend v histórii; UI používa [precipNow].
+  bool get _rawPrecipAtPoint => latest?.precipAtPoint ?? false;
+
+  /// Prší pri pinom — stredný pixel / engulf; nie len peak z okolia (14 px).
+  bool get precipNow {
+    if (!_rainAtPinCore) return false;
+    if (_fringePrecipAtPoint) {
+      final center = latest?.dbz ?? 0;
+      final peak = latest?.peakDbz ?? center;
+      return center >= 10 || peak >= 24 || _echoEngulfsPin;
+    }
+    return true;
+  }
+
+  /// Verejný prístup pre UI — radar potvrdil zrážky pri pine.
+  bool get rainAtPinNow => _rainAtPinCore;
+
+  /// Zrážky **priamo** na pine — nie echo v 14 px okolí (Freyung ≠ Znojmo).
+  bool get _rainAtPinCore {
+    final frame = latest;
+    if (frame == null) return false;
+
+    final center = frame.dbz ?? 0;
+    final peak = frame.peakDbz ?? center;
+    final gap = peak - center;
+
+    if (_isScatteredSpeckleAtPin) return false;
+
+    if (center >= kRadarMinDbzPrecipNow) {
+      if (peakDbzGapFringeOnly(center, peak) &&
+          frame.coherentCorePx < kRadarMinCoherentCorePx) {
+        return false;
+      }
+      return true;
+    }
+    if (_rawPrecipAtPoint &&
+        center >= 14 &&
+        gap <= 10 &&
+        frame.coherentCorePx >= 1) {
+      return true;
+    }
+    if (_echoEngulfsPin &&
+        center >= 14 &&
+        frame.coherentPx14 >= kRadarMinCoherentAreaPx) {
+      return true;
+    }
+    if (center >= 14 &&
+        peak >= 20 &&
+        gap <= 8 &&
+        frame.coherentCorePx >= kRadarMinCoherentCorePx) {
+      return true;
+    }
+    if (center >= 12 &&
+        peak >= 22 &&
+        gap <= 6 &&
+        frame.coherentCorePx >= kRadarMinCoherentCorePx) {
+      return true;
+    }
+    return false;
+  }
+
+  /// Alias — interné volania.
+  bool get _rainAtPinNow => _rainAtPinCore;
+
+  bool peakDbzGapFringeOnly(double center, double peak) =>
+      peak - center >= 14 && center < 14;
+
+  /// dBZ pre hero / sledovač — reálna intenzita pri pinom.
+  double get precipIntensityDbz {
+    final frame = latest;
+    if (frame == null) return kRadarMinDbzForUi;
+    final center = frame.dbz ?? 0;
+    final peak = frame.peakDbz ?? center;
+    if (!precipNow) {
+      return center > 0 ? center : (peak > 0 ? math.min(peak, 24.0) : kRadarMinDbzForUi);
+    }
+    return math.max(center, math.min(peak, center + 12)).clamp(12.0, 56.0);
+  }
 
   int get wetScore {
     if (history.isEmpty) return -1;
@@ -120,18 +235,89 @@ class RadarNowcastContext {
       if (frame.precip) score += 10;
       final dbz = frame.dbz;
       if (dbz != null) score += (dbz / 5).round();
+      final peak = frame.peakDbz;
+      if (peak != null) score += (peak / 4).round();
     }
     final last = latest;
     if (last != null) {
       if (last.precipAtPoint) score += 50;
       final dbz = last.dbz;
       if (dbz != null) score += (dbz / 2).round();
+      final peak = last.peakDbz;
+      if (peak != null) score += (peak / 2).round();
+      final nearby = _maxNearbyDbz;
+      if (nearby != null) score += (nearby / 3).round();
     }
     return score;
   }
 
+  /// Echo priamo zasahuje pin (stred a peak blízko seba).
+  bool get _echoEngulfsPin {
+    final frame = latest;
+    if (frame == null) return false;
+    final center = frame.dbz ?? 0;
+    final peak = frame.peakDbz ?? center;
+    return peak >= 16 && (peak - center) <= 8;
+  }
+
+  /// Radar vidí zrážky pri lokalite — ešte nie priamo nad pinom.
+  bool get _nearbyRainLikely {
+    if (_rainAtPinCore || _isScatteredWeakNoise) return false;
+    final frame = latest;
+    if (frame == null) return false;
+    final center = frame.dbz ?? 0;
+    final peak = frame.peakDbz ?? center;
+    final nearby = _maxNearbyDbz ?? peak;
+
+    if (_rainBandNearPin) return true;
+    if (!_echoMovingTowardPin || !_echoPersistedOrStrong) return false;
+
+    if (center < 10 && nearby >= 24) return true;
+    if (center < 12 && peak >= 24) return true;
+    if (nearby >= 26 && peak >= 20) return true;
+    return false;
+  }
+
+  /// Zrážky z viacerých strán okolo pinu — fronta/bunka v oblasti, nie „mimo“.
+  bool get _rainBandNearPin {
+    if (_isScatteredWeakNoise) return false;
+    final frame = latest;
+    if (frame == null) return false;
+    if (_strongEchoDirections(frame, minDbz: 20) >= 3 &&
+        _echoPersistedOrStrong &&
+        _echoMovingTowardPin) {
+      return true;
+    }
+    final nearby = _maxNearbyDbz ?? 0;
+    return nearby >= 28 &&
+        _echoMovingTowardPin &&
+        _echoPersistedOrStrong;
+  }
+
+  int _strongEchoDirections(RadarFrameSample f, {double minDbz = 20}) {
+    var n = 0;
+    for (final v in [f.northDbz, f.southDbz, f.eastDbz, f.westDbz]) {
+      if (v != null && v >= minDbz) n++;
+    }
+    return n;
+  }
+
+  /// Echo jednoznačne obchádza pin — nie keď prší v okolí z viacerých strán.
+  bool get _echoClearlyOffPath {
+    if (!_hasActiveNearbyEcho || _nearbyRainLikely || _rainBandNearPin) {
+      return false;
+    }
+    final frame = latest;
+    if (frame == null) return false;
+    if (_strongEchoDirections(frame) >= 2) return false;
+    return _echoMovingAwayFromPin || _echoPassingBySingleCell;
+  }
+
   /// UI reaguje len na **poslednú** radarovú snímku — nie na starú mokrú históriu.
   bool get showsPrecipForUi => precipNow;
+
+  /// Radar nepotvrdil zrážky pri pine.
+  bool get dryAtPin => eligible && !precipNow;
 
   double? get dbz => latest?.dbz;
 
@@ -154,27 +340,247 @@ class RadarNowcastContext {
     return maxDbz;
   }
 
+  /// Koľko posledných snímok má echo ≥ [minDbz] (odfiltruje jednorázový šum).
+  int _recentFramesWithEcho({double minDbz = 16}) {
+    var n = 0;
+    for (final f in _recentHistory) {
+      var strength = f.peakDbz ?? f.dbz ?? 0;
+      for (final v in [f.northDbz, f.southDbz, f.eastDbz, f.westDbz]) {
+        if (v != null && v > strength) strength = v;
+      }
+      if (strength >= minDbz) n++;
+    }
+    return n;
+  }
+
+  double _maxCardinalDbz(RadarFrameSample f) {
+    var m = 0.0;
+    for (final v in [f.northDbz, f.southDbz, f.eastDbz, f.westDbz]) {
+      if (v != null && v > m) m = v;
+    }
+    return m;
+  }
+
+  double _frameEchoStrength(RadarFrameSample f) {
+    var strength = f.peakDbz ?? f.dbz ?? 0;
+    for (final v in [f.northDbz, f.southDbz, f.eastDbz, f.westDbz]) {
+      if (v != null && v > strength) strength = v;
+    }
+    return strength;
+  }
+
+  /// Izolované bodky mapy — slabý stred, peak z diaľky, bez súvislej oblasti.
+  bool get _isScatteredSpeckleAtPin {
+    final frame = latest;
+    if (frame == null) return false;
+    final center = frame.dbz ?? 0;
+    if (center >= kRadarMinDbzPrecipNow) return false;
+    if (frame.coherentCorePx >= kRadarMinCoherentCorePx) return false;
+    if (frame.coherentPx14 >= kRadarMinCoherentAreaPx && center >= 14) {
+      return false;
+    }
+
+    final peak = frame.peakDbz ?? center;
+    if (peak < 20) return false;
+
+    if (center < 16 && peak - center >= 10) return true;
+    if (center < 14 && peak >= 24) return true;
+    return false;
+  }
+
+  /// Silná bunka z jedného smeru (fronta), nie roztrúsený šum okolo pinu.
+  bool get _realDirectionalFrontApproaching {
+    final approach = _incomingApproach;
+    if (approach == null || approach.dbz < kRadarMinDbzTrackerIncoming) {
+      return false;
+    }
+    if (history.length < 2) return approach.dbz >= 26;
+    final old = history.first.dbzInDirection(approach.dir!) ?? 0;
+    if (approach.dbz < old - 8) return false;
+    final dirSlope = _directionalDbzSlopePerMin(approach.dir!);
+    return approach.dbz >= 22 && (dirSlope == null || dirSlope >= -0.03);
+  }
+
+  /// Echo nie je izolovaný mŕtvy pixel — priestor + čas.
+  bool get _isCoherentEchoNearPin {
+    if (_rainAtPinCore || precipNow) return true;
+    if (_isScatteredSpeckleAtPin && !_realDirectionalFrontApproaching) {
+      return false;
+    }
+    final frame = latest;
+    if (frame == null) return false;
+
+    final center = frame.dbz ?? 0;
+    final peak = frame.peakDbz ?? center;
+    final nearby = _maxNearbyDbz ?? peak;
+    final cardinal = _maxCardinalDbz(frame);
+    final strength = math.max(nearby, math.max(peak, cardinal));
+
+    if (_realDirectionalFrontApproaching &&
+        (_incomingApproach?.dbz ?? 0) >= 24) {
+      return true;
+    }
+
+    if (center >= 14 &&
+        peak >= 20 &&
+        frame.coherentCorePx >= kRadarMinCoherentCorePx) {
+      return true;
+    }
+    if (strength >= kRadarMinDbzCoherentEcho &&
+        frame.coherentPx14 >= kRadarMinCoherentAreaPx) {
+      return true;
+    }
+
+    if (_strongEchoDirections(frame, minDbz: 20) >= 2 && strength >= 20) {
+      return true;
+    }
+
+    if (_recentFramesWithEcho(minDbz: 20) >= kRadarNoiseMinPersistFrames &&
+        strength >= kRadarMinDbzSignificantEcho &&
+        frame.coherentPx14 >= kRadarMinCoherentAreaPx) {
+      return true;
+    }
+
+    if (_echoEngulfsPin && peak >= 18) return true;
+
+    if (_echoClosingFromDirection &&
+        (_incomingApproach?.dbz ?? 0) >= 22 &&
+        _recentFramesWithEcho(minDbz: 18) >= kRadarNoiseMinPersistFrames) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /// Radarový šum — izolované bodky bez súdržnosti (Hlohovec / Košice).
+  bool get _isRadarNoiseOnly {
+    if (_rainAtPinCore || precipNow) return false;
+    if (_realDirectionalFrontApproaching) return false;
+    if (_isCoherentEchoNearPin) return false;
+    if (_isScatteredSpeckleAtPin) return true;
+
+    final frame = latest;
+    if (frame == null) return true;
+    final strength = _frameEchoStrength(frame);
+    if (strength < kRadarMinDbzSignificantEcho) return true;
+
+    final center = frame.dbz ?? 0;
+    final peak = frame.peakDbz ?? center;
+
+    // 20–23 dBZ len v jednej snímke = typický artefakt.
+    if (strength < kRadarMinDbzCoherentEcho &&
+        _recentFramesWithEcho(minDbz: 18) < kRadarNoiseMinPersistFrames) {
+      return true;
+    }
+
+    // Suchý stred + peak z diaľky, jeden smer, bez opakovania.
+    if (center < 8 &&
+        peak >= 18 &&
+        _strongEchoDirections(frame, minDbz: 18) < 2 &&
+        _recentFramesWithEcho(minDbz: 20) < kRadarNoiseMinPersistFrames) {
+      return true;
+    }
+
+    return true;
+  }
+
+  /// @deprecated alias — prefer [_isCoherentEchoNearPin] / [_isRadarNoiseOnly].
+  bool get _significantEchoNearPin => _isCoherentEchoNearPin;
+
+  /// @deprecated alias.
+  bool get _isScatteredWeakNoise => _isRadarNoiseOnly;
+
+  /// Silná bunka smeruje k pinu, ešte nie priamo nad ním.
+  bool get _approachingPrecipFront {
+    if (_rainAtPinCore || precipNow) return false;
+    final frame = latest;
+    if (frame == null) return false;
+    final center = frame.dbz ?? 0;
+
+    // Koherentné echo pri pine — blíži sa / dorazí čoskoro.
+    if (_isCoherentEchoNearPin && center < 14 && !_isRadarNoiseOnly) {
+      return true;
+    }
+
+    if (_isRadarNoiseOnly) return false;
+    final nearby = _maxNearbyDbz ?? 0;
+    final peak = frame.peakDbz ?? frame.dbz ?? 0;
+
+    if (nearby < 18 && peak < 18) return false;
+
+    final approach = _incomingApproach;
+    if (approach != null && approach.dbz >= 18 && center < 14) {
+      return true;
+    }
+    if (_echoClosingFromDirection) return true;
+    if (!_echoMovingTowardPinOrClosing && !_echoApproachingPin) return false;
+    return nearby >= 18 || peak >= 18;
+  }
+
+  /// Echo z dominantného smeru sa približuje (aj keď centroid zlyhá).
+  bool get _echoClosingFromDirection {
+    if (history.length < 2) return false;
+    final frame = latest;
+    if (frame == null) return false;
+    final center = frame.dbz ?? 0;
+    if (center >= kRadarMinDbzPrecipNow) return false;
+
+    final approach = _incomingApproach;
+    if (approach == null || approach.dbz < 18) return false;
+
+    final dir = approach.dir!;
+    final oldest = history.first;
+    final oldDir = oldest.dbzInDirection(dir) ?? 0;
+    if (approach.dbz >= oldDir + 2) return true;
+
+    if (history.length >= 3) {
+      final peaks = history.map((f) => f.peakDbz ?? f.dbz ?? 0).toList();
+      if (peaks.last >= peaks.first + 3 && peaks.last >= 22) return true;
+    }
+
+    final dirSlope = _directionalDbzSlopePerMin(dir);
+    return dirSlope != null && dirSlope >= 0.03;
+  }
+
+  /// Echo nie je izolovaný šum — silné alebo opakované v histórii.
+  bool get _echoPersistedOrStrong {
+    if (_isRadarNoiseOnly) return false;
+    final nearby = _maxNearbyDbz ?? 0;
+    final peak = latest?.peakDbz ?? latest?.dbz ?? 0;
+    final strength = math.max(nearby, peak);
+    if (strength >= 28) return true;
+    if (strength >= kRadarMinDbzSignificantEcho &&
+        _recentFramesWithEcho(minDbz: 20) >= 3) {
+      return true;
+    }
+    return _recentFramesWithEcho(minDbz: kRadarMinDbzSignificantEcho) >= 4;
+  }
+
   bool get _hasActiveNearbyEcho =>
-      (_maxNearbyDbz ?? 0) >= 20 || (latest?.precip ?? false);
+      _isCoherentEchoNearPin && !_isRadarNoiseOnly;
 
   /// Radar-only pás: echo v okolí, ale ešte nie priamo nad pinom.
   bool get nearbyEcho => !precipNow && _hasActiveNearbyEcho;
 
-  /// Intenzita blížiacej sa / okolitej bunky pre 24 h pás.
+  /// Intenzita blížiacej sa bunky — len pri potvrdenom kurze na pin.
   double? get incomingIntensityDbz {
     if (precipNow) return dbz;
     final frame = latest;
     if (frame == null) return null;
 
-    final nearby = _maxNearbyDbz;
-    if (nearby != null && nearby >= 20) return nearby;
+    final center = frame.dbz ?? 0;
+    if (center >= kRadarMinDbzPrecipNow) return center;
 
-    if (frame.peakDbz != null && frame.peakDbz! >= 20) {
-      return frame.peakDbz;
+    if (_nearbyRainLikely || _echoApproachingPin || _approachingPrecipFront) {
+      final approach = _incomingApproach;
+      if (approach != null && approach.dbz >= 20) {
+        return math.min(approach.dbz, 40.0);
+      }
+      final peak = frame.peakDbz;
+      if (peak != null && peak >= 20) return math.min(peak, 40.0);
+      final nearby = _maxNearbyDbz;
+      if (nearby != null && nearby >= 22) return math.min(nearby, 40.0);
     }
-
-    final approach = _incomingApproach;
-    if (approach != null && approach.dbz >= 20) return approach.dbz;
 
     return null;
   }
@@ -207,7 +613,270 @@ class RadarNowcastContext {
     return (n * sumXY - sumX * sumY) / denom;
   }
 
-  bool get _hadRecentRainAtPoint => history.any((f) => f.precipAtPoint);
+  double? _directionalDbzSlopePerMin(String dir) {
+    if (history.length < 2) return null;
+    final t0 = history.first.unix.toDouble();
+    final samples = <({double min, double dbz})>[];
+    for (final f in history) {
+      if (f.unix <= 0) continue;
+      final v = f.dbzInDirection(dir);
+      if (v == null) continue;
+      samples.add((min: (f.unix - t0) / 60.0, dbz: v));
+    }
+    if (samples.length < 2) return null;
+
+    var sumX = 0.0, sumY = 0.0, sumXY = 0.0, sumX2 = 0.0;
+    final n = samples.length.toDouble();
+    for (final s in samples) {
+      sumX += s.min;
+      sumY += s.dbz;
+      sumXY += s.min * s.dbz;
+      sumX2 += s.min * s.min;
+    }
+    final denom = n * sumX2 - sumX * sumX;
+    if (denom.abs() < 1e-6) return null;
+    return (n * sumXY - sumX * sumY) / denom;
+  }
+
+  ({String dir, double dbz})? _dominantEchoDirection([RadarFrameSample? frame]) {
+    final f = frame ?? latest;
+    if (f == null) return null;
+    const dirs = ['n', 's', 'e', 'w'];
+    String? bestDir;
+    var bestDbz = 0.0;
+    for (final dir in dirs) {
+      final v = f.dbzInDirection(dir);
+      if (v != null && v > bestDbz) {
+        bestDbz = v;
+        bestDir = dir;
+      }
+    }
+    if (bestDir == null || bestDbz < 18) return null;
+    return (dir: bestDir, dbz: bestDbz);
+  }
+
+  (double x, double y, double weight) _echoCentroid(RadarFrameSample f) {
+    double x = 0, y = 0, w = 0;
+    void add(double sx, double sy, double? dbz) {
+      if (dbz == null || dbz < 14) return;
+      final wt = dbz * dbz;
+      x += sx * wt;
+      y += sy * wt;
+      w += wt;
+    }
+    add(0, -1, f.northDbz);
+    add(0, 1, f.southDbz);
+    add(1, 0, f.eastDbz);
+    add(-1, 0, f.westDbz);
+    if (w <= 0) return (0, 0, 0);
+    return (x / w, y / w, w);
+  }
+
+  /// Posun ťažiska echo smerom k pinu (nie len echo „niekde v okolí“).
+  bool get _echoMovingTowardPin {
+    if (history.length < 3) return false;
+
+    final first = history.first;
+    final last = history.last;
+    final c0 = _echoCentroid(first);
+    final c1 = _echoCentroid(last);
+    if (c0.$3 < 280 || c1.$3 < 280) return false;
+
+    final spanMin = math.max(1.0, (last.unix - first.unix) / 60.0);
+    final vx = (c1.$1 - c0.$1) / spanMin;
+    final vy = (c1.$2 - c0.$2) / spanMin;
+    final toward = (-c1.$1 * vx + -c1.$2 * vy);
+    if (toward < 0.012) return false;
+
+    final center = last.dbz ?? 0;
+    final centerSlope = _centerDbzSlopePerMin;
+    if (centerSlope != null && centerSlope >= 0.06) return true;
+
+    final gaps = history
+        .map((f) => (f.peakDbz ?? f.dbz ?? 0) - (f.dbz ?? 0))
+        .toList();
+    if (gaps.length >= 3) {
+      final tail = gaps.sublist(gaps.length - 3);
+      if (tail[2] < tail[0] - 1.5 && (centerSlope ?? 0) > 0.02) {
+        return true;
+      }
+    }
+
+    if (toward >= 0.035 &&
+        center >= 14 &&
+        (c1.$1.abs() + c1.$2.abs()) < 0.6) {
+      return true;
+    }
+
+    return toward >= 0.025 && center >= 12 && (centerSlope ?? 0) > 0;
+  }
+
+  bool get _echoMovingTowardPinOrClosing =>
+      _echoMovingTowardPin || _echoClosingFromDirection;
+
+  /// Echo sa vzďaľuje od pinu — len jedna bunka na jednej strane, nie fronta v okolí.
+  bool get _echoMovingAwayFromPin {
+    if (history.length < 3) return false;
+    final frame = latest;
+    if (frame == null) return false;
+    if ((frame.dbz ?? 0) >= kRadarMinDbzPrecipNow) return false;
+    if (_rainBandNearPin || _nearbyRainLikely) return false;
+    if (_strongEchoDirections(frame) >= 2) return false;
+    if ((_maxNearbyDbz ?? 0) >= 22) return false;
+
+    final first = history.first;
+    final last = history.last;
+    final c0 = _echoCentroid(first);
+    final c1 = _echoCentroid(last);
+    if (c0.$3 < 280 || c1.$3 < 280) return false;
+
+    final spanMin = math.max(1.0, (last.unix - first.unix) / 60.0);
+    final vx = (c1.$1 - c0.$1) / spanMin;
+    final vy = (c1.$2 - c0.$2) / spanMin;
+    final away = (c1.$1 * vx + c1.$2 * vy);
+    if (away <= 0.025) return false;
+
+    final dist0 = c0.$1 * c0.$1 + c0.$2 * c0.$2;
+    final dist1 = c1.$1 * c1.$1 + c1.$2 * c1.$2;
+    if (dist1 > dist0 + 0.06 && (last.dbz ?? 0) < 14) return true;
+
+    return away > 0.04 && (last.dbz ?? 0) < 12;
+  }
+
+  /// Stred zachytí len okraj bunky, hlavná masa je inde / odchádza.
+  bool get _fringePrecipAtPoint {
+    if (!_rawPrecipAtPoint) return false;
+    final frame = latest;
+    if (frame == null) return false;
+
+    final center = frame.dbz ?? 0;
+    final peak = frame.peakDbz ?? center;
+
+    if (_precipDepartingRaw) return true;
+
+    if (_rainBandNearPin || _echoEngulfsPin) return false;
+    if (center >= 14 && peak >= 16) return false;
+
+    if (_echoEngulfsPin && center >= 16) return false;
+
+    if (peak - center >= 7) {
+      final dom = _dominantEchoDirection();
+      if (dom != null && dom.dbz > center + 5) {
+        final wetFrames = _recentHistory.where((f) => f.precipAtPoint).length;
+        if (wetFrames <= 2 && peak < 20) return true;
+        final slope = _centerDbzSlopePerMin;
+        if (slope != null && slope < 0 && peak < 22) return true;
+      }
+    }
+
+    if (_echoPassingBySingleCell && center < 28 && peak < 22) return true;
+    return false;
+  }
+
+  /// Echo v okolí, ale bunka nejde cez pin (iný smer / ustupuje).
+  bool get _echoPassingBy => _echoPassingBySingleCell;
+
+  bool get _echoPassingBySingleCell {
+    if (_echoEngulfsPin || _nearbyRainLikely || _rainBandNearPin) {
+      return false;
+    }
+    if (history.length < 2) return false;
+    final frame = latest;
+    if (frame == null) return false;
+    if (_strongEchoDirections(frame) >= 2) return false;
+
+    final center = frame.dbz ?? 0;
+    final peak = frame.peakDbz ?? center;
+    final nearby = _maxNearbyDbz ?? peak;
+    if (nearby < 18) return false;
+
+    if (_echoMovingAwayFromPin) return true;
+
+    final dom = _dominantEchoDirection();
+    if (dom == null) {
+      final peaks = history.map((f) => f.peakDbz).whereType<double>().toList();
+      if (peaks.length >= 3) {
+        final tail = peaks.sublist(peaks.length - 3);
+        if (tail[2] <= tail[1] &&
+            tail[1] <= tail[0] &&
+            tail[0] - tail[2] >= 5 &&
+            center < kRadarMinDbzPrecipNow) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    final dir = dom.dir;
+    final dirSlope = _directionalDbzSlopePerMin(dir);
+    final centerSlope = _centerDbzSlopePerMin;
+
+    if (dirSlope != null && dirSlope < -0.05) {
+      if (center < kRadarMinDbzPrecipNow) return true;
+      if (center < dom.dbz - 10 && _precipDepartingRaw) return true;
+    }
+
+    if (dom.dbz >= 22 && center < kRadarMinDbzPrecipNow) {
+      if (dirSlope != null &&
+          dirSlope <= 0 &&
+          (centerSlope == null || centerSlope <= 0.05)) {
+        return true;
+      }
+    }
+
+    if (history.length >= 3) {
+      final midIdx = history.length ~/ 2;
+      final oldDom = _dominantEchoDirection(history[midIdx]);
+      if (oldDom != null &&
+          oldDom.dir != dir &&
+          dom.dbz >= 20 &&
+          center < kRadarMinDbzPrecipNow &&
+          peak - center >= 6) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /// Bunka reálne smeruje k pinu — nie len echo v diaľke.
+  bool get _echoApproachingPin {
+    if (precipNow || _rainAtPinCore) return false;
+    if (_isScatteredWeakNoise) return false;
+    if (_echoMovingAwayFromPin) return false;
+
+    final frame = latest;
+    if (frame == null) return false;
+
+    final center = frame.dbz ?? 0;
+
+    if (_echoPassingBy && !_echoMovingTowardPinOrClosing) return false;
+
+    final approach = _incomingApproach;
+    if (approach != null && approach.dbz >= 18 && center < 14) {
+      return true;
+    }
+
+    if (_echoMovingTowardPinOrClosing) {
+      if (approach?.dir != null && approach!.dbz >= 18) return true;
+    }
+
+    if (approach == null || approach.dir == null || approach.dbz < 18) {
+      return _significantEchoNearPin;
+    }
+
+    final dirSlope = _directionalDbzSlopePerMin(approach.dir!);
+    if (dirSlope != null && dirSlope < -0.05) return false;
+
+    final centerSlope = _centerDbzSlopePerMin;
+    if (centerSlope != null && centerSlope < -0.12) return false;
+
+    return _echoMovingTowardPinOrClosing ||
+        (centerSlope != null && centerSlope >= 0.05);
+  }
+
+  bool get _hadRecentRainAtPoint =>
+      _recentHistory.any((f) => f.precipAtPoint);
 
   int get _trailingDryAtPointFrames {
     var n = 0;
@@ -225,8 +894,7 @@ class RadarNowcastContext {
   bool get _nearbyEchoReceding {
     if (precipNow || history.length < 2) return false;
 
-    // Aktuálne silné echo v niektorom smere = ešte prichádza (napr. z opaku).
-    if (_hasActiveNearbyEcho) return false;
+    if (_echoPassingBy) return true;
 
     if (history.length >= 2) {
       final tail = history.sublist(history.length - 2);
@@ -305,7 +973,7 @@ class RadarNowcastContext {
 
   /// dBZ pre odhad mm/% v pásme — konzervatívnejší než [stripDisplayDbz] pri blížiacej sa bunke.
   double get stripMmDbz {
-    if (precipNow) return dbz ?? kRadarMinDbzForUi;
+    if (precipNow) return precipIntensityDbz;
 
     final center = latest?.dbz;
     if (center != null && center >= kRadarMinDbzPrecipNow) return center;
@@ -317,37 +985,43 @@ class RadarNowcastContext {
     return math.min(stripDisplayDbz, 27.0);
   }
 
-  /// dBZ pre 24 h pás — pri blížiacej sa bunke neber max echo 48 km ďaleko.
+  /// dBZ pre 24 h pás — len pri pinom alebo potvrdenom príchode.
   double get stripDisplayDbz {
-    if (precipNow) return dbz ?? kRadarMinDbzForUi;
+    if (precipNow) return precipIntensityDbz;
 
     final center = latest?.dbz;
     if (center != null && center >= kRadarMinDbzPrecipNow) return center;
 
-    final nearby = _maxNearbyDbz;
-    if (nearby != null && nearby >= 20) {
-      // Pri pinom ešte sucho — miernejšia intenzita ako priamo v bunke.
-      if (center == null || center < kRadarMinDbzPrecipNow) {
-        return math.min(nearby, 32.0);
+    if (!_echoApproachingPin && !_nearbyRainLikely && !_rainBandNearPin &&
+        !_approachingPrecipFront && !_significantEchoNearPin) {
+      return kRadarMinDbzForUi;
+    }
+
+    if (_significantEchoNearPin || _approachingPrecipFront) {
+      final approach = _incomingApproach;
+      if (approach != null && approach.dbz >= 18) {
+        return math.min(approach.dbz, 40.0);
       }
-      return nearby;
+      final nearby = _maxNearbyDbz;
+      if (nearby != null && nearby >= 18) return math.min(nearby, 40.0);
     }
 
     return kRadarMinDbzForUi;
   }
 
-  /// Úzka prechádzajúca bunka (~≤30 min echo v histórii) — max 1 h v pásme.
+  /// Úzka prechádzajúca bunka — krátke echo v posledných snímkach, max 1 h v pásme.
   bool get _transientPassingCell {
     if (precipNow && steadyOngoing) return false;
     if (history.length < 2) return true;
 
+    final recent = _recentHistory;
     var echoFrames = 0;
-    for (final f in history) {
+    for (final f in recent) {
       if (f.precipAtPoint || (f.peakDbz ?? 0) >= 20) echoFrames++;
     }
     if (echoFrames <= 3) return true;
 
-    final peaks = history.map((f) => f.peakDbz).whereType<double>().toList();
+    final peaks = recent.map((f) => f.peakDbz).whereType<double>().toList();
     if (peaks.length >= 2) {
       final last = peaks.last;
       final maxP = peaks.reduce(math.max);
@@ -365,32 +1039,94 @@ class RadarNowcastContext {
     return false;
   }
 
-  /// Odhad: o koľko hodín od **teraz** dorazí bunka (0 = už prší).
-  int _incomingArrivalHoursFromNow() {
-    if (precipNow || _nearbyEchoReceding) return -1;
+  /// Echo v histórii slabne — kratšie okno zrážok.
+  bool get _echoWeakening {
+    if (history.length < 3) return false;
+    final peaks = history.map((f) => f.peakDbz ?? f.dbz ?? 0).toList();
+    if (peaks.length < 3) return false;
+    final tail = peaks.sublist(peaks.length - 3);
+    if (tail[2] <= tail[1] && tail[1] <= tail[0] && tail[0] - tail[2] >= 4) {
+      return true;
+    }
+    final centerSeries = history.map((f) => f.dbz).whereType<double>().toList();
+    if (centerSeries.length >= 3) {
+      final c = centerSeries.sublist(centerSeries.length - 3);
+      if (c[2] <= c[1] && c[1] <= c[0] && c[0] - c[2] >= 3) return true;
+    }
+    return false;
+  }
 
-    final peak = latest?.peakDbz;
-    final center = latest?.dbz ?? 0;
-
-    if (center >= kRadarMinDbzPrecipNow - 2) return 0;
-
-    // Echo už v tesnom okolí pinu (~14 px) — typicky do 1 h, nie o polnoci.
-    if (peak != null && peak >= 20 && center < kRadarMinDbzPrecipNow) {
+  /// Konzervatívne trvanie — radšej kratšie okno ako natiahnutý dážď.
+  int _capPassageHours(int hours, {required bool incoming}) {
+    var h = hours.clamp(1, incoming ? 2 : 2);
+    if (_transientPassingCell ||
+        _nearbyEchoReceding ||
+        _echoWeakening ||
+        _echoPassingBy) {
       return 1;
     }
+    if (!steadyOngoing && !_echoPersistedOrStrong) {
+      h = math.min(h, 1);
+    }
+    if (incoming && !_steadyFrontIncoming) {
+      h = math.min(h, 1);
+    }
+    return h;
+  }
 
-    final slope = _centerDbzSlopePerMin;
-    if (slope != null && slope > 0.12) {
+  /// Trvalá fronta — dlhšie okno len pri silnom ustáleneom echo.
+  bool get _steadyFrontIncoming {
+    if (!_echoPersistedOrStrong) return false;
+    final intensity = incomingIntensityDbz ?? _maxNearbyDbz ?? 0;
+    return intensity >= 32 && steadyOngoing;
+  }
+
+  /// Odhad: o koľko **minút** od teraz dorazí bunka (0 = čoskoro / už prší, -1 = neznáme).
+  int _incomingArrivalMinutesFromNow() {
+    if (precipNow || _nearbyEchoReceding) return -1;
+    if (_echoMovingAwayFromPin && !_significantEchoNearPin) return -1;
+    if (_isScatteredWeakNoise) return -1;
+
+    final center = latest?.dbz ?? 0;
+    if (_significantEchoNearPin && !_rainAtPinCore) {
+      if (_isScatteredSpeckleAtPin) {
+        if (_realDirectionalFrontApproaching) {
+          return _defaultIncomingMinutes();
+        }
+        return -1;
+      }
+      if (center >= kRadarMinDbzPrecipNow) return 0;
+      if (center >= 16 &&
+          (latest?.coherentCorePx ?? 0) >= kRadarMinCoherentCorePx) {
+        return 0;
+      }
+      if ((latest?.peakDbz ?? 0) >= 32 &&
+          (latest?.coherentPx14 ?? 0) >= kRadarMinCoherentAreaPx) {
+        return 0;
+      }
+      return _defaultIncomingMinutes();
+    }
+
+    if (!_echoApproachingPin &&
+        !_echoMovingTowardPinOrClosing &&
+        !_approachingPrecipFront) {
+      return -1;
+    }
+
+    if (!_echoPersistedOrStrong && !_approachingPrecipFront) return -1;
+
+    final centerSlope = _centerDbzSlopePerMin;
+
+    if (centerSlope != null && centerSlope > 0.08) {
       final need = kRadarMinDbzPrecipNow - center;
-      final mins = need / slope;
-      return (mins / 60).ceil().clamp(1, 3);
+      if (need <= 0) return _rainAtPinNow ? 0 : _defaultIncomingMinutes();
+      final mins = (need / centerSlope).ceil();
+      return mins.clamp(5, 180);
     }
 
     final approach = _incomingApproach;
-    if (approach == null) return -1;
-
-    final dir = approach.dir;
-    if (dir != null && history.length >= 3) {
+    if (approach?.dir != null && history.length >= 3) {
+      final dir = approach!.dir!;
       final oldest = history.first;
       final oldDir = oldest.dbzInDirection(dir) ?? approach.dbz;
       final newDir = approach.dbz;
@@ -399,16 +1135,183 @@ class RadarNowcastContext {
         (history.last.unix - oldest.unix) / 60.0,
       );
       final dirSlope = (newDir - oldDir) / spanMin;
-      if (dirSlope > 0.08) {
-        final gap = (approach.dbz - center).clamp(8.0, 35.0);
-        final mins = gap / dirSlope;
-        return (mins / 60).ceil().clamp(1, 3);
+      if (newDir >= oldDir - 5 &&
+          _echoMovingTowardPin &&
+          dirSlope > 0.02) {
+        if ((centerSlope ?? 0) >= 0.02) {
+          final gap = (approach.dbz - center).clamp(6.0, 30.0);
+          final rate = math.max(dirSlope, centerSlope ?? 0.02);
+          return (gap / rate).ceil().clamp(10, 180);
+        }
+        return _defaultIncomingMinutes();
       }
-      if (newDir < oldDir - 4) return -1;
+    } else if (_echoMovingTowardPin && (centerSlope ?? 0) > 0.02) {
+      return _defaultIncomingMinutes();
     }
 
-    if (approach.dbz >= 22) return 1;
-    return 1;
+    if (_approachingPrecipFront) {
+      final nearby = _maxNearbyDbz ?? 0;
+      final approachDbz = approach?.dbz ?? 0;
+      if (nearby >= 20 || approachDbz >= 18) {
+        return _defaultIncomingMinutes();
+      }
+    }
+
+    return -1;
+  }
+
+  /// Fallback keď slope nestačí — podľa vzdialenosti/sily echo.
+  int _defaultIncomingMinutes() {
+    final nearby = _maxNearbyDbz ?? 0;
+    if (nearby >= 32) return 25;
+    if (nearby >= 28) return 35;
+    if (nearby >= 22) return 50;
+    return 65;
+  }
+
+  /// Zaokrúhli lokálny čas na [step] minút (pre čitateľný tracker).
+  DateTime _roundLocalTimeToMinutes(DateTime dt, {int step = 5}) {
+    final total = dt.hour * 60 + dt.minute;
+    final rounded = ((total + step ~/ 2) ~/ step) * step;
+    final dayOffset = rounded ~/ (24 * 60);
+    final mins = rounded % (24 * 60);
+    return DateTime(
+      dt.year,
+      dt.month,
+      dt.day,
+    ).add(Duration(days: dayOffset, hours: mins ~/ 60, minutes: mins % 60));
+  }
+
+  DateTime _incomingArrivalAt(DateTime locNow) {
+    final mins = _incomingArrivalMinutesFromNow();
+    if (mins <= 0) return _roundLocalTimeToMinutes(locNow);
+    return _roundLocalTimeToMinutes(locNow.add(Duration(minutes: mins)));
+  }
+
+  /// Spätná kompatibilita pre logiku založenú na hodinách (24 h pás).
+  int _incomingArrivalHoursFromNow() {
+    final mins = _incomingArrivalMinutesFromNow();
+    if (mins < 0) return -1;
+    if (mins <= 15) return 0;
+    return (mins / 60).ceil().clamp(1, 3);
+  }
+
+  int _incomingPassageMinutes() =>
+      _capPassageHours(_incomingPassageHours(), incoming: true) * 60;
+
+  int _ongoingPassageMinutes() {
+    if (!precipNow) return 0;
+    if (_trailingDryAtPointFrames >= 1 || _precipDeparting) return 0;
+    if (trendEndingAtPoint) return 0;
+    if (_transientPassingCell) return 45;
+
+    final slope = _centerDbzSlopePerMin;
+    final current = dbz ?? 22.0;
+    if (slope != null && slope < -0.12) {
+      final minsLeft = (current - 18) / (-slope);
+      return minsLeft.ceil().clamp(10, 120);
+    }
+
+    return _capPassageHours(_ongoingPassageHours(), incoming: false) * 60;
+  }
+
+  DateTime? _ongoingEndAt(DateTime locNow) {
+    if (!precipNow) return null;
+    final mins = _ongoingPassageMinutes();
+    if (mins <= 0) {
+      return _roundLocalTimeToMinutes(
+        locNow.add(const Duration(minutes: 15)),
+      );
+    }
+    return _roundLocalTimeToMinutes(locNow.add(Duration(minutes: mins)));
+  }
+
+  String _trackerDurationLabel(int minutes) {
+    if (minutes < 55) return '$minutes minút';
+    final h = minutes ~/ 60;
+    final m = minutes % 60;
+    if (m == 0) return h == 1 ? '1 hodinu' : '$h hodiny';
+    if (h == 0) return '$m minút';
+    if (h == 1) return '1 hodinu a $m minút';
+    return '$h hodiny a $m minút';
+  }
+
+  /// Prvá hodina, od ktorej už radar neočakáva zrážky (pre orez ECMWF v pásme).
+  DateTime _firstDryHourAfter(DateTime rainEndAt) {
+    final hourStart = DateTime(
+      rainEndAt.year,
+      rainEndAt.month,
+      rainEndAt.day,
+      rainEndAt.hour,
+    );
+    if (rainEndAt.isAfter(hourStart)) {
+      return hourStart.add(const Duration(hours: 1));
+    }
+    return hourStart;
+  }
+
+  /// Hodinový slot [slotHour, slotHour+1) sa prekrýva s radarovým oknom zrážok.
+  bool _hourlySlotOverlapsPrecipWindow(
+    DateTime slotHour,
+    DateTime windowStart,
+    DateTime windowEndExclusive,
+  ) {
+    final slotEnd = slotHour.add(const Duration(hours: 1));
+    return slotEnd.isAfter(windowStart) &&
+        slotHour.isBefore(windowEndExclusive);
+  }
+
+  /// Koniec aktuálnych zrážok podľa radaru (minútová presnosť).
+  DateTime? ongoingRainEndAt(DateTime locNow) => _ongoingEndAt(locNow);
+
+  /// Začiatok radarového okna zrážok (príchod bunky alebo aktuálna hodina).
+  DateTime? precipWindowStartAt(DateTime locNow) {
+    if (precipNow) return _localHourFloor(locNow);
+    return _activePrecipWindow(locNow)?.start;
+  }
+
+  /// Minútový koniec zrážok v okne — pre zlomok mm v hodinovom slote.
+  DateTime? precipMinuteEndAt(DateTime locNow) {
+    if (precipNow) return _ongoingEndAt(locNow);
+    final window = _activePrecipWindow(locNow);
+    if (window == null) return null;
+    return _roundLocalTimeToMinutes(
+      window.start.add(Duration(minutes: _incomingPassageMinutes())),
+    );
+  }
+
+  /// Podiel hodiny [slotHour] pokrytej radarovým oknom (0–1).
+  double precipHourFractionAt(DateTime slotHour, DateTime locNow) {
+    if (precipNow) {
+      final nowHour = _localHourFloor(locNow);
+      if (slotHour == nowHour) return 1.0;
+      final endAt = _ongoingEndAt(locNow);
+      if (endAt == null) return 1.0;
+      final rainStart = locNow.isAfter(slotHour) ? locNow : slotHour;
+      return _hourlySlotRainFraction(slotHour, rainStart, endAt);
+    }
+    final window = _activePrecipWindow(locNow);
+    if (window == null) return 1.0;
+    final endAt = precipMinuteEndAt(locNow);
+    if (endAt == null) return 1.0;
+    final rainStart =
+        window.start.isAfter(slotHour) ? window.start : slotHour;
+    return _hourlySlotRainFraction(slotHour, rainStart, endAt);
+  }
+
+  double _hourlySlotRainFraction(
+    DateTime slotHour,
+    DateTime rainStart,
+    DateTime rainEnd,
+  ) {
+    final slotEnd = slotHour.add(const Duration(hours: 1));
+    if (!rainEnd.isAfter(slotHour)) return 0;
+    final effectiveStart = rainStart.isAfter(slotHour) ? rainStart : slotHour;
+    if (!rainEnd.isAfter(effectiveStart)) return 0;
+    final coveredMin = rainEnd.isAfter(slotEnd)
+        ? slotEnd.difference(effectiveStart).inMinutes
+        : rainEnd.difference(effectiveStart).inMinutes;
+    return (coveredMin / 60.0).clamp(0.05, 1.0);
   }
 
   /// Ako dlho ešte potrvá dažď pri pinom / po príchode bunky [h].
@@ -427,79 +1330,75 @@ class RadarNowcastContext {
     }
 
     final endH = estimatedPrecipEndHours;
-    if (endH != null) return endH.clamp(0, 3);
+    if (endH != null) return _capPassageHours(endH.clamp(0, 2), incoming: false);
 
     if (!steadyOngoing) return 1;
-    return 2;
+    return _capPassageHours(2, incoming: false);
   }
 
   /// Trvanie zrážok po príchode blížiacej sa bunky [h].
   int _incomingPassageHours() {
     if (_nearbyEchoReceding) return 0;
+    if (!_echoApproachingPin &&
+        !_approachingPrecipFront &&
+        !_echoMovingTowardPinOrClosing &&
+        !_significantEchoNearPin) {
+      return 0;
+    }
     if (precipNow) return _ongoingPassageHours();
 
-    final intensity = incomingIntensityDbz ?? 0;
+    final intensity = incomingIntensityDbz ?? (_maxNearbyDbz ?? 0);
     if (intensity < 20) return 0;
 
-    if (_transientPassingCell) return 1;
-
-    final center = latest?.dbz ?? 0;
-    final peak = latest?.peakDbz ?? intensity;
-
-    if (center < kRadarMinDbzPrecipNow) {
-      if (peak >= 40 || intensity >= 40) return 2;
-      return 1;
+    if (_steadyFrontIncoming && intensity >= 34) {
+      return _capPassageHours(2, incoming: true);
     }
-    if (intensity >= 38) return 2;
-    return 1;
+    return _capPassageHours(1, incoming: true);
   }
 
   /// Aktívne okno zrážok pre 24 h pás (lokálne hodiny, [start, end)).
   ({DateTime start, DateTime end})? _activePrecipWindow(DateTime locNow) {
-    final nowHour = DateTime(
-      locNow.year,
-      locNow.month,
-      locNow.day,
-      locNow.hour,
-    );
-    final stripStart = nowHour.add(const Duration(hours: 1));
+    final nowHour = _localHourFloor(locNow);
 
     if (precipNow) {
-      final passageH = _ongoingPassageHours();
-      if (passageH <= 0) return null;
+      final endAt = _ongoingEndAt(locNow);
+      if (endAt == null) return null;
       return (
-        start: stripStart,
-        end: stripStart.add(Duration(hours: passageH)),
+        start: nowHour,
+        end: _firstDryHourAfter(endAt),
       );
     }
 
-    if (_nearbyEchoReceding) return null;
-    if (!incomingPrecip && !nearbyEcho) return null;
+    if (_isRadarNoiseOnly) return null;
 
-    final arrivalH = _incomingArrivalHoursFromNow();
-    if (arrivalH < 0) return null;
-
-    final passageH = _incomingPassageHours();
-    if (passageH <= 0) return null;
-
-    // Prvá hodina pásu = stripStart (22:00 pri 21:xx) — zarovnaj s riadkami UI.
-    final rainStart = arrivalH <= 1
-        ? stripStart
-        : nowHour.add(Duration(hours: arrivalH));
-    var rainEnd = rainStart.add(Duration(hours: passageH));
-
-    if (_transientPassingCell) {
-      rainEnd = rainStart.add(const Duration(hours: 1));
-    } else {
-      final peak = latest?.peakDbz ?? 0;
-      if (peak > 0 && peak < 34) {
-        final maxEnd = stripStart.add(const Duration(hours: 2));
-        if (rainEnd.isAfter(maxEnd)) rainEnd = maxEnd;
-      }
+    if (_nearbyEchoReceding || _echoPassingBy) return null;
+    if (!incomingPrecip &&
+        !_approachingPrecipFront &&
+        !_significantEchoNearPin) {
+      return null;
     }
 
-    if (!rainEnd.isAfter(rainStart)) return null;
-    return (start: rainStart, end: rainEnd);
+    final arrivalMins = _incomingArrivalMinutesFromNow();
+    if (arrivalMins < 0) return null;
+
+    final passageH = _capPassageHours(_incomingPassageHours(), incoming: true);
+    if (passageH <= 0) return null;
+
+    final arrivalAt = _incomingArrivalAt(locNow);
+    final endAt = _roundLocalTimeToMinutes(
+      arrivalAt.add(Duration(minutes: _incomingPassageMinutes())),
+    );
+    var rainEnd = _firstDryHourAfter(endAt);
+
+    final maxPassage = _steadyFrontIncoming ? 2 : 1;
+    final maxEndAt = _roundLocalTimeToMinutes(
+      arrivalAt.add(Duration(hours: maxPassage)),
+    );
+    final maxDryHour = _firstDryHourAfter(maxEndAt);
+    if (rainEnd.isAfter(maxDryHour)) rainEnd = maxDryHour;
+
+    if (!rainEnd.isAfter(_localHourFloor(arrivalAt))) return null;
+    return (start: arrivalAt, end: rainEnd);
   }
 
   ({String? dir, double dbz})? get _incomingApproach {
@@ -517,12 +1416,8 @@ class RadarNowcastContext {
         bestDir = dir;
       }
     }
-    if (bestDir != null && bestDbz >= 20) {
+    if (bestDir != null && bestDbz >= 18) {
       return (dir: bestDir, dbz: bestDbz);
-    }
-    final peak = latestFrame.peakDbz;
-    if (peak != null && peak >= 20) {
-      return (dir: null, dbz: peak);
     }
     return null;
   }
@@ -565,8 +1460,10 @@ class RadarNowcastContext {
   }
 
   /// Zrážková bunka odchádza — za bodom ešte silnejší echo, vpred sucho/slabo.
-  bool get _precipDeparting {
-    if (!precipNow) return false;
+  bool get _precipDeparting => _precipDepartingRaw && precipNow;
+
+  bool get _precipDepartingRaw {
+    if (!_rawPrecipAtPoint) return false;
     final frame = latest;
     if (frame == null) return false;
     final center = frame.dbz ?? 0;
@@ -613,7 +1510,15 @@ class RadarNowcastContext {
       return dryFromNextHour();
     }
 
-    if (!precipNow) return dryFromNextHour();
+    // Radar suchý bez blížiacej sa bunky — neorezávaj celý ECMWF pás.
+    if (!precipNow &&
+        !incomingPrecip &&
+        !_approachingPrecipFront &&
+        !_significantEchoNearPin) {
+      return null;
+    }
+
+    if (!precipNow) return null;
 
     if (_trailingDryAtPointFrames >= 1 && _hadRecentRainAtPoint) {
       return dryFromNextHour();
@@ -627,15 +1532,61 @@ class RadarNowcastContext {
       return dryFromNextHour();
     }
 
+    final endAt = _ongoingEndAt(locNow);
+    if (endAt != null) {
+      return _firstDryHourAfter(endAt);
+    }
+
     final passage = _ongoingPassageHours();
     if (passage <= 0) return dryFromNextHour();
     if (passage <= 2) return dryFromHours(passage - 1);
 
     // Prechodná bunka (nie trvalá fronta) — ECMWF nesmie natiahnuť dážď na celé hodiny modelu.
     if (precipNow && !steadyOngoing && !incomingPrecip) {
-      final wetFrames = history.where((f) => f.precipAtPoint).length;
+      final wetFrames = _recentHistory.where((f) => f.precipAtPoint).length;
       if (wetFrames <= 3) return dryFromNextHour();
       if (wetFrames <= 4) return dryFromHours(1);
+    }
+
+    return null;
+  }
+
+  /// Kde môže 24 h pás orezať ECMWF — len blízke hodiny / potvrdený koniec, nie celý model.
+  DateTime? hourlyStripEcmwfTrimDryFromHour(DateTime locNow) {
+    if (!eligible || history.isEmpty) return null;
+
+    final nowHour = _localHourFloor(locNow);
+    DateTime dryUntilHours(int h) => nowHour.add(Duration(hours: h));
+
+    if (precipNow) {
+      final endAt = _ongoingEndAt(locNow);
+      if (endAt != null) return _firstDryHourAfter(endAt);
+      if (trendEndingAtPoint || (_precipDeparting && _hadRecentRainAtPoint)) {
+        return dryUntilHours(1);
+      }
+      final passage = _ongoingPassageHours();
+      if (passage <= 0) return dryUntilHours(1);
+      if (passage <= 2) return nowHour.add(Duration(hours: passage));
+      if (!steadyOngoing && !incomingPrecip) {
+        final wetFrames = _recentHistory.where((f) => f.precipAtPoint).length;
+        if (wetFrames <= 3) return dryUntilHours(1);
+        if (wetFrames <= 4) return dryUntilHours(2);
+      }
+      return null;
+    }
+
+    if (incomingPrecip ||
+        _approachingPrecipFront ||
+        _significantEchoNearPin) {
+      final window = _activePrecipWindow(locNow);
+      if (window != null) return window.end;
+    }
+
+    if (!precipNow && !incomingPrecip && _hadRecentRainAtPoint) {
+      return dryUntilHours(3);
+    }
+    if (!precipNow && _nearbyEchoReceding) {
+      return dryUntilHours(2);
     }
 
     return null;
@@ -653,9 +1604,24 @@ class RadarNowcastContext {
     );
     if (slotHour.isBefore(nowHour)) return false;
 
+    if (precipNow) {
+      if (slotHour == nowHour) return true;
+      final endAt = _ongoingEndAt(locNow);
+      if (endAt == null) return false;
+      return _hourlySlotOverlapsPrecipWindow(
+        slotHour,
+        nowHour,
+        _firstDryHourAfter(endAt),
+      );
+    }
+
     final window = _activePrecipWindow(locNow);
     if (window == null) return false;
-    return !slotHour.isBefore(window.start) && slotHour.isBefore(window.end);
+    return _hourlySlotOverlapsPrecipWindow(
+      slotHour,
+      window.start,
+      window.end,
+    );
   }
 
   int? _estimatePrecipEndHours() {
@@ -745,46 +1711,156 @@ class RadarNowcastContext {
   bool get incomingPrecip => _computeIncomingPrecip();
 
   bool _computeIncomingPrecip() {
-    if (precipNow || history.length < 2) return false;
-    if (_nearbyEchoReceding) return false;
+    if (precipNow || _rainAtPinCore || history.length < 2) return false;
+    if (_echoClearlyOffPath || _isRadarNoiseOnly) return false;
+    if (_isScatteredSpeckleAtPin && !_realDirectionalFrontApproaching) {
+      return false;
+    }
+
+    if (_isCoherentEchoNearPin &&
+        _approachingPrecipFront &&
+        _incomingArrivalHoursFromNow() >= 0) {
+      return true;
+    }
+
+    if (history.length < 3) return false;
+
     final latestFrame = latest;
     if (latestFrame == null || latestFrame.precipAtPoint) return false;
 
     final approach = _incomingApproach;
-    if (approach == null || approach.dbz < 20) return false;
+    if (approach == null || approach.dir == null || approach.dbz < 22) {
+      return _echoMovingTowardPinOrClosing &&
+          _incomingArrivalHoursFromNow() >= 0;
+    }
 
-    final dir = approach.dir;
-    if (dir != null && history.length >= 3) {
+    final dir = approach.dir!;
+    if (history.length >= 3) {
       final oldest = history.first;
       final oldDir = oldest.dbzInDirection(dir) ?? approach.dbz;
-      if (approach.dbz < oldDir - 5) return false;
+      if (approach.dbz < oldDir - 8) return false;
     }
 
-    final slope = _centerDbzSlopePerMin;
-    if (slope != null && slope < -0.2) return false;
+    final centerSlope = _centerDbzSlopePerMin;
+    if (centerSlope != null && centerSlope < -0.2) return false;
 
-    if (approach.dbz >= 25) return true;
+    return _incomingArrivalHoursFromNow() >= 0;
+  }
 
-    if (!nearbyEcho) return false;
-
-    if (dir == null) return approach.dbz >= 22;
-
-    var approachFrames = 0;
-    for (var i = history.length - 2; i >= 0 && i >= history.length - 5; i--) {
-      final f = history[i];
-      if (f.precipAtPoint) return false;
-      final dirDbz = f.dbzInDirection(dir);
-      if (dirDbz != null && dirDbz >= 16) {
-        approachFrames++;
-      } else {
-        break;
-      }
+  /// Potvrdený príchod — nie len echo/šum v okolí.
+  bool get _strictIncomingConfirmed {
+    if (precipNow || _rainAtPinCore) return true;
+    if (_isScatteredWeakNoise) return false;
+    if (_echoClearlyOffPath ||
+        _echoMovingAwayFromPin ||
+        _nearbyEchoReceding) {
+      return false;
     }
-    return approachFrames >= 1;
+    if (_significantEchoNearPin || _approachingPrecipFront) {
+      return _incomingArrivalHoursFromNow() >= 0;
+    }
+    return _incomingArrivalHoursFromNow() >= 0;
   }
 
   String _trackerClockLabel(DateTime dt) =>
       '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+
+  double get _trackerIntensityDbz {
+    if (precipNow) return precipIntensityDbz;
+    if (_rainAtPinNow) {
+      final frame = latest;
+      if (frame == null) return kRadarMinDbzForUi;
+      final center = frame.dbz ?? 0;
+      final peak = frame.peakDbz ?? center;
+      return math.max(center, math.min(peak, center + 12)).clamp(12.0, 56.0);
+    }
+    return incomingIntensityDbz ??
+        math.max(_maxNearbyDbz ?? kRadarMinDbzForUi, stripDisplayDbz);
+  }
+
+  RadarPrecipTrackerInfo _buildActiveTrackerInfo(
+    DateTime locNow, {
+    required double intensityDbz,
+    required bool snow,
+  }) {
+    final title = _trackerIntensityTitle(intensityDbz, snow: snow);
+    final iconCode = wmoFromRadarDbz(intensityDbz, snow: snow);
+    final endAt = _ongoingEndAt(locNow) ??
+        estimatedDryFromLocalTime(locNow) ??
+        _roundLocalTimeToMinutes(
+          locNow.add(Duration(minutes: _ongoingPassageMinutes())),
+        );
+    final remainingMin = endAt.difference(locNow).inMinutes.clamp(5, 180);
+    final endLabel = _trackerClockLabel(endAt);
+
+    final String detail;
+    if (remainingMin < 55) {
+      detail = 'Dážď potrvá približne ${_trackerDurationLabel(remainingMin)}, do $endLabel.';
+    } else if (remainingMin <= 75) {
+      detail = 'Dážď potrvá približne hodinu, do $endLabel.';
+    } else {
+      detail =
+          'Dážď potrvá ešte približne ${_trackerDurationLabel(remainingMin)}, ustúpi o $endLabel.';
+    }
+
+    return RadarPrecipTrackerInfo(
+      phase: RadarPrecipTrackerPhase.active,
+      title: title,
+      detail: detail,
+      iconCode: iconCode,
+      startLocal: locNow,
+      endLocal: endAt,
+    );
+  }
+
+  RadarPrecipTrackerInfo _buildIncomingTrackerInfo(
+    DateTime locNow, {
+    required ({DateTime start, DateTime end}) window,
+    required double intensityDbz,
+    required bool snow,
+  }) {
+    final startAt = window.start;
+    final endAt = window.end;
+    final startLabel = _trackerClockLabel(startAt);
+    final endLabel = _trackerClockLabel(endAt);
+    final durationMin = endAt.difference(startAt).inMinutes.clamp(15, 180);
+    final title = _trackerIntensityTitle(intensityDbz, snow: snow);
+    final iconCode = wmoFromRadarDbz(intensityDbz, snow: snow);
+    final atPinNow = precipNow || _rainAtPinNow;
+
+    final String detail;
+    if (atPinNow) {
+      detail = durationMin < 55
+          ? 'Dážď potrvá približne ${_trackerDurationLabel(durationMin)}, do $endLabel.'
+          : 'Dážď potrvá do $endLabel.';
+    } else if (durationMin < 55) {
+      detail =
+          'Očakávaný začiatok o $startLabel, potrvá približne ${_trackerDurationLabel(durationMin)}.';
+    } else if (durationMin <= 75) {
+      detail = 'Očakávaný začiatok o $startLabel, potrvá približne hodinu.';
+    } else {
+      detail = 'Očakávaný začiatok o $startLabel, ústup okolo $endLabel.';
+    }
+
+    final phase = atPinNow
+        ? RadarPrecipTrackerPhase.active
+        : RadarPrecipTrackerPhase.incoming;
+
+    return RadarPrecipTrackerInfo(
+      phase: phase,
+      title: atPinNow
+          ? title
+          : (snow
+              ? 'Blíži sa sneh'
+              : (intensityDbz >= 24
+                  ? 'Blíži sa — ${title.toLowerCase()}'
+                  : 'Blíži sa dážď')),
+      detail: detail,
+      iconCode: iconCode,
+      startLocal: startAt,
+      endLocal: endAt,
+    );
+  }
 
   String _trackerIntensityTitle(double dbz, {required bool snow}) {
     if (snow) {
@@ -805,77 +1881,178 @@ class RadarNowcastContext {
         locNow.hour,
       );
 
-  /// Karta sledovača — aktuálny alebo blížiaci sa dážď/sneh podľa radaru.
-  RadarPrecipTrackerInfo? precipTrackerInfo(
+  /// Karta sledovača — vždy keď je radar dostupný; pri suchu stav „sucho podľa radaru“.
+  RadarPrecipTrackerInfo precipTrackerInfo(
     DateTime locNow, {
     double? tempC,
+    double? cloudCoverPercent,
   }) {
-    if (!eligible || history.isEmpty) return null;
-    if (_nearbyEchoReceding && !precipNow) return null;
-
-    final snow = radarSnowLikely(tempC: tempC);
-    final intensityDbz = precipNow
-        ? (dbz ?? kRadarMinDbzForUi)
-        : (incomingIntensityDbz ?? stripDisplayDbz);
-    final iconCode = wmoFromRadarDbz(intensityDbz, snow: snow);
-    final title = _trackerIntensityTitle(intensityDbz, snow: snow);
-    final nowHour = _localHourFloor(locNow);
-    final window = _activePrecipWindow(locNow);
-
-    if (precipNow) {
-      final passage = _ongoingPassageHours();
-      if (passage <= 0 && trendEndingAtPoint) return null;
-
-      final endAt = estimatedDryFromLocalTime(locNow) ??
-          nowHour.add(Duration(hours: math.max(1, passage + 1)));
-      final remainingH = endAt.difference(nowHour).inHours.clamp(1, 12);
-      final endLabel = _trackerClockLabel(endAt);
-
-      final detail = remainingH <= 1
-          ? 'Potrvá približne do $endLabel.'
-          : 'Bude trvať dlhšie ako hodinu, očakávaný ústup o $endLabel.';
-
-      return RadarPrecipTrackerInfo(
-        title: title,
-        detail: detail,
-        iconCode: iconCode,
-        startLocal: nowHour,
-        endLocal: endAt,
+    if (!eligible || history.isEmpty) {
+      return _monitoringTrackerInfo(
+        locNow,
+        cloudCoverPercent: cloudCoverPercent,
+        snow: radarSnowLikely(tempC: tempC),
+        intensityDbz: kRadarMinDbzForUi,
       );
     }
 
-    if (!incomingPrecip || window == null) return null;
+    if (_isRadarNoiseOnly) {
+      return RadarPrecipTrackerInfo(
+        phase: RadarPrecipTrackerPhase.idle,
+        title: '',
+        detail: 'Podľa radaru zatiaľ bez zrážok v okolí.',
+        iconCode: skyWmoFromCloudCover(cloudCoverPercent),
+      );
+    }
 
-    final startAt = window.start;
-    final endAt = window.end;
-    final startLabel = _trackerClockLabel(startAt);
-    final endLabel = _trackerClockLabel(endAt);
-    final durationH = endAt.difference(startAt).inHours.clamp(1, 12);
+    final snow = radarSnowLikely(tempC: tempC);
+    final intensityDbz = _trackerIntensityDbz;
 
-    final arrivalH = _incomingArrivalHoursFromNow();
-    final String detail;
-    if (arrivalH <= 0) {
-      detail = durationH <= 1
-          ? 'Začína, potrvá približne do $endLabel.'
-          : 'Začína, očakávaný ústup o $endLabel.';
-    } else if (durationH <= 1) {
-      detail =
-          'Očakávaný začiatok o $startLabel, potrvá približne hodinu.';
-    } else {
-      detail =
-          'Očakávaný začiatok o $startLabel, ústup okolo $endLabel.';
+    // Prší pri pine — intenzita a do kedy potrvá.
+    if (precipNow) {
+      return _buildActiveTrackerInfo(
+        locNow,
+        intensityDbz: intensityDbz,
+        snow: snow,
+      );
+    }
+
+    final window = _activePrecipWindow(locNow);
+    final effectiveDbz = math.max(
+      intensityDbz,
+      incomingIntensityDbz ?? _maxNearbyDbz ?? 0,
+    );
+    if (window != null &&
+        _strictIncomingConfirmed &&
+        effectiveDbz >= 20) {
+      final startAt = _incomingArrivalAt(locNow);
+      final endAt = _roundLocalTimeToMinutes(
+        startAt.add(Duration(minutes: _incomingPassageMinutes())),
+      );
+      return _buildIncomingTrackerInfo(
+        locNow,
+        window: (start: startAt, end: endAt),
+        intensityDbz: effectiveDbz,
+        snow: snow,
+      );
+    }
+
+    if (_approachingPrecipFront &&
+        _incomingArrivalMinutesFromNow() >= 0) {
+      final startAt = _incomingArrivalAt(locNow);
+      final endAt = _roundLocalTimeToMinutes(
+        startAt.add(Duration(minutes: _incomingPassageMinutes())),
+      );
+      return _buildIncomingTrackerInfo(
+        locNow,
+        window: (start: startAt, end: endAt),
+        intensityDbz: effectiveDbz,
+        snow: snow,
+      );
+    }
+
+    if (_significantEchoNearPin) {
+      final arrivalMins = _incomingArrivalMinutesFromNow();
+      if (arrivalMins >= 0) {
+        final dbz = math.max(effectiveDbz, _maxNearbyDbz ?? effectiveDbz);
+        if (arrivalMins <= 15) {
+          return _buildActiveTrackerInfo(
+            locNow,
+            intensityDbz: dbz,
+            snow: snow,
+          );
+        }
+        final startAt = _incomingArrivalAt(locNow);
+        final endAt = _roundLocalTimeToMinutes(
+          startAt.add(Duration(minutes: _incomingPassageMinutes())),
+        );
+        return _buildIncomingTrackerInfo(
+          locNow,
+          window: (start: startAt, end: endAt),
+          intensityDbz: dbz,
+          snow: snow,
+        );
+      }
+    }
+
+    return _monitoringTrackerInfo(
+      locNow,
+      cloudCoverPercent: cloudCoverPercent,
+      snow: snow,
+      intensityDbz: intensityDbz,
+    );
+  }
+
+  /// Sucho / neisté echo — vždy konkrétna správa, nie prázdne „sledujem“.
+  RadarPrecipTrackerInfo _monitoringTrackerInfo(
+    DateTime locNow, {
+    double? cloudCoverPercent,
+    required bool snow,
+    required double intensityDbz,
+  }) {
+    final icon = skyWmoFromCloudCover(cloudCoverPercent);
+
+    if (_echoClearlyOffPath) {
+      return RadarPrecipTrackerInfo(
+        phase: RadarPrecipTrackerPhase.watching,
+        title: '',
+        detail: 'Zrážky v okolí, ale zatiaľ mimo lokality.',
+        iconCode: icon,
+      );
+    }
+
+    if (_significantEchoNearPin || _approachingPrecipFront) {
+      final arrivalMins = _incomingArrivalMinutesFromNow();
+      if (arrivalMins >= 0) {
+        final startAt = _incomingArrivalAt(locNow);
+        final startLabel = _trackerClockLabel(startAt);
+        final dbz = math.max(intensityDbz, _maxNearbyDbz ?? intensityDbz);
+        final title = _trackerIntensityTitle(dbz, snow: snow);
+        if (arrivalMins <= 15) {
+          final endAt = _roundLocalTimeToMinutes(
+            locNow.add(Duration(minutes: _incomingPassageMinutes())),
+          );
+          return RadarPrecipTrackerInfo(
+            phase: RadarPrecipTrackerPhase.active,
+            title: title,
+            detail: 'Zrážky dorazili — potrvajú do ${_trackerClockLabel(endAt)}.',
+            iconCode: wmoFromRadarDbz(dbz, snow: snow),
+            startLocal: locNow,
+            endLocal: endAt,
+          );
+        }
+        final endAt = _roundLocalTimeToMinutes(
+          startAt.add(Duration(minutes: _incomingPassageMinutes())),
+        );
+        return RadarPrecipTrackerInfo(
+          phase: RadarPrecipTrackerPhase.incoming,
+          title: snow
+              ? 'Blíži sa sneh'
+              : (dbz >= 24
+                  ? 'Blíži sa — ${title.toLowerCase()}'
+                  : 'Blíži sa dážď'),
+          detail: 'Pravdepodobný príchod okolo $startLabel.',
+          iconCode: wmoFromRadarDbz(dbz, snow: snow),
+          startLocal: startAt,
+          endLocal: endAt,
+        );
+      }
+    }
+
+    if (_hasActiveNearbyEcho && !_significantEchoNearPin && !_rainAtPinCore) {
+      return RadarPrecipTrackerInfo(
+        phase: RadarPrecipTrackerPhase.watching,
+        title: '',
+        detail: 'Slabé echo v okolí — zatiaľ bez dážďa pri lokalite.',
+        iconCode: icon,
+      );
     }
 
     return RadarPrecipTrackerInfo(
-      title: snow
-          ? 'Blíži sa sneh'
-          : (intensityDbz >= 24
-              ? 'Blíži sa — ${title.toLowerCase()}'
-              : 'Blíži sa dážď'),
-      detail: detail,
-      iconCode: iconCode,
-      startLocal: startAt,
-      endLocal: endAt,
+      phase: RadarPrecipTrackerPhase.idle,
+      title: '',
+      detail: 'Podľa radaru zatiaľ bez zrážok v okolí.',
+      iconCode: icon,
     );
   }
 }
@@ -898,8 +2075,8 @@ Future<RadarNowcastContext> fetchRadarNowcastContextForCity(GeoCity city) async 
       DateTime.now().difference(cachedAt) < _kRadarNowcastCacheTtl;
   if (cacheFresh) {
     final cached = _radarNowcastCache!;
-    // Test: sucho vždy prever znova (bunka odíde); mokrý stav max 30 s.
-    if (!kRadarOnlyPrecipTestMode || cached.precipNow) {
+    // Pri aktívnom daždi stačí cache; príchod / sledovanie vždy obnov.
+    if (cached.precipNow) {
       return cached;
     }
   }
@@ -992,6 +2169,13 @@ List<RadarFrameSample> _pickBestRadarHistory(
     return webDbz >= httpDbz ? web : httpHistory;
   }
 
+  final webPeak = web.isEmpty ? 0.0 : (web.last.peakDbz ?? web.last.dbz ?? 0);
+  final httpPeak = httpHistory.isEmpty
+      ? 0.0
+      : (httpHistory.last.peakDbz ?? httpHistory.last.dbz ?? 0);
+  if (httpPeak > webPeak + 2) return httpHistory;
+  if (webPeak > httpPeak + 2) return web;
+
   final webScore =
       web.isEmpty ? -1 : _radarHistoryWetScore(web);
   final httpScore =
@@ -1066,7 +2250,8 @@ List<RadarFrameSample>? _parseWebViewRadarHistory(Object? result) {
 
 const String _kRadarWebViewSamplerJs = r'''
 window.pocasieSampleRadarHistory = async function(lat, lon, frameCount) {
-  const MIN_DBZ = 10, MIN_NOW = 22, PEAK = 14, OUTER = 48;
+  const MIN_DBZ = 20, MIN_NOW = 22, CORE = 3, PEAK = 14, PEAK_WIDE = 28, OUTER = 48;
+  const MIN_FRAMES = 3, MAX_FRAMES = 24;
   const COLS = 4000, ROWS = 2000;
   const LON_MIN = 0, LON_MAX = 30, LAT_MIN = 43, LAT_MAX = 58;
   const PAL = [
@@ -1098,7 +2283,9 @@ window.pocasieSampleRadarHistory = async function(lat, lon, frameCount) {
       const d = dr * dr + dg * dg + db * db;
       if (d < bd) { bd = d; best = p[0]; }
     }
-    if (bd > 55 * 55) return null;
+    if (bd > 35 * 35) return null;
+    if (best <= 11 && bd > 18 * 18) return null;
+    if (best < 18 && bd > 22 * 22) return null;
     return best;
   }
   function sampleImage(img, px, py, radius) {
@@ -1123,11 +2310,45 @@ window.pocasieSampleRadarHistory = async function(lat, lon, frameCount) {
     }
     return maxDbz;
   }
+  function countDbzAbove(img, px, py, radiusPx, minDbz) {
+    const sx = Math.round(px * img.width / COLS);
+    const sy = Math.round(py * img.height / ROWS);
+    const rScreen = radiusPx <= 0 ? 0 : Math.max(2, Math.min(40, Math.round(radiusPx * img.width / COLS)));
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    let count = 0;
+    for (let dy = -rScreen; dy <= rScreen; dy++) {
+      for (let dx = -rScreen; dx <= rScreen; dx++) {
+        if (dx * dx + dy * dy > rScreen * rScreen) continue;
+        const x = Math.max(0, Math.min(canvas.width - 1, sx + dx));
+        const y = Math.max(0, Math.min(canvas.height - 1, sy + dy));
+        const d = ctx.getImageData(x, y, 1, 1).data;
+        const dbz = estimateDbz(d[0], d[1], d[2], d[3]);
+        if (dbz !== null && dbz >= minDbz) count++;
+      }
+    }
+    return count;
+  }
   function isPrecipAtPoint(centerDbz, peakDbz) {
-    return centerDbz !== null && centerDbz >= MIN_NOW;
+    const peak = peakDbz !== null ? peakDbz : centerDbz;
+    if (peak === null) return false;
+    if (centerDbz === null) return peak >= 32;
+    const gap = peak - centerDbz;
+    if (centerDbz >= MIN_NOW) {
+      if (gap >= 14 && centerDbz < 14) return false;
+      return true;
+    }
+    if (centerDbz >= 14 && peak >= 18 && gap <= 10) return true;
+    if (centerDbz >= 12 && peak >= 20 && gap <= 8) return true;
+    if (centerDbz >= 10 && peak >= 26 && gap <= 10) return true;
+    if (centerDbz >= 8 && peak >= 32 && gap <= 12) return true;
+    return false;
   }
   function sampleCenter(img, px, py) {
-    return sampleImage(img, px, py, 0);
+    return sampleImage(img, px, py, CORE);
   }
   function loadImage(url) {
     return new Promise(function(resolve, reject) {
@@ -1139,7 +2360,7 @@ window.pocasieSampleRadarHistory = async function(lat, lon, frameCount) {
     });
   }
   try {
-    const n = Math.max(3, Math.min(frameCount || 6, 8));
+    const n = Math.max(MIN_FRAMES, Math.min(frameCount || MAX_FRAMES, data.length));
     const resp = await fetch('/radar/radar_history_cmax.json?v=' + Date.now());
     const data = await resp.json();
     if (!data || !data.length) return JSON.stringify({ ok: false });
@@ -1150,8 +2371,14 @@ window.pocasieSampleRadarHistory = async function(lat, lon, frameCount) {
     for (const entry of tail) {
       try {
         const img = await loadImage(entry.url);
-        const peak = sampleImage(img, px, py, PEAK);
+        const peak14 = sampleImage(img, px, py, PEAK);
+        const peak28 = sampleImage(img, px, py, PEAK_WIDE);
+        let peak = peak14 === null ? peak28 : (peak28 === null ? peak14 : Math.max(peak14, peak28));
         const dbz = sampleCenter(img, px, py);
+        if (peak !== null && (dbz === null || dbz < 12)) {
+          const coherentPx = countDbzAbove(img, px, py, PEAK, 18);
+          if (peak < 26 && coherentPx < 4) peak = null;
+        }
         const atPoint = isPrecipAtPoint(dbz, peak);
         frames.push({
           unix: entry.unix_time,
@@ -1287,6 +2514,14 @@ Future<RadarFrameSample?> _sampleRadarFrameFromBytes(
         py,
         kRadarPeakCompareRadiusPx,
       );
+      final peakOuter = _sampleNeighborhoodMaxDbz(
+        byteData.buffer.asUint8List(),
+        width,
+        height,
+        px,
+        py,
+        kRadarSampleRadiusPx,
+      );
 
       double? sampleRing(int dx, int dy) {
         final ring = _sampleNeighborhoodMaxDbz(
@@ -1301,9 +2536,48 @@ Future<RadarFrameSample?> _sampleRadarFrameFromBytes(
       }
 
       final centerDbz = center.dbz;
-      final peakDbz = peakWide.dbz;
-      final nearbyEcho = peakDbz != null && peakDbz >= kRadarMinDbzForUi;
-      final atPoint = _isPrecipAtPoint(centerDbz: centerDbz, peakDbz: peakDbz);
+      final p14 = peakWide.dbz;
+      final p28 = peakOuter.dbz;
+      var peakDbz = p14 == null
+          ? p28
+          : p28 == null
+              ? p14
+              : math.max(p14, p28);
+
+      // Izolovaný peak bez priestorovej súdržnosti = šum (Hlohovec / Košice).
+      final rgba = byteData.buffer.asUint8List();
+      final coherentPx14 = _countDbzAboveInNeighborhood(
+        rgba,
+        width,
+        height,
+        px,
+        py,
+        kRadarPeakCompareRadiusPx,
+        18,
+      );
+      final coherentCorePx = _countDbzAboveInNeighborhood(
+        rgba,
+        width,
+        height,
+        px,
+        py,
+        kRadarCoreSampleRadiusPx,
+        16,
+      );
+      if (peakDbz != null && (centerDbz ?? 0) < 12) {
+        if (peakDbz < 26 && coherentPx14 < kRadarMinCoherentAreaPx) {
+          peakDbz = null;
+        }
+      }
+
+      final nearbyEcho =
+          peakDbz != null && peakDbz >= kRadarMinDbzSignificantEcho;
+      final atPoint = _isPrecipAtPoint(
+        centerDbz: centerDbz,
+        peakDbz: peakDbz,
+        coherentCorePx: coherentCorePx,
+        coherentPx14: coherentPx14,
+      );
 
       return RadarFrameSample(
         unix: frameUnix,
@@ -1311,6 +2585,8 @@ Future<RadarFrameSample?> _sampleRadarFrameFromBytes(
         precipAtPoint: atPoint,
         dbz: centerDbz,
         peakDbz: peakDbz,
+        coherentPx14: coherentPx14,
+        coherentCorePx: coherentCorePx,
         northDbz: sampleRing(0, -kRadarNowcastOuterRadiusPx),
         southDbz: sampleRing(0, kRadarNowcastOuterRadiusPx),
         eastDbz: sampleRing(kRadarNowcastOuterRadiusPx, 0),
@@ -1384,6 +2660,42 @@ double _radarMercatorY(double lat) {
   return (dbz: maxDbz);
 }
 
+/// Koľko pixelov v okolí má echo ≥ [minDbz] — izolovaný bod = šum.
+int _countDbzAboveInNeighborhood(
+  Uint8List rgba,
+  int width,
+  int height,
+  int centerPx,
+  int centerPy,
+  int radiusPx,
+  double minDbz,
+) {
+  final sx = (centerPx * width / kRadarImageCols).round().clamp(0, width - 1);
+  final sy = (centerPy * height / kRadarImageRows).round().clamp(0, height - 1);
+  final radiusScreen = radiusPx <= 0
+      ? 0
+      : (radiusPx * width / kRadarImageCols).round().clamp(2, 40);
+
+  var count = 0;
+  for (var dy = -radiusScreen; dy <= radiusScreen; dy++) {
+    for (var dx = -radiusScreen; dx <= radiusScreen; dx++) {
+      if (dx * dx + dy * dy > radiusScreen * radiusScreen) continue;
+      final x = (sx + dx).clamp(0, width - 1);
+      final y = (sy + dy).clamp(0, height - 1);
+      final offset = (y * width + x) * 4;
+      if (offset + 3 >= rgba.length) continue;
+      final dbz = _estimateDbzFromRadarPixel(
+        rgba[offset],
+        rgba[offset + 1],
+        rgba[offset + 2],
+        rgba[offset + 3],
+      );
+      if (dbz != null && dbz >= minDbz) count++;
+    }
+  }
+  return count;
+}
+
 ({double? dbz}) _sampleCenterDbz(
   Uint8List rgba,
   int width,
@@ -1391,12 +2703,56 @@ double _radarMercatorY(double lat) {
   int centerPx,
   int centerPy,
 ) {
-  return _sampleNeighborhoodMaxDbz(rgba, width, height, centerPx, centerPy, 0);
+  return _sampleNeighborhoodMaxDbz(
+    rgba,
+    width,
+    height,
+    centerPx,
+    centerPy,
+    kRadarCoreSampleRadiusPx,
+  );
 }
 
-/// Prší priamo nad pinom — stredový pixel ≥ 22 dBZ (peak v okolí neovplyvňuje).
-bool _isPrecipAtPoint({required double? centerDbz, double? peakDbz}) {
-  return centerDbz != null && centerDbz >= kRadarMinDbzPrecipNow;
+/// Prší priamo nad pinom — rovnaké pravidlá ako [RadarNowcastContext._rainAtPinNow].
+bool _isPrecipAtPoint({
+  required double? centerDbz,
+  double? peakDbz,
+  int coherentCorePx = 0,
+  int coherentPx14 = 0,
+}) {
+  final peak = peakDbz ?? centerDbz;
+  if (peak == null) return false;
+  if (centerDbz == null) return peak >= 32;
+
+  final gap = peak - centerDbz;
+
+  if (centerDbz >= kRadarMinDbzPrecipNow) {
+    if (peak - centerDbz >= 14 &&
+        centerDbz < 14 &&
+        coherentCorePx < kRadarMinCoherentCorePx) {
+      return false;
+    }
+    return true;
+  }
+  if (centerDbz >= 14 &&
+      peak >= 20 &&
+      gap <= 8 &&
+      coherentCorePx >= 1) {
+    return true;
+  }
+  if (centerDbz >= 12 &&
+      peak >= 22 &&
+      gap <= 6 &&
+      coherentCorePx >= kRadarMinCoherentCorePx) {
+    return true;
+  }
+  if (centerDbz >= 14 &&
+      peak >= 18 &&
+      gap <= 10 &&
+      coherentPx14 >= kRadarMinCoherentAreaPx) {
+    return true;
+  }
+  return false;
 }
 
 double? _estimateDbzFromRadarPixel(int r, int g, int b, int a) {
@@ -1417,7 +2773,10 @@ double? _estimateDbzFromRadarPixel(int r, int g, int b, int a) {
     }
   }
   // Priveľmi ďaleko od palety = nie radarová farba.
-  if (bestDist > 55 * 55) return null;
+  if (bestDist > 35 * 35) return null;
+  // Slabý neistý match = typický šum mapy (8–14 dBZ).
+  if (bestDbz <= 11 && bestDist > 18 * 18) return null;
+  if (bestDbz < 18 && bestDist > 22 * 22) return null;
   return bestDbz;
 }
 
