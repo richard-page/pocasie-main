@@ -96,7 +96,7 @@ TextStyle _chartCaptionStyle({double size = 11.5}) {
   );
 }
 
-const _kChartDayStripHeight = 274.0;
+const _kChartDayStripHeight = 292.0;
 
 const _kThunderWmoCodes = <int>{95, 96, 99};
 

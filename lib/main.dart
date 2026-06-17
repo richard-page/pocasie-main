@@ -32,13 +32,13 @@ part 'app_models.dart';
 part 'app_services.dart';
 part 'app_pages.dart';
 part 'weather_page.dart';
-part 'weather_stories_page.dart';
 part 'weather_chart_page.dart';
 part 'openmeteo_fetch.dart';
 part 'lightning_fetch.dart';
 part 'radar_nowcast_fetch.dart';
 
 final ValueNotifier<bool> _startupReadyNotifier = ValueNotifier<bool>(false);
+final ValueNotifier<bool> _showOnboardingNotifier = ValueNotifier<bool>(false);
 
 /// Farba kde sa má ambient prirodzene „dotknúť" tela obrazovky (rovnako ako pinned hero).
 const Color kAmbientBlendColor = Color(0xFF2A3848);
@@ -166,7 +166,7 @@ void main() async {
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   
   // 3. Spustíme appku okamžite - služby inicializujeme na pozadí
-  runApp(const WeatherApp(showOnboarding: false));
+  runApp(const WeatherApp());
   
   // 4. Odložená inicializácia služieb po prvom frame
   scheduler.SchedulerBinding.instance.addPostFrameCallback((_) async {
@@ -200,6 +200,7 @@ Future<void> _initServicesInBackground() async {
   try {
     final prefs = await SharedPreferences.getInstance();
     final showOnboarding = !(prefs.getBool(kOnboardingDoneKey) ?? false);
+    _showOnboardingNotifier.value = showOnboarding;
     _startupReadyNotifier.value = showOnboarding;
   } catch (e) {
     _startupReadyNotifier.value = true;
@@ -232,8 +233,7 @@ enum WindUnit {
 }
 
 class WeatherApp extends StatelessWidget {
-  final bool showOnboarding;
-  const WeatherApp({super.key, required this.showOnboarding});
+  const WeatherApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -308,13 +308,21 @@ class WeatherApp extends StatelessWidget {
             },
             home: LaunchSplashScreen(
               readyListenable: _startupReadyNotifier,
-              child: DefaultSelectionStyle(
-                selectionColor: theme.textSelectionTheme.selectionColor ??
-                    theme.colorScheme.primary.withValues(alpha: 0.40),
-                cursorColor: theme.textSelectionTheme.cursorColor ?? theme.colorScheme.primary,
-                child: ScaffoldMessenger(
-                  child: showOnboarding ? const OnboardingPage() : const WeatherPage(),
-                ),
+              child: ValueListenableBuilder<bool>(
+                valueListenable: _showOnboardingNotifier,
+                builder: (context, showOnboarding, _) {
+                  return DefaultSelectionStyle(
+                    selectionColor: theme.textSelectionTheme.selectionColor ??
+                        theme.colorScheme.primary.withValues(alpha: 0.40),
+                    cursorColor: theme.textSelectionTheme.cursorColor ??
+                        theme.colorScheme.primary,
+                    child: ScaffoldMessenger(
+                      child: showOnboarding
+                          ? const OnboardingPage()
+                          : const WeatherPage(),
+                    ),
+                  );
+                },
               ),
             ),
           ),
@@ -1355,12 +1363,18 @@ int _hourlySlotRawDisplayIconCode(
   final double? slotMm = smoothed.precipitation.length > smoothedIndex
       ? smoothed.precipitation[smoothedIndex]
       : null;
-  return _weatherIconCodeWithPrecipThreshold(
+  final code = _weatherIconCodeWithPrecipThreshold(
     displayCode,
     rawProbPercent,
     cloudCoverPercent: slotCloudMed,
     hourlyPrecipitationMm: slotMm,
     snowfallCm: 0.0,
+  );
+  return _clampPrecipitationIconIntensity(
+    code,
+    rawProbPercent,
+    slotMm ?? 0.0,
+    isDailyContext: false,
   );
 }
 
@@ -1658,6 +1672,15 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
     }
   }
 
+  for (var i = 0; i < stripIndices.length; i++) {
+    displayIcons[i] = _clampPrecipitationIconIntensity(
+      displayIcons[i],
+      storedProbs[i],
+      precipMmList[i],
+      isDailyContext: false,
+    );
+  }
+
   final icons = <int, int>{};
   final precipMm = <int, double>{};
   final probs = <int, int>{};
@@ -1689,6 +1712,8 @@ bool _dailyTileNightContainsParsed(DateTime slot, String tileCalendarIso) {
       (stamp == followingStamp && hour < 6);
 }
 
+/// Denné úseky na kartičke — lokálny čas (wall clock).
+/// Ráno 6–11, Poobede 12–17, Večer 18–22, Noc 23–5 (+ skoré ráno nasledujúceho dňa do 5:59).
 bool _dailyTileSegmentMatchesParsed(
     DateTime parsed, String calendarTileIso, String segment) {
   final hour = parsed.hour;
@@ -2118,6 +2143,20 @@ Map<String, dynamic> _getDayPartWeather(
   final List<int> partGridStripOnlyCodes = [];
   final precipTailTrim = ecmwfPrecipEventTailTrimMask(hourly);
 
+  var stripAlignedPart = false;
+  if (stripState != null) {
+    for (var j = 0; j < hourly.time.length; j++) {
+      if (!stripState.icons.containsKey(j)) continue;
+      final parsedJ = _tryParseHourlyTimestamp(hourly.time[j]);
+      if (parsedJ == null) continue;
+      final localJ = _hourlyParsedLocal(parsedJ, utcOffsetSeconds);
+      if (_dailyTileSegmentMatchesParsed(localJ, datePrefix, part)) {
+        stripAlignedPart = true;
+        break;
+      }
+    }
+  }
+
   for (int i = 0; i < hourly.time.length; i++) {
     final timeStr = hourly.time[i];
     final parsedSlot = _tryParseHourlyTimestamp(timeStr);
@@ -2130,13 +2169,6 @@ Map<String, dynamic> _getDayPartWeather(
     if (matchesPart) {
       temps.add(hourly.temperature?[i]);
 
-      int rawCode = hourly.weatherCode?[i] ?? 0;
-      int rawProb = hourly.precipitationProbability?[i] ?? 0;
-      double rawPrecip = hourly.precipitation?[i] ?? 0.0;
-      if (rawProb > maxProbRawInPart) maxProbRawInPart = rawProb;
-      if (rawPrecip > maxPrecipRawInPart) maxPrecipRawInPart = rawPrecip;
-      sumPrecipRawInPart += rawPrecip;
-
       final ccList = hourly.cloudCover;
       if (ccList != null && i < ccList.length) {
         final double? rawCloud = ccList[i];
@@ -2145,6 +2177,18 @@ Map<String, dynamic> _getDayPartWeather(
           countCloudRawInPart++;
         }
       }
+
+      if (stripState != null) {
+        if (stripAlignedPart && !stripState.icons.containsKey(i)) continue;
+        if (!stripAlignedPart) continue;
+      }
+
+      int rawCode = hourly.weatherCode?[i] ?? 0;
+      int rawProb = hourly.precipitationProbability?[i] ?? 0;
+      double rawPrecip = hourly.precipitation?[i] ?? 0.0;
+      if (rawProb > maxProbRawInPart) maxProbRawInPart = rawProb;
+      if (rawPrecip > maxPrecipRawInPart) maxPrecipRawInPart = rawPrecip;
+      sumPrecipRawInPart += rawPrecip;
 
       final processed = _processWeather(
         rawCode,
@@ -2269,10 +2313,31 @@ Map<String, dynamic> _getDayPartWeather(
 
   String? sampleTime = times.isNotEmpty ? times.first : null;
 
+  final double? avgCloudInPart =
+      countCloudRawInPart > 0 ? sumCloudRawInPart / countCloudRawInPart : null;
+
   /// Ak je úsek v páse „24 h“, ikona len z tých hodín (overiteľné oproti zoznamu).
   final List<int> codesForPartIcon = partGridStripOnlyCodes.isNotEmpty
       ? partGridStripOnlyCodes
       : partGridDisplayedCodes;
+
+  if (codesForPartIcon.isEmpty && stripState != null) {
+    final skyCode = skyWmoFromCloudCover(avgCloudInPart);
+    return {
+      'temp': tempStr,
+      'code': skyCode,
+      'iconCode': skyCode,
+      'icon': getWeatherIcon(
+        skyCode,
+        hourTime: sampleTime,
+        daily: daily,
+        size: 38,
+        forceDay: forceDayForBlock,
+        forceNight: forceNightForBlock,
+      ),
+      'prob': maxProb,
+    };
+  }
 
   final bool alignPartIconWithHourlyPipeline = codesForPartIcon.isNotEmpty;
   final int seededFromHourlyFairGrid = alignPartIconWithHourlyPipeline
@@ -2315,9 +2380,6 @@ Map<String, dynamic> _getDayPartWeather(
     blockIconCandidate = mergedFromDaily;
     mergedDailyPrecipIntoBlock = true;
   }
-
-  final double? avgCloudInPart =
-      countCloudRawInPart > 0 ? sumCloudRawInPart / countCloudRawInPart : null;
 
   int iconProb = suppressWetDayIcons ? 0 : maxProbRawInPart;
   double iconMaxMm = suppressWetDayIcons ? 0.0 : maxPrecipRawInPart;
@@ -2434,7 +2496,9 @@ Map<String, dynamic> _getDayPartWeather(
     'iconCode': blockIconCode,
     'icon': iconWidget,
     'prob': maxProb,
-    'precip': maxPrecip, 
+    'precip': maxPrecip,
+    'partSumMm': iconSumMm,
+    'partMaxMm': iconMaxMm,
   };
 }
 
