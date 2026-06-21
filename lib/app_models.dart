@@ -267,6 +267,8 @@ class WeatherData {
   final bool usedFallbackToBestMatch;
   /// Hodinová pravdepodobnosť zrážok z modela (ECMWF Open Data GRIB ju nemá).
   final bool precipitationProbabilityAvailable;
+  /// `bestmatch` | `ecmwf_ifs025` — zdroj predpovede v UI.
+  final String? forecastModelId;
 
   const WeatherData({
     this.current,
@@ -278,7 +280,11 @@ class WeatherData {
     this.utcOffsetSeconds,
     this.usedFallbackToBestMatch = false,
     this.precipitationProbabilityAvailable = false,
+    this.forecastModelId,
   });
+
+  bool get isBestMatchForecast =>
+      forecastModelId == 'bestmatch' || usedFallbackToBestMatch;
 
   factory WeatherData.fromJson(Map<String, dynamic> json) => WeatherData(
         current: json['current'] != null
@@ -297,6 +303,7 @@ class WeatherData {
         usedFallbackToBestMatch: json['used_fallback_to_best_match'] == true,
         precipitationProbabilityAvailable:
             json['precipitation_probability_available'] == true,
+        forecastModelId: json['model'] as String?,
       );
 
   WeatherData copyWith({
@@ -309,6 +316,7 @@ class WeatherData {
     int? utcOffsetSeconds,
     bool? usedFallbackToBestMatch,
     bool? precipitationProbabilityAvailable,
+    String? forecastModelId,
   }) {
     return WeatherData(
       current: current ?? this.current,
@@ -321,6 +329,7 @@ class WeatherData {
       usedFallbackToBestMatch: usedFallbackToBestMatch ?? this.usedFallbackToBestMatch,
       precipitationProbabilityAvailable:
           precipitationProbabilityAvailable ?? this.precipitationProbabilityAvailable,
+      forecastModelId: forecastModelId ?? this.forecastModelId,
     );
   }
 
@@ -335,6 +344,7 @@ class WeatherData {
         if (usedFallbackToBestMatch) 'used_fallback_to_best_match': true,
         if (precipitationProbabilityAvailable)
           'precipitation_probability_available': true,
+        if (forecastModelId != null) 'model': forecastModelId,
       };
 }
 
@@ -577,12 +587,6 @@ class DailyForecast {
         if (timezone != null) 'timezone': timezone,
       };
 }
-
-const List<(String, double)> kBestMatchModelWeights = <(String, double)>[
-  ('ecmwf_ifs', 1.0),
-  ('icon_seamless', 1.0),
-  ('gfs_seamless', 0.8),
-];
 
 bool _forecastHasCoreFields(WeatherData? d) {
   if (d == null) return false;

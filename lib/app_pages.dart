@@ -2774,36 +2774,134 @@ class _CitySearchPageState extends State<CitySearchPage> {
   Future<void> _search(String q) async {
     try {
       setState(() => _loading = true);
-      final uri = Uri.parse('$kGeoApi/search?name=${Uri.encodeComponent(q)}&count=24&language=sk&format=json');
-      final r = await http.get(uri).timeout(const Duration(seconds: 5));
-      if (r.statusCode == 200) {
-        final data = json.decode(r.body);
-        final raw = (data['results'] as List?) ?? [];
-        final filteredRaw = _filterGhostGeocodeRows(raw);
-        final List<GeoCity> cities =
-            filteredRaw.map((e) => GeoCity.fromGeoJson(e)).toList();
-        final Map<String, GeoCity> uniqueByDisplayKey = {};
-        for (final c in cities) {
-          final key = _cityDisplayKey(c);
-          final prev = uniqueByDisplayKey[key];
-          if (prev == null || (c.population ?? 0) > (prev.population ?? 0)) {
-            uniqueByDisplayKey[key] = c;
-          }
-        }
-        final mergedCities = _mergeNearDuplicateCities(uniqueByDisplayKey.values.toList());
-        final normalizedQuery = _normalizeSearchPart(q);
-        final relevantCities = mergedCities
-            .where((c) => _isRelevantCityForQuery(c, normalizedQuery))
-            .toList();
-        setState(() => _results = relevantCities);
-      } else {
+      var cities = await _searchOpenMeteo(q);
+      if (cities.length < 8) {
+        final nominatim = await _searchNominatim(q);
+        cities = [...cities, ...nominatim];
+      }
+      setState(() => _results = _finalizeSearchResults(cities, q));
+    } catch (_) {
+      try {
+        final nominatim = await _searchNominatim(q);
+        setState(() => _results = _finalizeSearchResults(nominatim, q));
+      } catch (_) {
         setState(() => _results = <GeoCity>[]);
       }
-    } catch (_) {
-      setState(() => _results = <GeoCity>[]);
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  List<GeoCity> _finalizeSearchResults(List<GeoCity> cities, String q) {
+    final Map<String, GeoCity> uniqueByDisplayKey = {};
+    for (final c in cities) {
+      final key = _cityDisplayKey(c);
+      final prev = uniqueByDisplayKey[key];
+      if (prev == null || (c.population ?? 0) > (prev.population ?? 0)) {
+        uniqueByDisplayKey[key] = c;
+      }
+    }
+    final mergedCities =
+        _mergeNearDuplicateCities(uniqueByDisplayKey.values.toList());
+    final normalizedQuery = _normalizeSearchPart(q);
+    return mergedCities
+        .where((c) => _isRelevantCityForQuery(c, normalizedQuery))
+        .toList();
+  }
+
+  Future<List<GeoCity>> _searchOpenMeteo(String q) async {
+    final uri = Uri.parse(
+      '$kGeoApi/search?name=${Uri.encodeComponent(q)}&count=50&language=sk&format=json',
+    );
+    final r = await http.get(uri).timeout(const Duration(seconds: 8));
+    if (r.statusCode != 200) return [];
+    final data = json.decode(r.body);
+    final raw = (data['results'] as List?) ?? [];
+    final filteredRaw = _filterGhostGeocodeRows(raw);
+    return filteredRaw.map((e) => GeoCity.fromGeoJson(e)).toList();
+  }
+
+  Future<List<GeoCity>> _searchNominatim(String q) async {
+    final uri = Uri.parse(kNominatimSearchApi).replace(
+      queryParameters: {
+        'q': q,
+        'format': 'json',
+        'addressdetails': '1',
+        'limit': '15',
+        'accept-language': 'sk',
+      },
+    );
+    final r = await http
+        .get(
+          uri,
+          headers: const {'User-Agent': kNominatimUserAgent},
+        )
+        .timeout(const Duration(seconds: 10));
+    if (r.statusCode != 200) return [];
+    final raw = json.decode(r.body);
+    if (raw is! List) return [];
+
+    final out = <GeoCity>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final city = _geoCityFromNominatim(Map<String, dynamic>.from(item));
+      if (city != null) out.add(city);
+    }
+    return out;
+  }
+
+  GeoCity? _geoCityFromNominatim(Map<String, dynamic> item) {
+    if (!_nominatimRowIsPlace(item)) return null;
+
+    final lat = double.tryParse(item['lat']?.toString() ?? '');
+    final lon = double.tryParse(item['lon']?.toString() ?? '');
+    if (lat == null || lon == null) return null;
+
+    final addr = item['address'] is Map
+        ? Map<String, dynamic>.from(item['address'] as Map)
+        : <String, dynamic>{};
+
+    String pick(List<String> keys) {
+      for (final k in keys) {
+        final v = addr[k];
+        if (v is String && v.trim().isNotEmpty) return v.trim();
+      }
+      return '';
+    }
+
+    final rawName = item['name']?.toString().trim() ?? '';
+    final name = rawName.isNotEmpty
+        ? rawName
+        : pick(['village', 'town', 'city', 'hamlet', 'municipality', 'suburb']);
+    if (name.isEmpty) return null;
+
+    return GeoCity(
+      name: name,
+      lat: lat,
+      lon: lon,
+      country: pick(['country']),
+      countryCode: pick(['country_code']).toUpperCase(),
+      admin1: pick(['state', 'region']),
+      admin2: pick(['county', 'state_district']),
+      population: null,
+      timezone: 'auto',
+    );
+  }
+
+  bool _nominatimRowIsPlace(Map<String, dynamic> item) {
+    final addresstype = (item['addresstype'] ?? '').toString();
+    const ok = {
+      'city',
+      'town',
+      'village',
+      'hamlet',
+      'municipality',
+      'suburb',
+      'locality',
+      'administrative',
+    };
+    if (ok.contains(addresstype)) return true;
+    return (item['class'] ?? '').toString() == 'place';
   }
 
   void _onChanged() {
@@ -2974,11 +3072,8 @@ class _CitySearchPageState extends State<CitySearchPage> {
       if (tokenStartsWithQuery(field)) return true;
     }
 
-    // Pri veľmi krátkom dopyte povoľ jemnejšie matchovanie (aby nepadla použiteľnosť).
-    if (compactQuery.length <= 3) {
-      for (final field in fields) {
-        if (field.contains(compactQuery)) return true;
-      }
+    for (final field in fields) {
+      if (field.contains(compactQuery)) return true;
     }
 
     return false;

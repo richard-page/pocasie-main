@@ -198,33 +198,38 @@ int _dailyMainIconSkyTextCode(WeatherData data, int dayIndex) {
   );
 
   final showableDayPrecip = dayShowablePrecipFromHourly(h, dateStr);
-  final double effectiveDailyPrecipMm =
-      showableDayPrecip.any && showableDayPrecip.sumMm > 0
-          ? showableDayPrecip.sumMm
-          : apiDailyPrecip;
+  final double effectiveDailyPrecipMm = dailyPrecipMmForIconIntensity(
+    apiDailyPrecip: apiDailyPrecip,
+    hourlySumMm: showableDayPrecip.any ? showableDayPrecip.sumMm : 0.0,
+  );
+  final int effectiveDailyProb = dailyPrecipProbForIconIntensity(
+    dailyApiProb: dailyApiProb,
+    hourlyStripMaxProb: showableDayPrecip.maxProb,
+    hourlyDayMaxProb: hourlyDayMaxPrecipProb(h, dateStr),
+  );
 
   final locTime = DateTime.now().toUtc().add(Duration(seconds: data.utcOffsetSeconds ?? 0));
   final utcOff = data.utcOffsetSeconds;
   final morningWeather = _getDayPartWeather(
-      dateStr, h, 'morning', daily, fallbackDailyCode, dailyApiProb, current, locTime,
+      dateStr, h, 'morning', daily, fallbackDailyCode, effectiveDailyProb, current, locTime,
       suppressWetDayIcons: suppressWetDayIcons,
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
       dailyTotalSnowCm: apiDailySnow,
       utcOffsetSeconds: utcOff);
   final afternoonWeather = _getDayPartWeather(
-      dateStr, h, 'afternoon', daily, fallbackDailyCode, dailyApiProb, current, locTime,
+      dateStr, h, 'afternoon', daily, fallbackDailyCode, effectiveDailyProb, current, locTime,
       suppressWetDayIcons: suppressWetDayIcons,
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
       dailyTotalSnowCm: apiDailySnow,
       utcOffsetSeconds: utcOff);
   final eveningWeather = _getDayPartWeather(
-      dateStr, h, 'evening', daily, fallbackDailyCode, dailyApiProb, current, locTime,
+      dateStr, h, 'evening', daily, fallbackDailyCode, effectiveDailyProb, current, locTime,
       suppressWetDayIcons: suppressWetDayIcons,
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
       dailyTotalSnowCm: apiDailySnow,
       utcOffsetSeconds: utcOff);
   final nightWeather = _getDayPartWeather(
-      dateStr, h, 'night', daily, fallbackDailyCode, dailyApiProb, current, locTime,
+      dateStr, h, 'night', daily, fallbackDailyCode, effectiveDailyProb, current, locTime,
       suppressWetDayIcons: suppressWetDayIcons,
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
       dailyTotalSnowCm: apiDailySnow,
@@ -241,6 +246,8 @@ int _dailyMainIconSkyTextCode(WeatherData data, int dayIndex) {
       eveningWeather['iconCode'] as int?,
       nightWeather['iconCode'] as int?,
     ],
+    dailyPrecipMm: effectiveDailyPrecipMm,
+    dailyPrecipProb: effectiveDailyProb,
   );
 }
 
@@ -333,6 +340,17 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         fontWeight: FontWeight.w500,
         height: 1.35,
       );
+
+  static const double _kHomeInsightLeadingSize = 36;
+  static const double _kHomeInsightLeadingGap = 12;
+
+  Widget _homeInsightLeadingSlot(Widget icon) {
+    return SizedBox(
+      width: _kHomeInsightLeadingSize,
+      height: _kHomeInsightLeadingSize,
+      child: Center(child: icon),
+    );
+  }
   /// Pozadie pásika „Predpoveď“ aj zoznamu 24 h / 14 dní — spodný nátok ambientu.
   static const Color forecastSectionBackground = kAmbientBlendColor;
   /// Rovnaká max. šírka a bočný okraj ako riadky 24 h / 14 dní.
@@ -713,7 +731,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       final city = currentCity;
       if (city != null) {
         unawaited(_refreshLightningForCity(city));
-        if (radarCoverageForCity(city)) {
+        if (radarNowcastActiveForCity(city)) {
           unawaited(_refreshRadarNowcastForCity(city));
         }
       }
@@ -899,8 +917,14 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            const Icon(Icons.wb_sunny_outlined, color: Color(0xFFF8D24A), size: 22),
-            const SizedBox(width: 12),
+            _homeInsightLeadingSlot(
+              const Icon(
+                Icons.wb_sunny_outlined,
+                color: Color(0xFFF8D24A),
+                size: 22,
+              ),
+            ),
+            const SizedBox(width: _kHomeInsightLeadingGap),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -925,7 +949,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
   RadarPrecipTrackerInfo? _radarPrecipTrackerInfoOrNull() {
     final city = currentCity;
-    if (city == null || !radarCoverageForCity(city)) return null;
+    if (city == null || !radarNowcastActiveForCity(city)) return null;
 
     final ctx = _radarNowcastContext;
     final hourly = weatherData?.hourly;
@@ -989,30 +1013,21 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _radarTrackerLeadingIcon(double size) {
-    return SizedBox(
-      width: size,
-      height: size,
-      child: Icon(
-        Icons.radar,
-        size: size * 0.82,
-        color: const Color(0xFF81D4FA),
-      ),
-    );
-  }
-
   Widget _buildRadarPrecipTrackerSection(RadarPrecipTrackerInfo info) {
-    final compact = !info.isExpanded;
-    final iconSize = compact ? 36.0 : 48.0;
-
     return _heroGlassCard(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            _radarTrackerLeadingIcon(iconSize),
-            const SizedBox(width: 12),
+            _homeInsightLeadingSlot(
+              const Icon(
+                Icons.radar,
+                size: 24,
+                color: Color(0xFF81D4FA),
+              ),
+            ),
+            const SizedBox(width: _kHomeInsightLeadingGap),
             Expanded(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -1083,7 +1098,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   }
 
   void _maybeRefreshRadarTracker(GeoCity city) {
-    if (!radarCoverageForCity(city)) return;
+    if (!radarNowcastActiveForCity(city)) return;
     final now = DateTime.now();
     if (_lastRadarTrackerRefreshAt != null &&
         now.difference(_lastRadarTrackerRefreshAt!) <
@@ -1095,7 +1110,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   }
 
   Future<void> _refreshRadarNowcastForCity(GeoCity city) async {
-    if (!radarCoverageForCity(city)) {
+    if (!radarNowcastActiveForCity(city)) {
       if (!mounted) return;
       if (_radarNowcastContext.eligible) {
         setState(() => _radarNowcastContext = RadarNowcastContext.inactive);
@@ -1134,11 +1149,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     if (currentCity == null) return;
     final GeoCity citySnap = currentCity!;
     try {
-      final weatherFuture = _fetchUnifiedWeatherData(
+      final weatherFuture = _fetchEcmwfWeatherData(
         citySnap.lat,
         citySnap.lon,
-        forecastModel: WeatherForecastModel.openMeteo,
-        forceRefresh: false,
         apiTimezone: citySnap.timezone,
       );
       final aqiFuture = _fetchAirQualityData(citySnap.lat, citySnap.lon, forceRefresh: false);
@@ -1172,6 +1185,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
           (currentCity!.lon - citySnap.lon).abs() > 0.0002) {
         return;
       }
+      await _observeDailyPrecipLatchForCity(citySnap, data);
       setState(() {
         weatherData = data;
         airQualityData = aqiData;
@@ -1193,6 +1207,13 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       "last_updated": DateTime.now().toIso8601String(),
     });
   }
+
+  Future<void> _observeDailyPrecipLatchForCity(GeoCity city, WeatherData data) =>
+      observeDailyPrecipDisplayLatchForWeatherData(
+        lat: city.lat,
+        lon: city.lon,
+        data: data,
+      );
 
   /// Zhoda s UI: berieme vyššiu z dennej max. rýchlosti a dennej max. nárazov — push predtým ukazoval len stály vietor (~11), zatiaľ čo nárazy môžu byť ~25.
   double _dailySummaryWindPeakKmh(WeatherData data) {
@@ -1646,6 +1667,15 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
   GeoCity _cityOrDefault(GeoCity? city) => city ?? kDefaultFallbackCity;
 
+  Future<String?> _cachedWeatherJsonForCity(double lat, double lon) async {
+    return CacheManager.getWeather(
+      lat,
+      lon,
+      forecastWeatherCacheKey(WeatherForecastModel.openMeteo),
+      ignoreExpiry: true,
+    );
+  }
+
   Future<bool> _canUseDeviceLocation() async {
     if (!_myLocationEnabled) return false;
     if (!await Geolocator.isLocationServiceEnabled()) return false;
@@ -1656,12 +1686,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
   Future<void> _primeWeatherFromCacheIfAny(GeoCity city) async {
     try {
-      final cachedWeather = await CacheManager.getWeather(
-        city.lat,
-        city.lon,
-        forecastWeatherCacheKey(WeatherForecastModel.openMeteo),
-        ignoreExpiry: true,
-      );
+      final cachedWeather = await _cachedWeatherJsonForCity(city.lat, city.lon);
       if (cachedWeather == null) return;
       final cachedData = WeatherData.fromJson(json.decode(cachedWeather));
       if (!_forecastHasCoreFields(cachedData)) return;
@@ -1703,6 +1728,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         } catch (_) {}
       }
       if (!mounted) return;
+      await _observeDailyPrecipLatchForCity(city, data);
       setState(() => weatherData = data);
       unawaited(_refreshLightningForCity(city));
       unawaited(_refreshRadarNowcastForCity(city));
@@ -1912,8 +1938,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     Map<String, dynamic>? map,
     double lat,
     double lon,
-    String timezone,
-  ) async {
+    String timezone, {
+    WeatherForecastModel cacheModel = WeatherForecastModel.openMeteo,
+  }) async {
     if (map == null) return null;
     try {
       final data = WeatherData.fromJson(map);
@@ -1933,7 +1960,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       await CacheManager.saveWeather(
         lat,
         lon,
-        forecastWeatherCacheKey(WeatherForecastModel.openMeteo),
+        forecastWeatherCacheKey(cacheModel),
         json.encode(result.toJson()),
       );
       return result;
@@ -1943,24 +1970,24 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     }
   }
 
-  Future<WeatherData> _fetchBestMatchBlendInternal(
+  Future<WeatherData> _fetchEcmwfWeatherData(
     double lat,
-    double lon,
-    String timezone, {
-    required bool forceRefresh,
-    required bool markFallback,
+    double lon, {
+    bool forceRefresh = false,
+    String? apiTimezone,
   }) async {
+    final timezone = _normalizeApiTimezone(apiTimezone ?? currentCity?.timezone ?? 'auto');
     const String apiTz = 'auto';
+    const cacheModel = WeatherForecastModel.openMeteo;
 
-    Future<WeatherData?> fromBlendCache({required bool allowStale}) async {
+    Future<WeatherData?> fromCache({required bool allowStale}) async {
       final cachedJson = await CacheManager.getWeather(
         lat,
         lon,
-        forecastWeatherCacheKey(WeatherForecastModel.openMeteo),
+        forecastWeatherCacheKey(cacheModel),
         ignoreExpiry: allowStale,
       );
       WeatherData? data = await _weatherDataFromStoredJson(cachedJson, lat, lon, timezone);
-      // Aktualizácia satelitného cloud cover aj pri cache (živé dáta)
       if (data?.current != null) {
         try {
           final satCloud = await fetchSatelliteCloudCover(lat, lon);
@@ -1989,30 +2016,32 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       return data;
     }
 
-    if (!forceRefresh && !markFallback) {
-      final fresh = await fromBlendCache(allowStale: false);
+    if (!forceRefresh) {
+      final fresh = await fromCache(allowStale: false);
       if (fresh != null) return fresh;
     }
 
-    final bool skipDiskCache = forceRefresh || markFallback;
     Object? lastError;
-
-    // ECMWF IFS forecast - oficiálny model
     try {
       final map = await _downloadOpenMeteoForecast(
         lat,
         lon,
         apiTz,
-        forceRefresh: skipDiskCache,
+        forceRefresh: forceRefresh,
       );
-      WeatherData? parsed = await _tryForecastFromModelMap(map, lat, lon, timezone);
+      final parsed = await _tryForecastFromModelMap(
+        map,
+        lat,
+        lon,
+        timezone,
+        cacheModel: cacheModel,
+      );
       if (parsed != null) {
-        // Získanie satelitného cloud cover a aktualizácia current
         try {
           final satCloud = await fetchSatelliteCloudCover(lat, lon);
           if (satCloud != null && parsed.current != null) {
             final current = parsed.current!;
-            parsed = parsed.copyWith(
+            return parsed.copyWith(
               current: CurrentWeather(
                 temperature: current.temperature,
                 isDay: current.isDay,
@@ -2031,53 +2060,18 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
             );
           }
         } catch (_) {}
-        return parsed!;  // null check vyššie
+        return parsed;
       }
     } catch (e) {
       lastError = e;
       debugPrint('ECMWF forecast failed: $e');
     }
 
-    final stale = await fromBlendCache(allowStale: true);
+    final stale = await fromCache(allowStale: true);
     if (stale != null) return stale;
 
     if (lastError is Exception) throw lastError;
     throw Exception('Predpoveď sa nepodarilo načítať');
-  }
-
-  Future<WeatherData> _fetchUnifiedWeatherData(
-    double lat,
-    double lon, {
-    required WeatherForecastModel forecastModel,
-    bool forceRefresh = false,
-    String? apiTimezone,
-  }) async {
-    final timezone = _normalizeApiTimezone(apiTimezone ?? currentCity?.timezone ?? 'auto');
-
-    // ECMWF IFS - jediný oficiálny model
-    try {
-      final map = await _downloadOpenMeteoForecast(
-        lat,
-        lon,
-        timezone,
-        forceRefresh: forceRefresh,
-      );
-      if (map != null) {
-        final data = WeatherData.fromJson(map);
-        if (_forecastHasCoreFields(data)) {
-          return await _augmentWeatherDataWithUvFallback(data, lat, lon, timezone);
-        }
-      }
-    } catch (_) {}
-
-    // Fallback na internú metódu
-    return _fetchBestMatchBlendInternal(
-      lat,
-      lon,
-      timezone,
-      forceRefresh: true,
-      markFallback: true,
-    );
   }
 
   Future<AirQualityData> _fetchAirQualityData(double lat, double lon, {bool forceRefresh = false}) async {
@@ -2133,12 +2127,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
   Future<({WeatherData data, AirQualityData? aqi})?> _loadStoredWeatherForCity(GeoCity city) async {
     try {
-      final cachedWeather = await CacheManager.getWeather(
-        city.lat,
-        city.lon,
-        forecastWeatherCacheKey(WeatherForecastModel.openMeteo),
-        ignoreExpiry: true,
-      );
+      final cachedWeather = await _cachedWeatherJsonForCity(city.lat, city.lon);
       if (cachedWeather == null) return null;
       final cachedData = WeatherData.fromJson(json.decode(cachedWeather));
       if (!_forecastHasCoreFields(cachedData)) return null;
@@ -2204,6 +2193,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       final offlineStored = await _loadStoredWeatherForCity(city);
       if (offlineStored != null) {
         if (!mounted || mySerial != _weatherFetchSerial) return;
+        await _observeDailyPrecipLatchForCity(city, offlineStored.data);
         setState(() {
           currentCity = city;
           weatherData = offlineStored.data;
@@ -2230,6 +2220,10 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final stored = await _loadStoredWeatherForCity(city);
     final bool horizonTooShort = !forecastDailyHorizonComplete(weatherData);
     final bool effectiveForceRefresh = forceRefresh || horizonTooShort;
+
+    if (stored != null) {
+      await _observeDailyPrecipLatchForCity(city, stored.data);
+    }
 
     setState(() {
       currentCity = city;
@@ -2261,10 +2255,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       late WeatherData data;
       for (int attempt = 0; attempt < 2; attempt++) {
         try {
-          data = await _fetchUnifiedWeatherData(
+          data = await _fetchEcmwfWeatherData(
             city.lat,
             city.lon,
-            forecastModel: WeatherForecastModel.openMeteo,
             forceRefresh: effectiveForceRefresh,
             apiTimezone: 'auto',
           );
@@ -2307,7 +2300,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       }
 
       if (!mounted || mySerial != _weatherFetchSerial) return;
-      if (!mounted || mySerial != _weatherFetchSerial) return;
+      await _observeDailyPrecipLatchForCity(city, data);
       setState(() {
         weatherData = data;
         airQualityData = aqiData;
@@ -2332,12 +2325,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       _fetchHistorical(city);
     } catch (e) {
       debugPrint('fetchWeatherByCity failed for ${city.name}: $e');
-      final cachedWeather = await CacheManager.getWeather(
-        city.lat,
-        city.lon,
-        forecastWeatherCacheKey(WeatherForecastModel.openMeteo),
-        ignoreExpiry: true,
-      );
+      final cachedWeather = await _cachedWeatherJsonForCity(city.lat, city.lon);
       final cachedAqi = await CacheManager.getAirQuality(city.lat, city.lon, ignoreExpiry: true);
 
       if (cachedWeather != null) {
@@ -2361,6 +2349,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
             }
 
             if (!mounted || mySerial != _weatherFetchSerial) return;
+            await _observeDailyPrecipLatchForCity(city, data);
             setState(() {
               weatherData = data;
               airQualityData = aqiData;
@@ -2909,10 +2898,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
               _preferStickyCityIdentity(currentCity, city, position.latitude, position.longitude);
 
           final int mySerial = ++_weatherFetchSerial;
-          final weatherFuture = _fetchUnifiedWeatherData(
+          final weatherFuture = _fetchEcmwfWeatherData(
             pickedCity.lat,
             pickedCity.lon,
-            forecastModel: WeatherForecastModel.openMeteo,
             forceRefresh: true,
             apiTimezone: pickedCity.timezone,
           ).timeout(const Duration(seconds: 15));
@@ -2929,6 +2917,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
           }
 
           if (!mounted || mySerial != _weatherFetchSerial) return;
+          await _observeDailyPrecipLatchForCity(pickedCity, weather);
           setState(() {
             currentCity = pickedCity;
             weatherData = weather;
@@ -2968,10 +2957,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final GeoCity city = currentCity!;
 
     try {
-      final weatherFuture = _fetchUnifiedWeatherData(
+      final weatherFuture = _fetchEcmwfWeatherData(
         city.lat,
         city.lon,
-        forecastModel: WeatherForecastModel.openMeteo,
         forceRefresh: true,
         apiTimezone: city.timezone,
       ).timeout(const Duration(seconds: 15));
@@ -2987,6 +2975,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       }
 
       if (!mounted || mySerial != _weatherFetchSerial) return;
+      await _observeDailyPrecipLatchForCity(city, data);
       setState(() {
         weatherData = data;
         airQualityData = aqiData;
@@ -2998,12 +2987,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       await _syncAllLeadAlerts(data);
       _scheduleWidgetUpdate();
     } catch (e) {
-      final cachedWeather = await CacheManager.getWeather(
-        city.lat,
-        city.lon,
-        forecastWeatherCacheKey(WeatherForecastModel.openMeteo),
-        ignoreExpiry: true,
-      );
+      final cachedWeather = await _cachedWeatherJsonForCity(city.lat, city.lon);
       final cachedAqi = await CacheManager.getAirQuality(city.lat, city.lon, ignoreExpiry: true);
 
       if (cachedWeather != null) {
@@ -3020,6 +3004,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         }
 
         if (!mounted || mySerial != _weatherFetchSerial) return;
+        await _observeDailyPrecipLatchForCity(city, data);
         setState(() {
           weatherData = data;
           airQualityData = aqiData;
@@ -3314,7 +3299,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final DateTime deviceNow = DateTime.now();
 
     final radarCoverageActive =
-        currentCity != null && radarCoverageForCity(currentCity!);
+        currentCity != null && radarNowcastActiveForCity(currentCity!);
 
     // Ten istý WMO + ikona ako aktuálny riadok v 24 h (bez „najsilnejšieho“ dažďa z budúcich hodín).
     if (current != null) {
@@ -4586,8 +4571,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final city = currentCity;
     _syncStableStripPrecipCityKey(city);
     final radarStripActive =
-        city != null && radarCoverageForCity(city) && radarCtx.eligible;
-    if (city != null && radarCoverageForCity(city)) {
+        city != null && radarNowcastActiveForCity(city) && radarCtx.eligible;
+    if (city != null && radarNowcastActiveForCity(city)) {
       final now = DateTime.now();
       if (_lastRadarStripRefreshAt == null ||
           now.difference(_lastRadarStripRefreshAt!) >
@@ -4604,7 +4589,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       daily,
       weatherData?.utcOffsetSeconds,
       radarNowcast: radarCtx,
-      radarCoverageActive: city != null && radarCoverageForCity(city),
+      radarCoverageActive: city != null && radarNowcastActiveForCity(city),
       lightningNearby: _lightningNearby,
     );
     if (stripState == null || stripState.icons.isEmpty) {
@@ -4635,6 +4620,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final stripApiWeatherCodes = <int?>[];
     final stripCloudPcts = <double?>[];
     final stripPrecipMm = <double>[];
+    final stripSlotHours = <DateTime>[];
     final nowHour = DateTime(
       locTime.year,
       locTime.month,
@@ -4675,6 +4661,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
               radarPinMm: pinNow ? pipelineMm : null,
               stripProb: storedProb,
               wetDisplayIcon: wetIcon,
+              displayIconCode: iconCode,
             );
       final probForShow = wetIcon
           ? math.max(storedProb, kMinPrecipProbPercent)
@@ -4694,11 +4681,32 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         nowHour: nowHour,
       );
 
-      stripStoredProbs.add(storedProb);
-      stripPrecipMm.add(displayMm);
-      stripShowRainPrecip.add(showWetColumn);
+      var slotIcon = iconCode;
+      var slotShowWet = showWetColumn;
+      var slotMm = displayMm;
+      var slotStoredProb = (showWetColumn || wetIcon)
+          ? math.max(storedProb, kMinPrecipProbPercent)
+          : storedProb;
+
+      if (slotHour != null &&
+          !radarCtx.precipNow &&
+          !radarCtx.rainAtPinNow &&
+          radarCtx.suppressEcmwfStripPrecipAtHour(slotHour, locTime)) {
+        slotIcon = skyWmoFromCloudCover(h.cloudCover?[idx]);
+        slotShowWet = false;
+        slotMm = 0;
+        slotStoredProb = 0;
+      }
+
+      displayIcons[i] = slotIcon;
+      stripStoredProbs.add(slotStoredProb);
+      stripPrecipMm.add(slotMm);
+      stripShowRainPrecip.add(slotShowWet);
       stripApiWeatherCodes.add(h.weatherCode?[idx]);
       stripCloudPcts.add(h.cloudCover?[idx] ?? smoothed.cloudCover[i]);
+      if (slotHour != null) {
+        stripSlotHours.add(slotHour);
+      }
     }
 
     final stripPrecipPercents = hourlyStripPrecipPercentsForHours(
@@ -4709,6 +4717,19 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       cloudCoverPercents: stripCloudPcts,
       precipMm: stripPrecipMm,
       radarOnlyPrecip: false,
+      radarCtx: radarCtx,
+      locTime: locTime,
+      slotHours: stripSlotHours.length == count ? stripSlotHours : null,
+      rainHoursBeforeStrip: stripSlotHours.isNotEmpty
+          ? rainHoursBeforeHourlyStrip(
+              locTime: locTime,
+              firstSlotHour: stripSlotHours.first,
+              radarCtx: radarCtx,
+              h: h,
+              firstStripDataIndex: stripIndices.first,
+              utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+            )
+          : 0,
     );
 
     return SliverPadding(
@@ -5421,7 +5442,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
     final locTime = _getCurrentLocationTime();
     final radarCoverageActive =
-        currentCity != null && radarCoverageForCity(currentCity!);
+        currentCity != null && radarNowcastActiveForCity(currentCity!);
     final stripState = h != null && current != null
         ? _hourlyStripFinalDisplayState(
             h,
@@ -5450,6 +5471,18 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final double apiDailySnow = (d.snowfallSum != null && d.snowfallSum!.length > dayIndex)
         ? (d.snowfallSum![dayIndex] ?? 0.0)
         : 0.0;
+
+    final city = currentCity;
+    var latchedDailyMm = city != null
+        ? DailyPrecipDisplayLatch.mmFor(
+            lat: city.lat, lon: city.lon, dateStr: dateStr)
+        : 0.0;
+    var latchedDailyProb = city != null
+        ? DailyPrecipDisplayLatch.probFor(
+            lat: city.lat, lon: city.lon, dateStr: dateStr)
+        : 0;
+    if (latchedDailyMm > apiDailyPrecip) apiDailyPrecip = latchedDailyMm;
+    if (latchedDailyProb > dailyApiProb) dailyApiProb = latchedDailyProb;
 
     double? meanHourlyCloudForDay;
     final ccList = h?.cloudCover;
@@ -5497,6 +5530,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       apiDailySnow,
       dailyApiProb,
       stripState: stripForDay,
+      latchedDailyPrecipMm: latchedDailyMm,
+      latchedDailyProb: latchedDailyProb,
+      dailyWeatherCode: fallbackDailyCode,
     );
 
     final showableDayPrecip = dayShowablePrecipFromHourlyAligned(
@@ -5506,12 +5542,25 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       stripPrecipMm: stripForDay?.precipMm,
       stripProbs: stripForDay?.probs,
     );
-    final double effectiveDailyPrecipMm = showableDayPrecip.any
-        ? showableDayPrecip.sumMm
-        : (dayInStripWindow ? 0.0 : apiDailyPrecip);
+    final ecmwfDaySumMm = ecmwfDayPrecipSumMm(h, dateStr);
+    final double effectiveDailyPrecipMm = dailyPrecipMmForIconIntensity(
+      apiDailyPrecip: apiDailyPrecip,
+      hourlySumMm: math.max(
+        showableDayPrecip.any ? showableDayPrecip.sumMm : 0.0,
+        ecmwfDaySumMm,
+      ),
+    );
+    final int effectiveDailyProb = math.max(
+      latchedDailyProb,
+      dailyPrecipProbForIconIntensity(
+        dailyApiProb: dailyApiProb,
+        hourlyStripMaxProb: showableDayPrecip.maxProb,
+        hourlyDayMaxProb: hourlyDayMaxPrecipProb(h, dateStr),
+      ),
+    );
 
     final morningWeather = _getDayPartWeather(
-        dateStr, h, 'morning', d, fallbackDailyCode, dailyApiProb, current,
+        dateStr, h, 'morning', d, fallbackDailyCode, effectiveDailyProb, current,
         locTime,
         suppressWetDayIcons: suppressWetDayIcons,
         dailyTotalPrecipMm: effectiveDailyPrecipMm,
@@ -5520,7 +5569,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         utcOffsetSeconds: weatherData?.utcOffsetSeconds,
         radarNowcast: radarForDay);
     final afternoonWeather = _getDayPartWeather(
-        dateStr, h, 'afternoon', d, fallbackDailyCode, dailyApiProb, current,
+        dateStr, h, 'afternoon', d, fallbackDailyCode, effectiveDailyProb, current,
         locTime,
         suppressWetDayIcons: suppressWetDayIcons,
         dailyTotalPrecipMm: effectiveDailyPrecipMm,
@@ -5529,7 +5578,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         utcOffsetSeconds: weatherData?.utcOffsetSeconds,
         radarNowcast: radarForDay);
     final eveningWeather = _getDayPartWeather(
-        dateStr, h, 'evening', d, fallbackDailyCode, dailyApiProb, current,
+        dateStr, h, 'evening', d, fallbackDailyCode, effectiveDailyProb, current,
         locTime,
         suppressWetDayIcons: suppressWetDayIcons,
         dailyTotalPrecipMm: effectiveDailyPrecipMm,
@@ -5538,7 +5587,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         utcOffsetSeconds: weatherData?.utcOffsetSeconds,
         radarNowcast: radarForDay);
     final nightWeather = _getDayPartWeather(
-        dateStr, h, 'night', d, fallbackDailyCode, dailyApiProb, current,
+        dateStr, h, 'night', d, fallbackDailyCode, effectiveDailyProb, current,
         locTime,
         suppressWetDayIcons: suppressWetDayIcons,
         dailyTotalPrecipMm: effectiveDailyPrecipMm,
@@ -5559,8 +5608,10 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
           eveningWeather['iconCode'] as int?,
           nightWeather['iconCode'] as int?,
         ],
+        dailyPrecipMm: effectiveDailyPrecipMm,
+        dailyPrecipProb: effectiveDailyProb,
       ),
-      dailyApiProb,
+      effectiveDailyProb,
       dailyPrecipMm: effectiveDailyPrecipMm,
       dailySnowCm: apiDailySnow,
     );
@@ -5638,15 +5689,54 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       eveningWeather,
       nightWeather,
     ]);
-    final precipMaxProb = math.max(showablePrecip.maxProb, dailyApiProb);
+    if (city != null) {
+      final rawApiDailyPrecip = (d.precipSum != null && d.precipSum!.length > dayIndex)
+          ? (d.precipSum![dayIndex] ?? 0.0)
+          : 0.0;
+      final rawDailyApiProb = d.precipProbMax?[dayIndex] ?? 0;
+      observeDailyPrecipDisplayLatch(
+        lat: city.lat,
+        lon: city.lon,
+        dateStr: dateStr,
+        apiDailyPrecip: rawApiDailyPrecip,
+        dailyApiProb: rawDailyApiProb,
+        hourly: h,
+        expandedSumMm: showablePrecip.sumMm,
+        partsSumMm: partsPrecipMm,
+      );
+      latchedDailyMm = DailyPrecipDisplayLatch.mmFor(
+        lat: city.lat,
+        lon: city.lon,
+        dateStr: dateStr,
+      );
+      latchedDailyProb = DailyPrecipDisplayLatch.probFor(
+        lat: city.lat,
+        lon: city.lon,
+        dateStr: dateStr,
+      );
+      if (latchedDailyMm > apiDailyPrecip) apiDailyPrecip = latchedDailyMm;
+      if (latchedDailyProb > dailyApiProb) dailyApiProb = latchedDailyProb;
+    }
+    final precipMaxProb = effectiveDailyProb;
 
     String precipStr;
-    if (suppressWetDayIcons || (!showablePrecip.any && partsPrecipMm <= 0)) {
+    final dayHasPrecip = math.max(apiDailyPrecip, latchedDailyMm) >= kMeaningfulPrecipMmPerHour ||
+        apiDailySnow >= 0.1 ||
+        ecmwfDaySumMm >= kMeaningfulPrecipMmPerHour ||
+        latchedDailyMm >= kMeaningfulPrecipMmPerHour ||
+        showablePrecip.any ||
+        partsPrecipMm > 0;
+    if (!dayHasPrecip && suppressWetDayIcons) {
       precipStr = '0 mm';
     } else {
-      var displayMm = math.max(showablePrecip.sumMm, partsPrecipMm);
-      if (apiDailyPrecip > displayMm) displayMm = apiDailyPrecip;
-      if (displayMm > 0) {
+      final displayMm = resolveDailyCardPrecipDisplayMm(
+        apiDailyPrecip: apiDailyPrecip,
+        expandedSumMm: showablePrecip.sumMm,
+        partsSumMm: partsPrecipMm,
+        ecmwfHourlyDaySumMm: ecmwfDaySumMm,
+        latchedPrecipMm: latchedDailyMm,
+      );
+      if (displayMm > 0 || precipMaxProb >= kMinPrecipProbPercent) {
         precipStr =
             '${_formatPrecipitation(displayMm, weatherCode: dailyMainIconCode)}\nŠanca: ${_roundPrecipProbabilityForDisplay(precipMaxProb)} %';
       } else if (kPrecipitationCodes.contains(dailyMainIconCode)) {
@@ -6013,32 +6103,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildHero(firstHourTemp, firstHourIcon, displayCode),
-          if (weatherData?.usedFallbackToBestMatch == true)
-            Material(
-              color: const Color(0xFF34495E),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(Icons.info_outline, color: Colors.amber.shade200, size: 22),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'Vybraný numerický model nedostupný alebo nevracia platné dáta. '
-                        'Preto používame automatický vážený výstup z troch modelov (ECMWF IFS, DWD ICON a NOAA GFS).',
-                        style: TextStyle(
-                          color: Colors.white.withAlpha(235),
-                          fontSize: 13,
-                          height: 1.35,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
           Expanded(
             child: NotificationListener<ScrollNotification>(
               onNotification: (notification) => false,

@@ -999,8 +999,7 @@ class WeatherChartPage extends StatelessWidget {
     required this.data,
   });
 
-  String get _modelLabel =>
-      data.usedFallbackToBestMatch ? 'Best Match' : 'Open-Meteo';
+  String get _modelLabel => 'ECMWF IFS';
 
   @override
   Widget build(BuildContext context) {
