@@ -392,90 +392,13 @@ const String kGitHubRawUrl = 'https://raw.githubusercontent.com/richard-page/poc
 // Nepoužívame žiadne tretie strany na predpoveď
 
 
-/// Načíta lokálny ECMWF JSON súbor
-/// 
-/// Pre mobilné appky: načíta z Flutter assets (backend/ecmwf_forecast.json)
-/// Pre desktop: načíta z backend priečinka
-Future<String?> _loadLocalEcmwfFile() async {
-  try {
-    // Web - nemôžeme čítať lokálny súbor
-    if (kIsWeb) {
-      return null;
-    }
-    
-    // Najprv skús assets (mobilné appky)
-    try {
-      final jsonString = await rootBundle.loadString('backend/ecmwf_forecast.json');
-      debugPrint('ECMWF: Načítané z assets');
-      return jsonString;
-    } catch (_) {}
-    
-    // Desktop - skús priamo súbor
-    final possiblePaths = [
-      'backend/ecmwf_forecast.json',
-      '../backend/ecmwf_forecast.json',
-      'ecmwf_forecast.json',
-    ];
-    
-    for (final path in possiblePaths) {
-      final file = File(path);
-      if (await file.exists()) {
-        debugPrint('ECMWF: Načítané z $path');
-        return await file.readAsString();
-      }
-    }
-    
-    debugPrint('ECMWF: Súbor nenájdený');
-    return null;
-  } catch (e) {
-    debugPrint('Chyba pri načítaní lokálneho ECMWF: $e');
-    return null;
-  }
-}
 
-/// Vyberie najbližšiu lokalitu zo zoznamu podľa zemepisných súradníc
-Map<String, dynamic>? _selectLocationByCoords(Map<String, dynamic> data, double lat, double lon) {
-  final locations = data['locations'] as List<dynamic>?;
-  if (locations == null || locations.isEmpty) return null;
-  
-  // Hľadaj najbližšiu lokalitu
-  Map<String, dynamic>? closest;
-  double minDistance = double.infinity;
-  
-  for (final loc in locations) {
-    final locData = loc as Map<String, dynamic>;
-    final locLat = (locData['latitude'] as num?)?.toDouble();
-    final locLon = (locData['longitude'] as num?)?.toDouble();
-    
-    if (locLat == null || locLon == null) continue;
-    
-    // Jednoduchá euklidovská vzdialenosť (stačí pre porovnanie)
-    final dist = (locLat - lat) * (locLat - lat) + (locLon - lon) * (locLon - lon);
-    
-    if (dist < minDistance) {
-      minDistance = dist;
-      closest = locData;
-    }
-  }
-  
-  // Ak je najbližšia lokalita ďalej ako 50km, vráť null (vygenerujeme nové dáta)
-  if (closest != null && minDistance * 111 > 50) {
-    debugPrint('ECMWF: Najbližšia lokalita je príliš ďaleko (${(minDistance * 111).toStringAsFixed(1)} km), generujem nové dáta...');
-    return null;
-  }
-  
-  if (closest != null) {
-    debugPrint('ECMWF: Vybraná lokalita: ${closest['location_name']} (vzdialenosť: ${(minDistance * 111).toStringAsFixed(1)} km)');
-  }
-  
-  return closest;
-}
 
 /// Vygeneruje ECMWF dáta pre ľubovoľnú lokalitu
 Map<String, dynamic> generateEcmwfDataForLocation(double lat, double lon, String? locationName) {
   final now = DateTime.now().toUtc();
   final dateStr = '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}';
-  final cycle = '00';
+  const cycle = '00';
   
   // Teplotný posun podľa zemepisnej šírky (Bratislava 48.14 = baseline)
   final latOffset = (lat - 48.14) * -0.5; // Každý stupeň = 0.5°C
@@ -638,175 +561,8 @@ Map<String, dynamic> generateEcmwfDataForLocation(double lat, double lon, String
   };
 }
 
-/// Nájde najbližší bod v ECMWF grid pre dané súradnice
-Map<String, dynamic>? _findNearestGridPoint(Map<String, dynamic> gridData, double lat, double lon) {
-  final locations = gridData['locations'] as List<dynamic>?;
-  if (locations == null || locations.isEmpty) return null;
-  
-  Map<String, dynamic>? nearest;
-  double minDist = double.infinity;
-  
-  for (final loc in locations) {
-    final locMap = loc as Map<String, dynamic>;
-    final locLat = (locMap['lat'] as num).toDouble();
-    final locLon = (locMap['lon'] as num).toDouble();
-    
-    // Vzdialenosť v stupňoch (približná)
-    final dLat = locLat - lat;
-    final dLon = locLon - lon;
-    final dist = dLat * dLat + dLon * dLon;
-    
-    if (dist < minDist) {
-      minDist = dist;
-      nearest = locMap;
-    }
-  }
-  
-  // Vráť forecast z najbližšieho bodu
-  return nearest?['forecast'] as Map<String, dynamic>?;
-}
 
-/// Nájde najbližšiu známu lokalitu podľa súradníc pre GitHub JSON súbor
-String _findClosestLocationName(double lat, double lon) {
-  // Známe lokality s JSON súbormi na GitHube
-  // Používame ASCII názvy súborov (bez špeciálnych znakov)
-  final knownLocations = [
-    {'name': 'hlohovec', 'lat': 48.43, 'lon': 17.8},
-    {'name': 'bratislava', 'lat': 48.1482, 'lon': 17.1067},
-    {'name': 'kosice', 'lat': 48.7164, 'lon': 21.2611}, // bez diakritiky
-  ];
-  
-  // Nájdi najbližšiu
-  String closest = 'hlohovec'; // default
-  double minDist = double.infinity;
-  
-  for (final loc in knownLocations) {
-    final dLat = (loc['lat'] as double) - lat;
-    final dLon = (loc['lon'] as double) - lon;
-    final dist = dLat * dLat + dLon * dLon;
-    if (dist < minDist) {
-      minDist = dist;
-      closest = loc['name'] as String;
-    }
-  }
-  
-  return closest;
-}
 
-/// Stiahne predpoveď z ECMWF backendu
-Future<Map<String, dynamic>?> _downloadEcmwfForecast(
-  double lat,
-  double lon,
-  String timezone, {
-  required bool forceRefresh,
-}) async {
-  // Nájdi najbližšiu lokalitu a použi ju v cache key
-  final locationName = _findClosestLocationName(lat, lon);
-  final String cacheKey = 'ecmwf_${locationName}_fd$kForecastDays';
-  debugPrint('ECMWF: Cache key: $cacheKey for lat=$lat, lon=$lon');
-
-  if (!forceRefresh) {
-    final cachedJson = await CacheManager.getWeather(lat, lon, cacheKey);
-    if (cachedJson != null) {
-      try {
-        final cached = json.decode(cachedJson) as Map<String, dynamic>;
-        if (cached['error'] != true &&
-            cached.containsKey('hourly') &&
-            forecastJsonDailyHorizonComplete(cached)) {
-          debugPrint('ECMWF: Using cached data for $locationName');
-          return cached;
-        }
-      } catch (_) {}
-    }
-  }
-
-  // Skús lokálny JSON súbor (najjednoduchšie riešenie)
-  Map<String, dynamic>? locationData;
-  if (kEcmwfBackendUrl == 'file') {
-    try {
-      final jsonString = await _loadLocalEcmwfFile();
-      if (jsonString != null) {
-        final map = json.decode(jsonString) as Map<String, dynamic>;
-        // Nový formát: zoznam lokalít - vyber najbližšiu
-        locationData = _selectLocationByCoords(map, lat, lon);
-        if (locationData != null) {
-          await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(locationData));
-          return locationData;
-        }
-        // Starý formát: rovno vráť dáta
-        await CacheManager.saveWeather(lat, lon, cacheKey, jsonString);
-        return map;
-      }
-    } catch (e) {
-      debugPrint('Lokálny ECMWF súbor zlyhal: $e');
-    }
-  }
-  
-  // Skús HTTP backend ak je URL nastavená
-  if (kEcmwfBackendUrl.isNotEmpty && kEcmwfBackendUrl != 'file') {
-    try {
-      final url = Uri.parse('$kEcmwfBackendUrl?lat=$lat&lon=$lon');
-      final r = await http.get(
-        url,
-        headers: {'Accept': 'application/json'},
-      ).timeout(const Duration(seconds: 15));
-
-      
-      if (r.statusCode == 200) {
-        final map = json.decode(r.body) as Map<String, dynamic>;
-        // Nový formát: zoznam lokalít - vyber najbližšiu
-        locationData = _selectLocationByCoords(map, lat, lon);
-        if (locationData != null) {
-          await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(locationData));
-          return locationData;
-        }
-        // Starý formát
-        await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(map));
-        return map;
-      }
-    } catch (e) {
-      debugPrint('ECMWF backend failed: $e');
-    }
-  }
-
-  // SKÚS GITHUB RAW URL - SLOVAKIA GRID (všetky lokality v jednom súbore)
-  try {
-    debugPrint('ECMWF: Skúšam načítať grid z GitHub...');
-    final url = Uri.parse('$kGitHubRawUrl/ecmwf_forecast_slovakia_grid.json');
-    debugPrint('ECMWF: GitHub URL: $url');
-    
-    final r = await http.get(
-      url,
-      headers: {
-        'Accept': 'application/json',
-        'Cache-Control': 'no-cache',
-      },
-    ).timeout(const Duration(seconds: 30));
-
-    if (r.statusCode == 200) {
-      final gridData = json.decode(r.body) as Map<String, dynamic>;
-      debugPrint('ECMWF: Grid načítaný! Body: ${gridData['total_points']}');
-      
-      // Nájdi najbližší bod v gride
-      locationData = _findNearestGridPoint(gridData, lat, lon);
-      if (locationData != null) {
-        debugPrint('ECMWF: Nájdený najbližší bod pre $lat, $lon');
-        await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(locationData));
-        return locationData;
-      }
-    } else {
-      debugPrint('ECMWF: GitHub returned ${r.statusCode}');
-    }
-  } catch (e) {
-    debugPrint('ECMWF GitHub fetch failed: $e');
-  }
-
-  // AK NENÁJDEME V GRIDE, POUŽIJ FALLBACK
-  debugPrint('ECMWF: Grid nenájdený, používam fallback...');
-  locationData = generateEcmwfDataForLocation(lat, lon, null);
-  await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(locationData));
-  return locationData;
-}
 
 String _normalizeApiTimezone(String timezone) {
   if (timezone == 'GMT' || timezone == 'UTC' || timezone.isEmpty) {
@@ -1021,18 +777,11 @@ bool _thunderIconWarranted(
     hourlyPrecipitationMm >= kThunderMinMmPerHour &&
     snowfallCm < _kIconMeaningfulSnowCm;
 
-/// Stopa zrážky v jednej hodine (slabý dážď / mrholenie z Open-Meteo).
-const double _kIconTraceLiquidMm = 0.02;
-const double _kIconTraceSnowCm = 0.02;
 
 /// „Výrazná“ hodnota — silnejší vizuál, búrka, denné potlačenie suchých ikon.
 const double _kIconMeaningfulLiquidMm = 0.1;
 const double _kIconMeaningfulSnowCm = 0.1;
 
-bool _hasTracePrecipForIcon(double liquidMm, double snowfallCm) =>
-    liquidMm >= _kIconTraceLiquidMm || snowfallCm >= _kIconTraceSnowCm;
-
-/// Pod prahom výraznej zrážky (pre silné ikony / búrku).
 bool _belowMeaningfulPrecipAmountForIcon(double liquidMm, double snowfallCm) =>
     liquidMm < _kIconMeaningfulLiquidMm && snowfallCm < _kIconMeaningfulSnowCm;
 
@@ -1206,6 +955,7 @@ int _weatherIconCodeWithPrecipThreshold(
         precipProb: rawProb,
         precipMm: mm,
         cloudCoverPercent: cloudCover,
+        ecmwfApiCode: h.weatherCode?[idx],
       );
       return (code: code, hourIso: h.time[idx]);
     }
@@ -1241,6 +991,7 @@ int _weatherIconCodeWithPrecipThreshold(
       precipProb: rawProb,
       precipMm: mm,
       cloudCoverPercent: cloudCover,
+      ecmwfApiCode: h.weatherCode?[idx],
     );
     return (code: code, hourIso: h.time[idx]);
   }
@@ -1285,6 +1036,7 @@ int _weatherIconCodeWithPrecipThreshold(
       precipProb: probHour,
       precipMm: current.precipitation ?? 0.0,
       cloudCoverPercent: current.cloudCover,
+      ecmwfApiCode: current.weatherCode,
     );
     final hourIso = current.time?.toIso8601String();
     return (code: code, hourIso: hourIso);
@@ -1551,6 +1303,7 @@ Map<int, int>? _hourlyStripDisplayIconByIndex(
     final prob = h.precipitationProbability?[idx] ?? 0;
     final cloud = h.cloudCover?[idx];
     var code = entry.value;
+    final apiCode = h.weatherCode?[idx];
 
     if (lightningNearby && curIdx != null && idx == curIdx) {
       code = applyNearbyLightningIcon(
@@ -1565,14 +1318,23 @@ Map<int, int>? _hourlyStripDisplayIconByIndex(
         precipProb: prob,
         precipMm: mm,
         cloudCoverPercent: cloud,
+        ecmwfApiCode: apiCode,
       );
     } else {
+      code = applyEcmwfJsonThunderHourIcon(
+        code,
+        ecmwfApiCode: apiCode,
+        precipProb: prob,
+        precipMm: mm,
+        lightningNearby: false,
+      );
       code = suppressThunderWithoutLightning(
         code,
         lightningNearby: false,
         precipProb: prob,
         precipMm: mm,
         cloudCoverPercent: cloud,
+        ecmwfApiCode: apiCode,
       );
     }
     out[idx] = code;
@@ -1715,6 +1477,7 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
     final mm = precipMmList[i];
     final prob = storedProbs[i];
     final cloud = h.cloudCover?[idx];
+    final apiCode = h.weatherCode?[idx];
     var code = displayIcons[i];
 
     if (lightningNearby && curIdx != null && idx == curIdx) {
@@ -1730,14 +1493,23 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
         precipProb: prob,
         precipMm: mm,
         cloudCoverPercent: cloud,
+        ecmwfApiCode: apiCode,
       );
     } else {
+      code = applyEcmwfJsonThunderHourIcon(
+        code,
+        ecmwfApiCode: apiCode,
+        precipProb: prob,
+        precipMm: mm,
+        lightningNearby: false,
+      );
       code = suppressThunderWithoutLightning(
         code,
         lightningNearby: false,
         precipProb: prob,
         precipMm: mm,
         cloudCoverPercent: cloud,
+        ecmwfApiCode: apiCode,
       );
     }
 
@@ -1894,12 +1666,14 @@ int _applyDayPartPrecipIconIntensity(
   required bool dailyIntensityScale,
   required bool dailySnowIntensityScale,
   required double intensitySnowCm,
+  bool isDayPartContext = true,
 }) {
   var result = _clampPrecipitationIconIntensity(
     code,
     iconProb,
     intensityMm,
     isDailyContext: useDailyIntensityScale,
+    isDayPartContext: isDayPartContext && !useDailyIntensityScale,
     snowfallCm: intensitySnowCm,
   );
   if (dailyIntensityScale &&
@@ -2004,7 +1778,11 @@ int _dominantFromHourlyDisplayedCodes(List<int> codes) {
 }
 
 /// Najsilnejší WMO búrkový kód v zozname hodín bloku (poradie 95, 96, 99 podľa čísla).
-int? _strongestThunderFromCodes(Iterable<int?> codes) {
+int? _strongestThunderFromCodes(
+  Iterable<int?> codes, {
+  bool lightningNearby = false,
+}) {
+  if (!lightningNearby) return null;
   int? best;
   for (final c in codes) {
     if (c != null && {95, 96, 99}.contains(c)) {
@@ -2019,9 +1797,15 @@ int? _strongestThunderFromCodes(Iterable<int?> codes) {
 int _applyThunderFromDisplayedHourlyIcons(
   int dominantOrCandidate, {
   required List<int> displayedHourlyCodes,
+  bool lightningNearby = false,
 }) {
-  if (displayedHourlyCodes.isEmpty) return dominantOrCandidate;
-  final thunder = _strongestThunderFromCodes(displayedHourlyCodes);
+  if (!lightningNearby || displayedHourlyCodes.isEmpty) {
+    return dominantOrCandidate;
+  }
+  final thunder = _strongestThunderFromCodes(
+    displayedHourlyCodes,
+    lightningNearby: true,
+  );
   if (thunder != null) return thunder;
   return dominantOrCandidate;
 }
@@ -2201,6 +1985,7 @@ Map<String, dynamic> _getDayPartWeather(
   HourlyStripDisplayState? stripState,
   int? utcOffsetSeconds,
   RadarNowcastContext radarNowcast = RadarNowcastContext.inactive,
+  bool lightningNearby = false,
 }) {
 
   bool forceDayForBlock = part == 'morning' || part == 'afternoon';
@@ -2467,6 +2252,7 @@ Map<String, dynamic> _getDayPartWeather(
       ? _applyThunderFromDisplayedHourlyIcons(
           seededFromHourlyFairGrid,
           displayedHourlyCodes: codesForPartIcon,
+          lightningNearby: lightningNearby,
         )
       : seededFromHourlyFairGrid;
   final bool dailyPrecipSummary = kPrecipitationCodes.contains(dailyWeatherCode) &&
@@ -2509,29 +2295,22 @@ Map<String, dynamic> _getDayPartWeather(
     iconProb = math.max(iconProb, dailyPrecipProbMax);
   }
 
-  final bool partShowsWet = partIconsShowPrecip || blockShowsWetSignals;
-  final bool wetBlock =
-      kPrecipitationCodes.contains(blockIconCandidate) || partShowsWet;
   final bool snowBlock = kSnowWeatherCodes.contains(blockIconCandidate) ||
       codesForPartIcon.any(kSnowWeatherCodes.contains);
 
-  /// Intenzitu ikony úseku zosúlaď s denným súčtom mm/cm v detaile — nie s hodinovým peakom v 4 h bloku.
-  final double intensityMm = suppressWetDayIcons
+  /// Intenzitu ikony úseku z hodinového súčtu v tom úseku — nie z celého dňa.
+  final double intensityMm = suppressWetDayIcons ? 0.0 : iconSumMm;
+  const bool useDailyIntensityScale = false;
+  const bool dailyIntensityScale = false;
+  final double partSnowCm = suppressWetDayIcons || !snowBlock || dailyTotalSnowCm <= 0
       ? 0.0
-      : (dailyTotalPrecipMm > 0 && wetBlock ? dailyTotalPrecipMm : iconSumMm);
-  final bool dailyIntensityScale =
-      !suppressWetDayIcons && dailyTotalPrecipMm > 0 && wetBlock;
-  final bool dailySnowIntensityScale =
-      !suppressWetDayIcons && dailyTotalSnowCm > 0 && snowBlock;
-  final bool useDailyIntensityScale =
-      dailyIntensityScale || dailySnowIntensityScale;
-  final double intensitySnowCm = dailySnowIntensityScale
-      ? dailyTotalSnowCm
-      : (suppressWetDayIcons ? 0.0 : dailyTotalSnowCm);
-  /// Pri mokrom úseku a známom dennom súčte používaj dennú šancu — hodinový peak v 4 h bloku môže byť nižší.
-  final int intensityProb = wetBlock && dailyTotalPrecipMm > 0
-      ? math.max(iconProb, dailyPrecipProbMax)
-      : iconProb;
+      : (dailyTotalPrecipMm > 0
+          ? dailyTotalSnowCm * (iconSumMm / dailyTotalPrecipMm).clamp(0.0, 1.0)
+          : dailyTotalSnowCm * (temps.length / 24.0).clamp(0.0, 1.0));
+  final bool dailySnowIntensityScale = partSnowCm > 0 && snowBlock;
+  final double intensitySnowCm = dailySnowIntensityScale ? partSnowCm : 0.0;
+  /// Pri mokrom úseku používaj max. šancu z hodín v tom úseku.
+  final int intensityProb = iconProb;
 
   /// Keď použijeme už finálne hodiny ako v „24 h“, druhý agregovaný prah nesmú znovu rozožrať výsledok.
   final bool skipBlockAggregateThreshold =
@@ -2605,14 +2384,21 @@ Map<String, dynamic> _getDayPartWeather(
   );
 
   if (!suppressWetDayIcons &&
-      dailyHeavyPrecipWarranted(dailyTotalPrecipMm, dailyPrecipProbMax)) {
+      dayPartHeavyPrecipWarranted(iconSumMm, intensityProb)) {
     final apiWetInPart = apiMaxProbInPart >= kMinPrecipProbPercent &&
         apiMaxPrecipInPart >= kMeaningfulPrecipMmPerHour;
-    if (kPrecipitationCodes.contains(blockIconCode)) {
+    if (kPrecipitationCodes.contains(blockIconCode) &&
+        !kSnowWeatherCodes.contains(blockIconCode)) {
       blockIconCode = 65;
     } else if (apiWetInPart) {
       blockIconCode = 65;
     }
+  }
+  if (!suppressWetDayIcons &&
+      dayPartHeavySnowWarranted(partSnowCm, intensityProb) &&
+      kSnowWeatherCodes.contains(blockIconCode)) {
+    if (blockIconCode == 71 || blockIconCode == 73) blockIconCode = 75;
+    if (blockIconCode == 85) blockIconCode = 86;
   }
 
   Widget iconWidget = getWeatherIcon(

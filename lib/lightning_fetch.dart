@@ -3,8 +3,8 @@ part of 'main.dart';
 const String kLightningGeoJsonUrl =
     'https://meteopocasie.sk/data/eumet/blesky.json';
 
-/// Okruh okolo lokality (km) — EUMET blesky pre celú EU.
-const double kLightningNearbyRadiusKm = 60;
+/// Okruh okolo lokality (km) — EUMET blesky; búrková ikona len pri skutočne blízkom výboji.
+const double kLightningNearbyRadiusKm = 25;
 
 /// V JSON berieme len výboje mladšie ako N minút — staršie už nie sú „aktuálna búrka“.
 const int kLightningFreshStrikeMaxAgeMinutes = 12;
@@ -107,7 +107,7 @@ Future<bool> _lightningOfflineGraceActive(double lat, double lon) async {
   final latchLon = prefs.getDouble(kLightningNearbyLatchLonKey);
   if (latchLat == null || latchLon == null) return false;
 
-  final maxDistM = kLightningNearbyRadiusKm * 1000.0 * 1.5;
+  const maxDistM = kLightningNearbyRadiusKm * 1000.0 * 1.15;
   if (Geolocator.distanceBetween(lat, lon, latchLat, latchLon) > maxDistM) {
     return false;
   }

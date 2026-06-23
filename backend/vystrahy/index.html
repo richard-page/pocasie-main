@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meteovýstrahy SK – editor okresov</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: #091628;
+      color: #e8f0f8;
+    }
+    header {
+      padding: 10px 14px;
+      background: #0d1f35;
+      border-bottom: 1px solid #2a4565;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    h1 { margin: 0; font-size: 17px; flex: 1 1 200px; }
+    .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    button, select {
+      background: #122a45;
+      color: #fff;
+      border: 1px solid #2a4565;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button.save { background: #1a5fbf; border-color: #4da3ff; }
+    button.danger { background: #7a2222; border-color: #e74c3c; }
+    #map { height: calc(100vh - 108px); min-height: 400px; background: #091628; }
+    footer {
+      padding: 6px 14px 10px;
+      font-size: 12px;
+      color: #8eb4d8;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      border-top: 1px solid #1a3050;
+    }
+    .legend { display: flex; gap: 10px; flex-wrap: wrap; }
+    .legend i {
+      display: inline-block;
+      width: 13px; height: 13px;
+      border-radius: 3px;
+      margin-right: 4px;
+      vertical-align: -2px;
+      border: 1px solid rgba(255,255,255,.3);
+    }
+    #status { margin-left: auto; }
+    .leaflet-container { background: #091628 !important; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🗺️ Editor výstrah – okresy SK</h1>
+    <div class="bar">
+      <label>Deň
+        <select id="daySelect">
+          <option value="0">DNES</option>
+          <option value="1">ZAJTRA</option>
+          <option value="2">POZAJTRA</option>
+        </select>
+      </label>
+      <label>Stupeň
+        <select id="levelSelect">
+          <option value="0">0 – bez výstrah (zelená)</option>
+          <option value="1">1 – žltá</option>
+          <option value="2">2 – oranžová</option>
+          <option value="3">3 – červená</option>
+          <option value="4">4 – fialová</option>
+        </select>
+      </label>
+      <button type="button" class="save" id="saveBtn">💾 Uložiť</button>
+      <button type="button" class="danger" id="clearBtn">Vyčistiť deň</button>
+      <button type="button" id="reloadBtn">↻ Obnoviť</button>
+    </div>
+  </header>
+  <div id="map"></div>
+  <footer>
+    <div class="legend">
+      <span><i style="background:#2db55d"></i>bez</span>
+      <span><i style="background:#f4d03f"></i>žltá</span>
+      <span><i style="background:#f39c12"></i>oranžová</span>
+      <span><i style="background:#e74c3c"></i>červená</span>
+    </div>
+    <span>Klik na okres = nastaví stupeň. Appka načíta JSON do ~45 s.</span>
+    <span id="status">Načítavam…</span>
+  </footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const API = '/vystrahy';
+    const LEVEL_COLORS = ['#2db55d', '#f4d03f', '#f39c12', '#e74c3c', '#c0399b'];
+    const state = { levels: {}, layer: null, geojson: null };
+
+    const map = L.map('map', { zoomControl: true, attributionControl: false }).setView([48.67, 19.7], 7.3);
+    const statusEl = document.getElementById('status');
+    const daySelect = document.getElementById('daySelect');
+    const levelSelect = document.getElementById('levelSelect');
+
+    function setStatus(t) { statusEl.textContent = t; }
+
+    function districtId(props) {
+      return String((props && props.districtId) || props.shapeName || '').trim();
+    }
+
+    function styleFeature(feature) {
+      const id = districtId(feature.properties);
+      const level = (state.levels[id] || 0) | 0;
+      return {
+        color: 'rgba(255,255,255,0.8)',
+        weight: 0.75,
+        fillColor: LEVEL_COLORS[Math.max(0, Math.min(4, level))],
+        fillOpacity: 0.96,
+      };
+    }
+
+    function renderMap() {
+      if (state.layer) map.removeLayer(state.layer);
+      state.layer = L.geoJSON(state.geojson, {
+        style: styleFeature,
+        onEachFeature: (feature, layer) => {
+          const id = districtId(feature.properties);
+          const name = (feature.properties && feature.properties.shapeName) || id;
+          layer.bindTooltip(name, { sticky: true });
+          layer.on('click', () => {
+            const level = parseInt(levelSelect.value, 10) || 0;
+            if (level <= 0) delete state.levels[id];
+            else state.levels[id] = level;
+            state.layer.resetStyle(layer);
+            setStatus(name + ' → stupeň ' + level + ' (neuložené)');
+          });
+        },
+      }).addTo(map);
+      map.fitBounds(state.layer.getBounds(), { padding: [20, 20] });
+    }
+
+    async function loadGeojson() {
+      const res = await fetch(API + '/api/geojson');
+      if (!res.ok) throw new Error('Chýba okresy.geojson na serveri');
+      state.geojson = await res.json();
+    }
+
+    async function loadLevels() {
+      const day = daySelect.value;
+      const res = await fetch(API + '/api/levels?day=' + encodeURIComponent(day));
+      const data = await res.json();
+      state.levels = Object.assign({}, data.levels || {});
+      setStatus('Deň ' + day + ': ' + Object.keys(state.levels).length + ' okresov' +
+        (data.updated ? ' · ' + data.updated : ''));
+      if (state.geojson) renderMap();
+    }
+
+    async function saveLevels() {
+      const day = daySelect.value;
+      setStatus('Ukladám…');
+      const res = await fetch(API + '/api/levels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ day: day, levels: state.levels }),
+      });
+      const data = await res.json();
+      if (!data.ok) { setStatus('Chyba ukladania'); return; }
+      setStatus('Uložené ' + data.count + ' okresov · ' + data.updated);
+    }
+
+    document.getElementById('saveBtn').onclick = saveLevels;
+    document.getElementById('reloadBtn').onclick = loadLevels;
+    document.getElementById('clearBtn').onclick = () => {
+      state.levels = {};
+      renderMap();
+      setStatus('Deň vyčistený (neuložené)');
+    };
+    daySelect.onchange = loadLevels;
+
+    (async () => {
+      try {
+        await loadGeojson();
+        await loadLevels();
+      } catch (e) {
+        setStatus('Chyba: ' + e.message);
+      }
+    })();
+  </script>
+</body>
+</html>

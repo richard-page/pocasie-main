@@ -17,12 +17,25 @@ samples, guidance on mobile development, and a full API reference.
 
 ## Android release signing
 
-Google Play requires a signed `app-release.aab`. Before running a release build:
+Podpis sa ukladá **mimo projektu** do `%USERPROFILE%\.menopocasie\android\`.
+Stačí ho nastaviť **raz na každom PC** — potom funguje build z ľubovoľnej kópie priečinka.
 
-1. Copy `android/key.properties.example` to `android/key.properties`.
-2. Fill in your keystore values.
-3. Place your keystore file in `android/` (or adjust `storeFile` path).
+**Prvé nastavenie na PC:**
 
-Then build with:
+```powershell
+cd android
+.\setup_signing.ps1
+```
+
+**Nový PC / záloha:**
+
+```powershell
+cd android
+.\export_signing.ps1
+# na novom PC:
+.\import_signing.ps1 -SourceDir ".\signing-backup-YYYY-MM-DD"
+```
+
+Potom:
 
 `flutter build appbundle --release`

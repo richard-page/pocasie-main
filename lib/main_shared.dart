@@ -163,8 +163,6 @@ const String kAirQualityCachePrefix = 'cache_aqi_v7_';
 const String kGeoCachePrefix = 'cache_geo_v7_';
 const String kLastLocationKey = 'last_location_v7';
 
-const String kWarningsCachePrefix = 'cache_warnings_v11_';
-
 const int kWeatherCacheDurationMinutes = 45;
 const int kGeoCacheDurationDays = 7;
 const String kWindUnitKey = 'wind_unit_v1';
@@ -177,7 +175,7 @@ const int kHomeWidgetUpdateIntervalMinutesMax = 720;
 const String kLightningNearbyLatchAtKey = 'lightning_nearby_latch_at_v1';
 const String kLightningNearbyLatchLatKey = 'lightning_nearby_latch_lat_v1';
 const String kLightningNearbyLatchLonKey = 'lightning_nearby_latch_lon_v1';
-const String kDailyPrecipDisplayLatchKey = 'daily_precip_display_latch_v1';
+const String kDailyPrecipDisplayLatchKey = 'daily_precip_display_latch_v2';
 
 /// Denný úhrn mm/% — po daždi API často klesne; držíme maximum v rámci relácie aj medzi spusteniami.
 class DailyPrecipDisplayLatch {
@@ -253,6 +251,40 @@ class DailyPrecipDisplayLatch {
     if (changed) unawaited(_persist());
   }
 
+  /// Zruší zachytené mm/% keď model už nemá zmysluplný dažďový signál.
+  static void releaseIfDry({
+    required double lat,
+    required double lon,
+    required String dateStr,
+  }) {
+    if (dateStr.isEmpty) return;
+    final k = _key(lat, lon, dateStr);
+    final had = _mm.remove(k) != null || _prob.remove(k) != null;
+    if (had) unawaited(_persist());
+  }
+
+  static void observeOrRelease({
+    required double lat,
+    required double lon,
+    required String dateStr,
+    required double precipMm,
+    required int precipProb,
+  }) {
+    if (dateStr.isEmpty) return;
+    if (precipMm < kMeaningfulPrecipMmPerHour &&
+        precipProb < kMinPrecipProbPercent) {
+      releaseIfDry(lat: lat, lon: lon, dateStr: dateStr);
+      return;
+    }
+    observe(
+      lat: lat,
+      lon: lon,
+      dateStr: dateStr,
+      precipMm: precipMm,
+      precipProb: precipProb,
+    );
+  }
+
   static double mmFor({
     required double lat,
     required double lon,
@@ -283,12 +315,27 @@ void observeDailyPrecipDisplayLatch({
     lon: lon,
     dateStr: dateStr,
   );
-  final ecmwfSum = ecmwfDayPrecipSumMm(hourly, dateStr);
-  final mm = resolveDailyCardPrecipDisplayMm(
+  final trustedApiMm = trustedDailyApiPrecipMm(
     apiDailyPrecip: apiDailyPrecip,
+    dailyApiProb: dailyApiProb,
+    hourly: hourly,
+    dateStr: dateStr,
     expandedSumMm: expandedSumMm,
     partsSumMm: partsSumMm,
-    ecmwfHourlyDaySumMm: ecmwfSum,
+  );
+  final trustedApiProb = trustedDailyApiPrecipProb(
+    dailyApiProb: dailyApiProb,
+    hourly: hourly,
+    dateStr: dateStr,
+    expandedMaxProb: 0,
+    partsSumMm: partsSumMm,
+  );
+  final uiEcmwfSum = ecmwfDayUiPrecipSumMm(hourly, dateStr);
+  final mm = resolveDailyCardPrecipDisplayMm(
+    apiDailyPrecip: trustedApiMm,
+    expandedSumMm: expandedSumMm,
+    partsSumMm: partsSumMm,
+    ecmwfHourlyDaySumMm: uiEcmwfSum,
     latchedPrecipMm: latchedMm,
   );
   final latchedProb = DailyPrecipDisplayLatch.probFor(
@@ -298,12 +345,9 @@ void observeDailyPrecipDisplayLatch({
   );
   final prob = math.max(
     latchedProb,
-    dailyPrecipProbForIconIntensity(
-      dailyApiProb: dailyApiProb,
-      hourlyDayMaxProb: hourlyDayMaxPrecipProb(hourly, dateStr),
-    ),
+    trustedApiProb,
   );
-  DailyPrecipDisplayLatch.observe(
+  DailyPrecipDisplayLatch.observeOrRelease(
     lat: lat,
     lon: lon,
     dateStr: dateStr,
@@ -378,27 +422,6 @@ const double kAlertHeavyRainDailyMmThreshold = 10.0;
 const double kAlertHeavySnowDailyCmThreshold = 10.0;
 const String kAlertDefaultsOffMigrationKey = 'alert_defaults_off_migration_v1';
 const String kLocationPermissionPromptShownKey = 'location_permission_prompt_shown_v1';
-const int kWarningsCacheDurationMinutes = 15;
-
-const String kWarningsBaseUrl = 'http://cz1.helkor.eu:41083';
-
-/// Helkor výstrahy — vždy [index.php] (root často nevypíše JSON / presmeruje inak).
-String buildHelkorWarningsUrl(GeoCity city, String countrySlug, {bool formatJson = false}) {
-  final buf = StringBuffer('$kWarningsBaseUrl/index.php?country=${Uri.encodeQueryComponent(countrySlug)}')
-    ..write('&lat=${city.lat}')
-    ..write('&lon=${city.lon}');
-  if (formatJson) buf.write('&format=json');
-  if (city.admin1.isNotEmpty) {
-    buf.write('&region=${Uri.encodeComponent(city.admin1)}');
-  }
-  if (city.admin2.isNotEmpty) {
-    buf.write('&county=${Uri.encodeComponent(city.admin2)}');
-  }
-  if (city.name.isNotEmpty) {
-    buf.write('&city=${Uri.encodeComponent(city.name)}');
-  }
-  return buf.toString();
-}
 
 String buildMeteoRadarUrl(GeoCity city) {
   final cacheBust = DateTime.now().millisecondsSinceEpoch;
@@ -444,25 +467,38 @@ bool coordsWithinRadarMapExtent(double lat, double lon) =>
     lon >= kRadarExtentLonMin &&
     lon <= kRadarExtentLonMax;
 
-/// WMO ikona z radarového dBZ — prahy podľa CMAX legendy (oranžová ~30, červená ~40 dBZ).
+/// WMO ikona z radarového dBZ — prahy podľa RainViewer legendy (15/20/30/40 dBZ).
 int wmoFromRadarDbz(double dbz, {required bool snow}) {
   if (snow) {
-    if (dbz >= 45) return 75;
-    if (dbz >= 32) return 73;
-    return 71;
+    if (dbz >= kRainViewerLegendHeavySnowDbz) return 75;
+    if (dbz >= kRainViewerLegendModerateSnowDbz) return 73;
+    if (dbz >= kRainViewerLegendLightSnowDbz) return 71;
+    return 51;
   }
-  if (dbz >= 40) return 65;
-  if (dbz >= 30) return 63;
-  if (dbz >= 22) return 61;
-  if (dbz >= 18) return 53;
+  if (dbz >= kRainViewerLegendHeavyRainDbz) return 65;
+  if (dbz >= kRainViewerLegendModerateRainDbz) return 63;
+  if (dbz >= kRainViewerLegendLightRainDbz) return 61;
+  if (dbz >= kRainViewerLegendMinDbz) return 53;
   return 51;
 }
 
 bool radarSnowLikely({double? tempC, double snowfallCm = 0.0}) =>
     snowfallCm >= 0.1 || (tempC != null && tempC <= 0.5);
 
-/// Horný strop mm/h podľa radarovej ikony — vizuál a číslo musia sedieť.
-double _radarMmCapForIcon(int icon) {
+/// Horný strop mm/h podľa radarovej ikony — RainViewer legenda (0,3 / 1,3 / 3 / 12 mm/h).
+double _radarMmCapForIcon(int icon, {bool rainViewerLegend = false}) {
+  if (rainViewerLegend) {
+    return switch (icon) {
+      51 || 53 || 55 => 0.35,
+      61 => 1.5,
+      63 => 3.2,
+      65 => 13.0,
+      71 => 1.0,
+      73 => 2.5,
+      75 => 5.0,
+      _ => 2.0,
+    };
+  }
   return switch (icon) {
     51 => 0.45,
     53 => 0.85,
@@ -479,7 +515,6 @@ double _radarMmCapForIcon(int icon) {
 double radarMmFromDbz(double dbz) {
   if (dbz < kRadarMinDbzForUi) return 0;
   final z = math.pow(10, dbz / 10.0);
-  // Z=280, b=1.5 — konzervatívnejší než Z=200 R^1.6 pre stratiformný / slabší dážď.
   final raw = math.pow(z / 280.0, 1.0 / 1.5).toDouble();
   final icon = wmoFromRadarDbz(dbz, snow: false);
   final cap = _radarMmCapForIcon(icon);
@@ -487,8 +522,18 @@ double radarMmFromDbz(double dbz) {
 }
 
 /// mm/h z radarového dBZ — RainViewer legenda vs. CMAX.
-double effectiveRadarMmFromDbz(double dbz, RadarNowcastContext ctx) =>
-    ctx.fromRainViewer ? rainViewerMmFromDbz(dbz) : radarMmFromDbz(dbz);
+double effectiveRadarMmFromDbz(double dbz, RadarNowcastContext ctx) {
+  if (ctx.fromRainViewer) {
+    final mm = rainViewerMmFromDbz(dbz);
+    if (mm <= 0) return 0;
+    final icon = wmoFromRainViewerDbz(
+      dbz,
+      snow: rainViewerSnowLikely(uiDbz: dbz),
+    );
+    return mm.clamp(kMeaningfulPrecipMmPerHour, _radarMmCapForIcon(icon, rainViewerLegend: true));
+  }
+  return radarMmFromDbz(dbz);
+}
 
 /// % z radarového dBZ — RainViewer od 15 dBZ min. 50 %.
 int effectiveRadarProbFromDbz(double dbz, RadarNowcastContext ctx) =>
@@ -496,14 +541,14 @@ int effectiveRadarProbFromDbz(double dbz, RadarNowcastContext ctx) =>
         ? rainViewerProbPercentFromDbz(dbz)
         : radarProbPercentFromDbz(dbz);
 
-/// % z dBZ — zosúladené s [radarMmFromDbz], nie priamo z raw echo.
+/// % z dBZ — zosúladené s [radarMmFromDbz], výstup po 10 %.
 int radarProbPercentFromDbz(double dbz) {
   final mm = radarMmFromDbz(dbz);
   if (mm <= 0) return 0;
-  if (mm >= 2.5) return 85;
-  if (mm >= 1.5) return 75;
-  if (mm >= 0.9) return 65;
-  if (mm >= 0.45) return 55;
+  if (mm >= 2.5) return 90;
+  if (mm >= 1.5) return 80;
+  if (mm >= 0.9) return 70;
+  if (mm >= 0.45) return 60;
   return kMinPrecipProbPercent;
 }
 
@@ -562,35 +607,73 @@ double resolveHourlyStripPrecipMm(
   }
 
   final probBased = displayMmFromPrecipProbability(prob);
+  final neighborDup =
+      _neighborSamePrecipMm(h, idx, -1) || _neighborSamePrecipMm(h, idx, 1);
 
   if (mm < kMeaningfulPrecipMmPerHour) {
-    return _finalizeHourlyStripPrecipMm(probBased, displayIconCode: displayIconCode);
+    return _finalizeHourlyStripPrecipMm(
+      probBased,
+      displayIconCode: displayIconCode,
+      probPercent: prob,
+      ecmwfMm: mm,
+      hourIndex: idx,
+      deDuplicateNeighbors: neighborDup,
+    );
   }
 
-  // ECMWF niekedy opakuje rovnaké mm v susedných hodinách — moduluj podľa %.
-  if (_neighborSamePrecipMm(h, idx, -1) || _neighborSamePrecipMm(h, idx, 1)) {
-    final scaled = mm * prob / 100.0;
-    if (scaled >= kMeaningfulPrecipMmPerHour) {
-      return _finalizeHourlyStripPrecipMm(
-        double.parse(scaled.toStringAsFixed(1)),
-        displayIconCode: displayIconCode,
-      );
+  // ECMWF niekedy opakuje rovnaké mm v susedných hodinách — odlíš podľa % tejto hodiny.
+  if (neighborDup) {
+    if (mm >= kMeaningfulPrecipMmPerHour && prob > 0) {
+      final scaled = mm * prob / 100.0;
+      if (scaled >= kMeaningfulPrecipMmPerHour) {
+        return _finalizeHourlyStripPrecipMm(
+          double.parse(scaled.toStringAsFixed(1)),
+          displayIconCode: displayIconCode,
+          probPercent: prob,
+          ecmwfMm: mm,
+          hourIndex: idx,
+          deDuplicateNeighbors: true,
+        );
+      }
     }
-    return _finalizeHourlyStripPrecipMm(probBased, displayIconCode: displayIconCode);
+    return _finalizeHourlyStripPrecipMm(
+      probBased,
+      displayIconCode: displayIconCode,
+      probPercent: prob,
+      ecmwfMm: mm,
+      hourIndex: idx,
+      deDuplicateNeighbors: true,
+    );
   }
 
-  return _finalizeHourlyStripPrecipMm(mm, displayIconCode: displayIconCode);
+  return _finalizeHourlyStripPrecipMm(
+    mm,
+    displayIconCode: displayIconCode,
+    probPercent: prob,
+    ecmwfMm: mm,
+    hourIndex: idx,
+  );
 }
 
 double _finalizeHourlyStripPrecipMm(
   double mm, {
   int? displayIconCode,
+  int probPercent = 0,
+  double ecmwfMm = 0,
+  int? hourIndex,
+  bool deDuplicateNeighbors = false,
 }) {
   final code = displayIconCode != null
       ? normalizeDisplayWeatherCode(displayIconCode)
       : null;
   if (code != null && kThunderWeatherCodes.contains(code)) {
-    return math.max(mm, kThunderMinMmPerHour);
+    return hourlyThunderStripDisplayMm(
+      iconCode: code,
+      probPercent: probPercent,
+      ecmwfMm: math.max(ecmwfMm, mm),
+      hourIndex: hourIndex,
+      deDuplicateNeighbors: deDuplicateNeighbors,
+    );
   }
   return mm;
 }
@@ -662,11 +745,19 @@ void _syncHourlyStripPrecipMmFromEcmwf({
         continue;
       }
       if (!radarAuth) {
-        storedProbs[i] = kMinPrecipProbPercent;
-        precipMm[i] = math.min(
-          precipMm[i],
-          displayMmFromPrecipProbability(kMinPrecipProbPercent),
+        precipMm[i] = resolveHourlyStripPrecipMm(
+          h,
+          idx,
+          stripProb: storedProbs[i],
+          wetDisplayIcon: _hourShowsPrecipIcon(displayIcons[i]),
+          displayIconCode: displayIcons[i],
         );
+        final apiProb = _ecmwfHourlyPrecipProb(h, idx);
+        if (apiProb > 0) {
+          storedProbs[i] = apiProb;
+        } else if (precipMm[i] >= kMeaningfulPrecipMmPerHour) {
+          storedProbs[i] = kMinPrecipProbPercent;
+        }
         continue;
       }
     }
@@ -738,18 +829,6 @@ int _boostHourlyStripWetProb({
 }) {
   var prob = storedProb;
 
-  if (precipMm >= kMeaningfulPrecipMmPerHour) {
-    prob = math.max(
-      prob,
-      precipProbabilityFromMm(
-        precipMm,
-        precipWeatherCode: true,
-        weatherCode: iconCode,
-        cloudCoverPercent: cloudCoverPercent,
-      ),
-    );
-  }
-
   if (!radarCtx.eligible) return prob;
 
   final nowHour = DateTime(
@@ -809,7 +888,7 @@ bool _ecmwfHourlySlotModelWet(HourlyForecast h, int idx) {
       ecmwfHourPrecipShowsInUi(mm: rawMm, prob: rawProb);
 }
 
-/// Náznak z ECMWF — vždy presne 50 %, bez radarového potvrdenia.
+/// Náznak z ECMWF — vlastné mm/% pre danú hodinu, nie kopírovaných 50 % / 0,2 mm.
 void _setEcmwfPrecipHintHourlySlot({
   required List<int> displayIcons,
   required List<bool> showRainPrecip,
@@ -820,21 +899,30 @@ void _setEcmwfPrecipHintHourlySlot({
   required HourlyForecast h,
   required int dataIdx,
 }) {
-  final prob = kMinPrecipProbPercent;
-  final mm = math.min(
-    precipMm[index],
-    displayMmFromPrecipProbability(prob),
+  final ecmwfProb = _ecmwfHourlyPrecipProb(h, dataIdx);
+  final ecmwfMm = _ecmwfHourlyPrecipMm(h, dataIdx);
+  final prob = ecmwfProb >= kMinPrecipProbPercent
+      ? ecmwfProb
+      : (ecmwfMm >= kMeaningfulPrecipMmPerHour
+          ? kMinPrecipProbPercent
+          : ecmwfProb);
+  final mm = resolveHourlyStripPrecipMm(
+    h,
+    dataIdx,
+    stripProb: prob,
+    wetDisplayIcon: true,
+    displayIconCode: iconCode,
   );
   final icon = _clampPrecipitationIconIntensity(
     iconCode,
-    prob,
+    prob >= kMinPrecipProbPercent ? prob : kMinPrecipProbPercent,
     mm,
     isDailyContext: false,
   );
   displayIcons[index] = icon;
   showRainPrecip[index] = true;
   storedProbs[index] = prob;
-  precipMm[index] = displayMmFromPrecipProbability(prob);
+  precipMm[index] = mm;
 }
 
 /// 24 h pás — ECMWF max 50 %; radar potvrdí → vyššie; nepotvrdí → ikona preč.
@@ -907,6 +995,8 @@ void _applyEcmwfRadarHybridHourlyStrip({
         storedProbs: storedProbs,
         precipMm: precipMm,
         index: i,
+        dataIdx: idx,
+        h: h,
         slotHour: slotHour,
         locTime: locTime,
         nowHour: nowHour,
@@ -1020,6 +1110,8 @@ void _applyRadarAuthorizedHourlySlot({
   required List<int> storedProbs,
   required List<double> precipMm,
   required int index,
+  required int dataIdx,
+  required HourlyForecast h,
   required DateTime slotHour,
   required DateTime locTime,
   required DateTime nowHour,
@@ -1031,20 +1123,53 @@ void _applyRadarAuthorizedHourlySlot({
   final isCurrentHour = slotHour == nowHour;
   final atPinNow =
       radarCtx.precipNow || radarCtx.rainActiveAtPinForUi;
-  final fraction = (isCurrentHour && atPinNow)
+  final hourDbz = radarCtx.fromRainViewer
+      ? radarCtx.stripDbzForLocalHour(slotHour, locTime)
+      : (isCurrentHour && atPinNow
+          ? radarCtx.precipIntensityDbz
+          : radarCtx.stripMmDbz);
+  final hourFraction = (isCurrentHour && atPinNow)
       ? 1.0
       : radarCtx.precipHourFractionAt(slotHour, locTime);
+  final hasLivePinRadar =
+      isCurrentHour && atPinNow && hourDbz >= kRainViewerLegendMinDbz;
+  final hasHourNowcastRadar = radarCtx.fromRainViewer &&
+      hourDbz >= kRainViewerLegendMinDbz &&
+      hourFraction > 0.2;
+  final hasHourSpecificRadar = hasLivePinRadar || hasHourNowcastRadar;
 
-  final baseDbz = isCurrentHour && atPinNow
-      ? radarCtx.precipIntensityDbz
-      : (radarCtx.fromRainViewer
-          ? radarCtx.stripDbzForLocalHour(slotHour, locTime)
-          : radarCtx.stripMmDbz);
+  if (!hasHourSpecificRadar) {
+    final mm = resolveHourlyStripPrecipMm(
+      h,
+      dataIdx,
+      stripProb: ecmwfProb,
+      wetDisplayIcon: true,
+      displayIconCode: displayIcons[index],
+    );
+    var prob = ecmwfProb;
+    if (prob < kMinPrecipProbPercent &&
+        mm >= kMeaningfulPrecipMmPerHour) {
+      prob = kMinPrecipProbPercent;
+    }
+    final iconCode = displayIcons[index];
+    final icon = _clampPrecipitationIconIntensity(
+      iconCode,
+      prob >= kMinPrecipProbPercent ? prob : kMinPrecipProbPercent,
+      mm,
+      isDailyContext: false,
+    );
+    displayIcons[index] = icon;
+    showRainPrecip[index] = true;
+    storedProbs[index] = prob;
+    precipMm[index] = mm;
+    return;
+  }
+
+  final fraction = hourFraction;
+  final baseDbz = hourDbz;
   final iconDbz = isCurrentHour && atPinNow
       ? radarCtx.precipIntensityDbz
-      : (radarCtx.fromRainViewer
-          ? radarCtx.stripDbzForLocalHour(slotHour, locTime)
-          : radarCtx.stripDisplayDbz);
+      : (radarCtx.fromRainViewer ? hourDbz : radarCtx.stripDisplayDbz);
 
   final fullMm = effectiveRadarMmFromDbz(baseDbz, radarCtx);
   final fullProb = effectiveRadarProbFromDbz(baseDbz, radarCtx);
@@ -1063,38 +1188,34 @@ void _applyRadarAuthorizedHourlySlot({
                 ),
         );
 
-  // Pri pine alebo radarom autorizovanej hodine: mm z intenzity radaru.
+  // Pri živom / nowcast radare: ECMWF mm/% pre hodinu + radar len ak je silnejší.
+  final ecmwfResolved = resolveHourlyStripPrecipMm(
+    h,
+    dataIdx,
+    stripProb: ecmwfProb,
+    wetDisplayIcon: true,
+    displayIconCode: displayIcons[index],
+  );
   final double mergedMm;
   if (isCurrentHour && atPinNow) {
-    mergedMm = math.max(ecmwfMm, radarMm);
+    mergedMm = math.max(ecmwfResolved, radarMm);
   } else if (radarMm >= kMeaningfulPrecipMmPerHour) {
-    mergedMm = math.max(ecmwfMm, radarMm);
-  } else if (ecmwfMm >= kMeaningfulPrecipMmPerHour) {
-    mergedMm = ecmwfMm;
-  } else if (ecmwfProb >= kMinPrecipProbPercent) {
-    mergedMm = math.max(
-      displayMmFromPrecipProbability(ecmwfProb),
-      radarMm,
-    );
+    mergedMm = math.max(ecmwfResolved, radarMm);
   } else {
-    mergedMm = math.max(ecmwfMm, radarMm);
+    mergedMm = ecmwfResolved >= kMeaningfulPrecipMmPerHour
+        ? ecmwfResolved
+        : math.max(ecmwfResolved, radarMm);
   }
 
   final mmProb = mergedMm >= kMeaningfulPrecipMmPerHour && !radarCtx.fromRainViewer
       ? precipProbabilityFromMm(mergedMm, precipWeatherCode: true)
       : 0;
-  final mergedProb = math.max(
-    math.max(
-      ecmwfProb >= kMinPrecipProbPercent
-          ? ecmwfProb
-          : math.max(
-              math.max(ecmwfProb, kMinPrecipProbPercent),
-              radarProb,
-            ),
-      radarProb,
-    ),
-    mmProb,
-  );
+  var mergedProb = math.max(ecmwfProb, radarProb);
+  mergedProb = math.max(mergedProb, mmProb);
+  if (mergedProb < kMinPrecipProbPercent &&
+      mergedMm >= kMeaningfulPrecipMmPerHour) {
+    mergedProb = kMinPrecipProbPercent;
+  }
 
   _setHourlySlotRadarPrecip(
     displayIcons: displayIcons,
@@ -1151,6 +1272,8 @@ void _applyRadarOnlyPrecipToHourlyStrip({
         storedProbs: storedProbs,
         precipMm: precipMm,
         index: i,
+        dataIdx: idx,
+        h: h,
         slotHour: slotHour,
         locTime: locTime,
         nowHour: nowHour,
@@ -1299,12 +1422,12 @@ void _restoreEcmwfPrecipInHourlyStrip({
       precipProb: rawProb,
     );
     if (showRainPrecip[i]) {
-      storedProbs[i] = rawProb >= kMinPrecipProbPercent
-          ? rawProb
-          : math.max(rawProb, kMinPrecipProbPercent);
+      storedProbs[i] = rawProb;
       precipMm[i] = resolveHourlyStripPrecipMm(
         h,
         idx,
+        stripProb: rawProb,
+        wetDisplayIcon: true,
         displayIconCode: displayIcons[i],
       );
     }
@@ -1465,6 +1588,8 @@ void applyRadarPrecipEndToHourlyStrip({
         storedProbs: storedProbs,
         precipMm: precipMm,
         index: i,
+        dataIdx: idx,
+        h: h,
         slotHour: slotHour,
         locTime: locTime,
         nowHour: nowHour,
@@ -1498,6 +1623,8 @@ void applyRadarPrecipEndToHourlyStrip({
         storedProbs: storedProbs,
         precipMm: precipMm,
         index: i,
+        dataIdx: idx,
+        h: h,
         slotHour: slotHour,
         locTime: locTime,
         nowHour: nowHour,
@@ -1587,6 +1714,8 @@ void applyRadarPrecipEndToHourlyStrip({
         storedProbs: storedProbs,
         precipMm: precipMm,
         index: i,
+        dataIdx: curIdx,
+        h: h,
         slotHour: slotHour,
         locTime: locTime,
         nowHour: nowHour,
@@ -1688,7 +1817,7 @@ int applyRadarPrecipEndToHeroIcon(
       ),
       kRainViewerLegendMinDbz,
     );
-    final radarProb = kMinPrecipProbPercent;
+    const radarProb = kMinPrecipProbPercent;
     final radarMm = effectiveRadarMmFromDbz(useDbz, radarCtx);
     final snow = rainViewerSnowLikely(tempC: tempC, uiDbz: useDbz);
     var radarIcon = wmoFromRainViewerDbz(useDbz, snow: snow);
@@ -1728,18 +1857,6 @@ int applyRadarPrecipToDayPartIcon(
   if (!kPrecipitationCodes.contains(code)) return radarIcon;
   if (!kPrecipitationCodes.contains(radarIcon)) return code;
   return radarIcon;
-}
-
-String? buildMeteoWarningsUrl(GeoCity? city) {
-  if (city == null) return null;
-  switch (city.countryCode.toUpperCase()) {
-    case 'SK':
-      return buildHelkorWarningsUrl(city, 'slovakia', formatJson: false);
-    case 'CZ':
-      return buildHelkorWarningsUrl(city, 'czechia', formatJson: false);
-    default:
-      return null;
-  }
 }
 
 /// Rovnaká škála farieb teploty ako v pripnutej hlavičke / hodinovke / grafe.
@@ -1875,8 +1992,54 @@ const double kMeaningfulPrecipMmPerHour = 0.1;
 /// Zrážková ikona a % v UI — iba od 50 % (dohoda).
 const int kMinPrecipProbPercent = 50;
 
-/// Búrková ikona — min. šanca a mm/h (konvekcia = výraznejší súčet).
+/// Búrková ikona — min. šanca a mm/h na zobrazenie ikony (nie zobrazený úhrn).
 const double kThunderMinMmPerHour = 2.0;
+
+/// mm/h v 24 h pásme pri búrke — konvektívny lejak, nie 2 mm zo slabej škály.
+double hourlyThunderStripDisplayMm({
+  required int iconCode,
+  required int probPercent,
+  required double ecmwfMm,
+  int? hourIndex,
+  bool deDuplicateNeighbors = false,
+}) {
+  final c = normalizeDisplayWeatherCode(iconCode);
+  if (!kThunderWeatherCodes.contains(c)) return ecmwfMm;
+
+  final baseFloor = switch (c) {
+    95 => 4.5,
+    96 => 6.5,
+    99 => 9.5,
+    _ => 4.5,
+  };
+  final probFactor = switch (probPercent) {
+    >= 90 => 1.65,
+    >= 80 => 1.4,
+    >= 70 => 1.22,
+    >= 60 => 1.08,
+    >= 50 => 1.0,
+    _ => 0.9,
+  };
+  final iconFloor = baseFloor * probFactor;
+
+  final convectiveScale = switch (c) {
+    95 => 2.6,
+    96 => 3.0,
+    99 => 3.8,
+    _ => 2.6,
+  };
+  final probWeight = (probPercent / 70.0).clamp(0.85, 1.4);
+  final scaledModel = ecmwfMm >= kMeaningfulPrecipMmPerHour
+      ? ecmwfMm * convectiveScale * probWeight
+      : (ecmwfMm > 0 ? ecmwfMm * convectiveScale * probWeight * 4 : 0.0);
+
+  var result = math.max(iconFloor, scaledModel);
+  if (deDuplicateNeighbors && hourIndex != null) {
+    final skew = ((hourIndex % 5) - 2) * 0.4;
+    result = (result + skew).clamp(iconFloor * 0.92, iconFloor * 1.18);
+  }
+  return double.parse(result.toStringAsFixed(1));
+}
 
 bool isMeaningfulPrecipMm(double mm, {double snowfallCm = 0.0}) =>
     mm >= kMeaningfulPrecipMmPerHour || snowfallCm >= 0.1;
@@ -2032,6 +2195,19 @@ int effectiveWmoWeatherCode({
 
   if (apiCode != null) {
     final code = normalizeDisplayWeatherCode(apiCode);
+    if (ecmwfJsonThunderHour(code)) {
+      if (_thunderIconWarranted(precipProbPercent, precipMm, snowfallCm: snowfallCm)) {
+        return code;
+      }
+      if (showPrecipIcon) {
+        return wmoFromPrecipitationMm(
+          precipMm,
+          snowfallCm: snowfallCm,
+          cloudCoverPercent: cloudCoverPercent,
+        );
+      }
+      return reconcileSkyCodeWithCloudCover(code, cloudCoverPercent);
+    }
     if (isSkyOnlyWmoCode(code)) {
       if (showPrecipIcon) {
         return wmoFromPrecipitationMm(
@@ -2060,6 +2236,29 @@ int effectiveWmoWeatherCode({
 }
 
 const Set<int> kThunderWeatherCodes = {95, 96, 99};
+
+/// ECMWF JSON hlási búrku pre danú hodinu (WMO 95/96/99).
+bool ecmwfJsonThunderHour(int? apiCode) {
+  if (apiCode == null) return false;
+  return kThunderWeatherCodes.contains(normalizeDisplayWeatherCode(apiCode));
+}
+
+/// WMO 95–99 z ECMWF — búrková ikona len pri živých bleskoch v okolí (nie vzdialená bunka modelu).
+int applyEcmwfJsonThunderHourIcon(
+  int code, {
+  int? ecmwfApiCode,
+  required int precipProb,
+  required double precipMm,
+  bool lightningNearby = false,
+}) {
+  if (!lightningNearby || !ecmwfJsonThunderHour(ecmwfApiCode)) return code;
+  if (precipProb < kMinPrecipProbPercent &&
+      precipMm < kMeaningfulPrecipMmPerHour &&
+      !kPrecipitationCodes.contains(code)) {
+    return code;
+  }
+  return normalizeDisplayWeatherCode(ecmwfApiCode!);
+}
 
 /// Má hodina v 24 h pásme hlásiť dážď (ikona + % + mm z ECMWF)?
 bool hourlyStripShowRainPrecip({
@@ -2098,6 +2297,7 @@ int suppressThunderWithoutLightning(
   required int precipProb,
   required double precipMm,
   double? cloudCoverPercent,
+  int? ecmwfApiCode,
 }) {
   final norm = normalizeDisplayWeatherCode(code);
   if (lightningNearby) {
@@ -2198,12 +2398,12 @@ const Set<int> kSnowWeatherCodes = {
 };
 
 /// „Silný“ vizuál (dažď, sneh) pri vyššej šanci a mm/cm — zoslabenie WMO stupňa; búrky (95–99) výnimka (konvekcia).
-const int _kHeavyPrecipProbMin = 65;
+const int _kHeavyPrecipProbMin = 70;
 /// 10 dní — silný dážď (rain.svg) až od denného súčtu.
 const double _kHeavyPrecipMmDaily = 15.0;
-/// 24 h — silný dážď (rain.svg) za jednu hodinu.
-const double _kHeavyPrecipMmBlockSum = 3.0;
-const int _kModeratePrecipProbMin = 55;
+/// 24 h — silný dážď (rain.svg) za jednu hodinu (nad 5 mm/h).
+const double _kHeavyPrecipMmBlockSum = 5.0;
+const int _kModeratePrecipProbMin = 60;
 /// 10 dní — mierny dážď; pod týmto súčtom denná karta vždy ľahká ikona.
 const double _kModeratePrecipMmDaily = 10.0;
 /// 24 h — mierny dážď (drizzle.svg) za hodinu.
@@ -2211,12 +2411,26 @@ const double _kModeratePrecipMmBlockSum = 2.0;
 const double _kHeavySnowCmDaily = 15.0;
 /// Pod 2 cm/deň denná karta zjemní snehovú ikonu.
 const double _kModerateSnowCmDaily = 2.0;
-/// 24 h — silný sneh (snow.svg) za hodinu.
-const double _kHeavySnowCmBlockSum = 3.0;
+/// 24 h — silný sneh (snow.svg) za hodinu (nad 5 cm/h).
+const double _kHeavySnowCmBlockSum = 5.0;
 /// 24 h — mierny sneh za hodinu.
 const double _kModerateSnowCmBlockSum = 1.5;
+/// 10 dní — silný dážď v úseku (ráno / popoludnie…) od súčtu mm v tom úseku.
+const double _kHeavyPrecipMmDayPart = 5.0;
+/// 10 dní — mierny dážď v úseku.
+const double _kModeratePrecipMmDayPart = 2.0;
+/// 10 dní — silný sneh v úseku od cm v tom úseku.
+const double _kHeavySnowCmDayPart = 5.0;
+/// 10 dní — mierny sneh v úseku.
+const double _kModerateSnowCmDayPart = 2.0;
 
 /// Výdatný denný lejak — silná ikona (rain.svg / WMO 65).
+bool dayPartHeavyPrecipWarranted(double partPrecipMm, int probPercent) =>
+    probPercent >= _kHeavyPrecipProbMin && partPrecipMm >= _kHeavyPrecipMmDayPart;
+
+bool dayPartHeavySnowWarranted(double partSnowCm, int probPercent) =>
+    probPercent >= _kHeavyPrecipProbMin && partSnowCm >= _kHeavySnowCmDayPart;
+
 bool dailyHeavyPrecipWarranted(double precipMm, int probPercent) =>
     probPercent >= _kHeavyPrecipProbMin && precipMm >= _kHeavyPrecipMmDaily;
 
@@ -2297,8 +2511,12 @@ int _clampPrecipitationIconIntensity(
   int code,
   int probPercent,
   double precipMm,
-  {required bool isDailyContext, double snowfallCm = 0.0}
-) {
+  {
+  required bool isDailyContext,
+  bool isDayPartContext = false,
+  double snowfallCm = 0.0,
+  bool preserveEcmwfThunderFromJson = false,
+}) {
   if (_belowMeaningfulPrecipAmountForIcon(precipMm, snowfallCm) &&
       kPrecipitationCodes.contains(code)) {
     return _lightPrecipDisplayCode(code);
@@ -2306,8 +2524,12 @@ int _clampPrecipitationIconIntensity(
 
   if (!kPrecipitationCodes.contains(code)) return code;
 
-  final mmHeavy = isDailyContext ? _kHeavyPrecipMmDaily : _kHeavyPrecipMmBlockSum;
-  final mmMod = isDailyContext ? _kModeratePrecipMmDaily : _kModeratePrecipMmBlockSum;
+  final mmHeavy = isDailyContext
+      ? _kHeavyPrecipMmDaily
+      : (isDayPartContext ? _kHeavyPrecipMmDayPart : _kHeavyPrecipMmBlockSum);
+  final mmMod = isDailyContext
+      ? _kModeratePrecipMmDaily
+      : (isDayPartContext ? _kModeratePrecipMmDayPart : _kModeratePrecipMmBlockSum);
   final heavyOk = probPercent >= _kHeavyPrecipProbMin && precipMm >= mmHeavy;
   if (heavyOk) {
     var next = code;
@@ -2349,8 +2571,12 @@ int _clampPrecipitationIconIntensity(
 
   // Sneženie — prahy v cm (den / hodina), nie mm dažďa.
   if ({56, 57, 71, 73, 75, 77, 85, 86}.contains(code)) {
-    final snowHeavy = isDailyContext ? _kHeavySnowCmDaily : _kHeavySnowCmBlockSum;
-    final snowMod = isDailyContext ? _kModerateSnowCmDaily : _kModerateSnowCmBlockSum;
+    final snowHeavy = isDailyContext
+        ? _kHeavySnowCmDaily
+        : (isDayPartContext ? _kHeavySnowCmDayPart : _kHeavySnowCmBlockSum);
+    final snowMod = isDailyContext
+        ? _kModerateSnowCmDaily
+        : (isDayPartContext ? _kModerateSnowCmDayPart : _kModerateSnowCmBlockSum);
     final heavySnowOk = probPercent >= _kHeavyPrecipProbMin && snowfallCm >= snowHeavy;
     final moderateSnowOk = probPercent >= _kModeratePrecipProbMin && snowfallCm >= snowMod;
 
@@ -2375,10 +2601,11 @@ int _clampPrecipitationIconIntensity(
     return code;
   }
 
-  // Búrky (95 / 96 / 99) — len pri vyššej šanci a merateľnej zrážke (mm alebo cm snehu).
+  // Búrky (95 / 96 / 99) — len pri živých bleskoch v okolí + silný lokálny signál.
   if ({95, 96, 99}.contains(code)) {
+    if (preserveEcmwfThunderFromJson) return code;
     if (!_thunderIconWarranted(probPercent, precipMm, snowfallCm: snowfallCm)) {
-      final rain = 61;
+      const rain = 61;
       return isDailyContext && precipMm > 0 && precipMm < _kModeratePrecipMmDaily
           ? lightDailyPrecipVisualCode(rain)
           : rain;
@@ -2396,16 +2623,6 @@ int _roundPrecipProbabilityForDisplay(int value) {
   return ((value / 10.0).round() * 10).clamp(0, 100);
 }
 
-/// Suché nebo — 0 / 5 / 10 / 15 … podľa modelu a oblačnosti.
-int _snapDrySkyPercentStep(int value) {
-  if (value <= 0) return 0;
-  if (value <= 7) return 5;
-  if (value <= 12) return 10;
-  if (value <= 17) return 15;
-  if (value <= 22) return 20;
-  if (value <= 27) return 25;
-  return ((value / 10.0).round() * 10).clamp(0, 40);
-}
 
 /// % v 24 h pásme podľa zobrazenej oblačnostnej ikony (bez dažďa).
 int hourlyStripSkyIconPercent(int iconCode, {double? cloudCoverPercent}) {
@@ -2414,9 +2631,9 @@ int hourlyStripSkyIconPercent(int iconCode, {double? cloudCoverPercent}) {
   );
   switch (sky) {
     case 0:
-      return 10; // Jasno
+      return 5; // Jasno
     case 1:
-      return 20; // Prevažne jasno
+      return 10; // Prevažne jasno
     case 2:
       if (cloudCoverPercent != null && cloudCoverPercent < 55) {
         return 20;
@@ -2528,6 +2745,10 @@ int hourlyStripDryPercent({
   bool suppressApproachFloors = false,
   int rainHoursBeforeStrip = 0,
 }) {
+  final clearSky = _isClearOrMostlyClearStripIcon(
+    iconCode,
+    cloudCoverPercent: cloudCoverPercent,
+  );
   final pastRain = pastRainHour ?? isRainHour;
   final sinceRain = _hoursSinceLastRainInStrip(
     index,
@@ -2535,14 +2756,17 @@ int hourlyStripDryPercent({
     rainHoursBeforeStrip: rainHoursBeforeStrip,
   );
 
-  // Po daždi — vždy (aj keď radar orezal falošné ECMWF % pred dažďom).
-  if (sinceRain == 1) return 40;
-  if (sinceRain == 2) return 30;
-  if (sinceRain == 3) return 20;
+  // Po daždi — pri jasnej oblohe len mierny dozvuk, nie 40 %.
+  if (sinceRain == 1) return clearSky ? 10 : 40;
+  if (sinceRain == 2) return clearSky ? 5 : 30;
+  if (sinceRain == 3) return clearSky ? 5 : 20;
 
   if (!suppressApproachFloors) {
     final hoursUntil = _hoursUntilNextRainInStrip(index, isRainHour);
     if (hoursUntil != null && hoursUntil <= 3) {
+      if (clearSky) {
+        return hoursUntil <= 1 ? 10 : 5;
+      }
       return _preRainApproachFloor(hoursUntil);
     }
   }
@@ -2551,6 +2775,8 @@ int hourlyStripDryPercent({
     _stripSkyCodeForPercent(iconCode, cloudCoverPercent: cloudCoverPercent),
     cloudCoverPercent: cloudCoverPercent,
   );
+  if (clearSky) return skyPct;
+
   if (suppressApproachFloors) return math.min(skyPct, 30);
 
   final rainAhead =
@@ -2652,10 +2878,6 @@ int skyPrecipChancePercentShown(int iconCode, {double? cloudCoverPercent}) {
   }
 }
 
-bool _isPartlyCloudyOrOvercastSky(int skyCode) {
-  final code = normalizeDisplayWeatherCode(skyCode);
-  return (code >= 1 && code <= 3) || code == 45 || code == 48;
-}
 
 /// Oblačnostný WMO pre % — berie **zobrazenú** ikonu, nie surový 51–99 z API.
 int _stripSkyCodeForPercent(int displayIconCode, {double? cloudCoverPercent}) {
@@ -2664,6 +2886,21 @@ int _stripSkyCodeForPercent(int displayIconCode, {double? cloudCoverPercent}) {
     return skyWmoFromCloudCover(cloudCoverPercent);
   }
   return code;
+}
+
+/// Jasno / prevažne jasno — nízka šanca zrážok, nie „prístupové“ 30–40 % pred dažďom.
+bool _isClearOrMostlyClearStripIcon(
+  int iconCode, {
+  double? cloudCoverPercent,
+}) {
+  final sky = normalizeDisplayWeatherCode(
+    _stripSkyCodeForPercent(iconCode, cloudCoverPercent: cloudCoverPercent),
+  );
+  if (sky == 0) return true;
+  if (sky == 1) {
+    return cloudCoverPercent == null || cloudCoverPercent < 35;
+  }
+  return false;
 }
 
 /// Oblačnostná báza pre panel 24 h — podľa ikony a oblačnosti (0 % pri jasne).
@@ -2688,22 +2925,6 @@ int hourlyStripCloudBaselinePercent(int skyCode, {double? cloudCoverPercent}) {
   }
 }
 
-/// Modelové % — berie sa do úvahy len posledné 3 h pred dažďom.
-int _stripModelApproachPercent(int storedProb, {int maxCap = 30}) {
-  if (storedProb <= 0) return 0;
-  final rounded = _roundPrecipProbabilityForDisplay(storedProb);
-  final cap = maxCap.clamp(10, 40);
-  if (rounded >= kMinPrecipProbPercent) return cap >= 40 ? 40 : 30;
-  return rounded.clamp(10, cap);
-}
-
-/// Koľko hodín do najbližšej zrážkovej hodiny v pásme.
-int? _hoursUntilNextRainInStrip(int index, List<bool> isRainHour) {
-  for (var j = 1; j + index < isRainHour.length; j++) {
-    if (isRainHour[index + j]) return j;
-  }
-  return null;
-}
 
 /// Minimálne % podľa vzdialenosti dažďa — 3 h: 20, 2 h: 30, 1 h: 40.
 int _preRainApproachFloor(int? hoursUntilRain) {
@@ -2731,14 +2952,22 @@ int hourlyStripSkyBaselinePercent({
       cloudCoverPercent: cloudCoverPercent,
     );
   }
-  if (hoursUntilNextRain != null && hoursUntilNextRain <= 3) return 40;
+  if (hoursUntilNextRain != null && hoursUntilNextRain <= 3) {
+    if (_isClearOrMostlyClearStripIcon(
+      iconCode,
+      cloudCoverPercent: cloudCoverPercent,
+    )) {
+      return hoursUntilNextRain <= 1 ? 10 : 5;
+    }
+    return _preRainApproachFloor(hoursUntilNextRain);
+  }
   return hourlyStripSkyIconPercent(
     iconCode,
     cloudCoverPercent: cloudCoverPercent,
   );
 }
 
-/// % v paneli „24 h“ — dažď 50+; pri mm/radare vyššie podľa intenzity.
+/// % v paneli „24 h“ — priamo ECMWF / radar (po 10 %), bez odhadu z mm.
 int hourlyStripPrecipPercentShown({
   required int storedProb,
   required bool showRainPrecip,
@@ -2754,20 +2983,8 @@ int hourlyStripPrecipPercentShown({
   if (showRainPrecip ||
       _hourShowsPrecipIcon(iconCode) ||
       precipMm >= kMeaningfulPrecipMmPerHour) {
-    var effective = math.max(storedProb, kMinPrecipProbPercent);
-    if (!radarOnlyPrecip && precipMm >= kMeaningfulPrecipMmPerHour) {
-      effective = math.max(
-        effective,
-        precipProbabilityFromMm(
-          precipMm,
-          precipWeatherCode: true,
-          weatherCode: apiWeatherCode ?? iconCode,
-          cloudCoverPercent: cloudCoverPercent,
-        ),
-      );
-    }
-    final rounded = _roundPrecipProbabilityForDisplay(effective);
-    return math.max(kMinPrecipProbPercent, rounded);
+    if (storedProb <= 0) return 0;
+    return _roundPrecipProbabilityForDisplay(storedProb);
   }
 
   return hourlyStripSkyBaselinePercent(
@@ -2877,6 +3094,11 @@ List<int> hourlyStripPrecipPercentsForHours({
   return result;
 }
 
+int? _hoursUntilNextRainInStrip(int i, List<bool> isRainHour) {
+  return null;
+
+}
+
 /// Percento v hodinovom stĺpci — dážď ≥ 50 % alebo oblačná šanca 10–40 %.
 int hourlyPrecipColumnPercentShown({
   required int rainProbPercent,
@@ -2927,7 +3149,7 @@ int hourlyPrecipColumnPercentShown({
       ? h.windDirection![index]
       : null;
 
-  if (speed == null) speed = current?.windSpeed;
+  speed ??= current?.windSpeed;
   direction ??= current?.windDirection?.toDouble();
 
   if (speed == null && temperatureC != null) {
@@ -3244,6 +3466,34 @@ double ecmwfDayPrecipSumMm(HourlyForecast? h, String dateStr) {
   return sum;
 }
 
+/// Súčet mm len z hodín, ktoré by v UI ukázali zrážky (mm aj % nad prahom).
+double ecmwfDayUiPrecipSumMm(HourlyForecast? h, String dateStr) {
+  if (h == null || h.time.isEmpty) return 0.0;
+  var sum = 0.0;
+  for (var i = 0; i < h.time.length; i++) {
+    if (!h.time[i].startsWith(dateStr)) continue;
+    final mm = h.precipitation?[i] ?? 0.0;
+    final prob = h.precipitationProbability?[i] ?? 0;
+    if (!ecmwfHourPrecipShowsInUi(mm: mm, prob: prob)) continue;
+    sum += mm;
+  }
+  return sum;
+}
+
+/// Max % len z hodín s reálnym dažďovým signálom v UI.
+int hourlyDayUiMaxPrecipProb(HourlyForecast? h, String dateStr) {
+  if (h == null || h.time.isEmpty) return 0;
+  var maxP = 0;
+  for (var i = 0; i < h.time.length; i++) {
+    if (!h.time[i].startsWith(dateStr)) continue;
+    final mm = h.precipitation?[i] ?? 0.0;
+    final prob = h.precipitationProbability?[i] ?? 0;
+    if (!ecmwfHourPrecipShowsInUi(mm: mm, prob: prob)) continue;
+    if (prob > maxP) maxP = prob;
+  }
+  return maxP;
+}
+
 /// Úhrn v pätičke dennej karty — max(API, ECMWF hodiny, úseky); API po daždi často klesne.
 double resolveDailyCardPrecipDisplayMm({
   required double apiDailyPrecip,
@@ -3262,6 +3512,144 @@ double resolveDailyCardPrecipDisplayMm({
       ),
     ),
   );
+}
+
+/// Viditeľné úseky dňa (ráno/poobede/…) nemajú mokré ikony.
+bool dayPartIconCodesAllDry(Iterable<int?> codes) {
+  for (final raw in codes) {
+    if (raw == null || raw <= 0) continue;
+    if (kPrecipitationCodes.contains(normalizeDisplayWeatherCode(raw))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// Denný API úhrn/šanca platí len s hodinovou podporou (mm aj % nad prahom).
+bool dailyApiWetClaimCorroboratedByHourly({
+  required double apiDailyPrecip,
+  required int dailyApiProb,
+  HourlyForecast? hourly,
+  required String dateStr,
+  double expandedSumMm = 0,
+  double partsSumMm = 0,
+}) {
+  if (expandedSumMm >= kMeaningfulPrecipMmPerHour ||
+      partsSumMm >= kMeaningfulPrecipMmPerHour) {
+    return true;
+  }
+  final uiSum = ecmwfDayUiPrecipSumMm(hourly, dateStr);
+  final uiProb = hourlyDayUiMaxPrecipProb(hourly, dateStr);
+  return uiSum >= kMeaningfulPrecipMmPerHour &&
+      uiProb >= kMinPrecipProbPercent;
+}
+
+double trustedDailyApiPrecipMm({
+  required double apiDailyPrecip,
+  required int dailyApiProb,
+  HourlyForecast? hourly,
+  required String dateStr,
+  double expandedSumMm = 0,
+  double partsSumMm = 0,
+}) {
+  if (apiDailyPrecip < kMeaningfulPrecipMmPerHour) return 0.0;
+  if (!dailyApiWetClaimCorroboratedByHourly(
+    apiDailyPrecip: apiDailyPrecip,
+    dailyApiProb: dailyApiProb,
+    hourly: hourly,
+    dateStr: dateStr,
+    expandedSumMm: expandedSumMm,
+    partsSumMm: partsSumMm,
+  )) {
+    return 0.0;
+  }
+  return apiDailyPrecip;
+}
+
+int trustedDailyApiPrecipProb({
+  required int dailyApiProb,
+  HourlyForecast? hourly,
+  required String dateStr,
+  int expandedMaxProb = 0,
+  double partsSumMm = 0,
+}) {
+  final uiMaxProb = hourlyDayUiMaxPrecipProb(hourly, dateStr);
+  if (expandedMaxProb >= kMinPrecipProbPercent ||
+      partsSumMm >= kMeaningfulPrecipMmPerHour) {
+    return math.max(expandedMaxProb, uiMaxProb);
+  }
+  return uiMaxProb;
+}
+
+/// Pätička dennej karty — sedí s ikonami; bez falošných mm z API/latch.
+({double mm, int prob}) resolveDailyCardFooterPrecip({
+  required bool partIconsAllDry,
+  required int dailyMainIconCode,
+  required double apiDailySnow,
+  required double expandedSumMm,
+  required int expandedMaxProb,
+  required double partsSumMm,
+  HourlyForecast? hourly,
+  required String dateStr,
+  required double apiDailyPrecip,
+  required int dailyApiProb,
+  double latchedDailyMm = 0,
+  int latchedDailyProb = 0,
+}) {
+  final mainDry =
+      !kPrecipitationCodes.contains(normalizeDisplayWeatherCode(dailyMainIconCode));
+  if (partIconsAllDry && mainDry) {
+    return (mm: 0.0, prob: 0);
+  }
+
+  final uiEcmwfMm = ecmwfDayUiPrecipSumMm(hourly, dateStr);
+  final uiMaxProb = hourlyDayUiMaxPrecipProb(hourly, dateStr);
+  final trustedApiMm = trustedDailyApiPrecipMm(
+    apiDailyPrecip: apiDailyPrecip,
+    dailyApiProb: dailyApiProb,
+    hourly: hourly,
+    dateStr: dateStr,
+    expandedSumMm: expandedSumMm,
+    partsSumMm: partsSumMm,
+  );
+  final trustedApiProb = trustedDailyApiPrecipProb(
+    dailyApiProb: dailyApiProb,
+    hourly: hourly,
+    dateStr: dateStr,
+    expandedMaxProb: expandedMaxProb,
+    partsSumMm: partsSumMm,
+  );
+  final trustedLatchMm = dailyApiWetClaimCorroboratedByHourly(
+            apiDailyPrecip: latchedDailyMm,
+            dailyApiProb: latchedDailyProb,
+            hourly: hourly,
+            dateStr: dateStr,
+            expandedSumMm: expandedSumMm,
+            partsSumMm: partsSumMm,
+        )
+      ? latchedDailyMm
+      : 0.0;
+  final trustedLatchProb =
+      trustedLatchMm >= kMeaningfulPrecipMmPerHour ? latchedDailyProb : 0;
+
+  final mm = resolveDailyCardPrecipDisplayMm(
+    apiDailyPrecip: trustedApiMm,
+    expandedSumMm: expandedSumMm,
+    partsSumMm: partsSumMm,
+    ecmwfHourlyDaySumMm: uiEcmwfMm,
+    latchedPrecipMm: trustedLatchMm,
+  );
+  final prob = math.max(
+    trustedLatchProb,
+    math.max(trustedApiProb, math.max(expandedMaxProb, uiMaxProb)),
+  );
+  if (apiDailySnow >= 0.1) {
+    return (
+      mm: math.max(mm, trustedApiMm),
+      prob: math.max(prob, trustedApiProb),
+    );
+  }
+  return (mm: mm, prob: prob);
 }
 
 /// Súčet mm a max % — v pásme 24 h rovnaké ikony/mm ako v horizontálnom zozname.
@@ -3356,7 +3744,13 @@ double resolveDailyCardPrecipDisplayMm({
 /// Minimálny úhrn pre denný úsek (ráno/poobede/…) podľa zobrazenej ikony.
 double dailySegmentMmFloorFromIcon(int iconCode, {int prob = 0}) {
   final c = normalizeDisplayWeatherCode(iconCode);
-  if ({95, 96, 99}.contains(c)) return 5.0;
+  if ({95, 96, 99}.contains(c)) {
+    return hourlyThunderStripDisplayMm(
+      iconCode: c,
+      probPercent: prob,
+      ecmwfMm: 0,
+    );
+  }
   if (c == 82 || c == 85 || c == 86) return 4.0;
   if (c == 65 || c == 75) return 3.5;
   if (c == 63 || c == 73 || c == 67) return 2.5;
@@ -3434,25 +3828,12 @@ bool shouldSuppressWetDayIconsForDay(
   int latchedDailyProb = 0,
   int? dailyWeatherCode,
 }) {
-  // ECMWF denný súčet — radar nesmie celý deň vytrieť; po daždi API sum často klesne.
+  // Sneženie — nikdy nepotláčaj mokré ikony podľa surového API dažďa.
   if (apiDailySnow >= 0.1) return false;
-  if (apiDailyPrecip >= kMeaningfulPrecipMmPerHour &&
-      dailyApiProb >= kMinPrecipProbPercent) {
-    return false;
-  }
-  if (latchedDailyPrecipMm >= kMeaningfulPrecipMmPerHour &&
-      latchedDailyProb >= kMinPrecipProbPercent) {
-    return false;
-  }
-  if (dailyWeatherCode != null &&
-      kPrecipitationCodes.contains(normalizeDisplayWeatherCode(dailyWeatherCode)) &&
-      math.max(dailyApiProb, latchedDailyProb) >= kMinPrecipProbPercent &&
-      math.max(apiDailyPrecip, latchedDailyPrecipMm) >= kMeaningfulPrecipMmPerHour) {
-    return false;
-  }
+  // Surový denný API súčet / latch / WMO bez hodinovej podpory nestačí na mokrý deň.
   if (h != null) {
-    final hourlySum = ecmwfDayPrecipSumMm(h, dateStr);
-    final hourlyMaxProb = hourlyDayMaxPrecipProb(h, dateStr);
+    final hourlySum = ecmwfDayUiPrecipSumMm(h, dateStr);
+    final hourlyMaxProb = hourlyDayUiMaxPrecipProb(h, dateStr);
     if (hourlySum >= kMeaningfulPrecipMmPerHour &&
         hourlyMaxProb >= kMinPrecipProbPercent) {
       return false;
@@ -3539,8 +3920,6 @@ double estimateWindGustsKmh(double? windKmh) {
   return (w * 1.4 + 2.0).clamp(0.0, 150.0);
 }
 
-bool _hourlyListHasValues(List<double?>? values) =>
-    values != null && values.any((v) => v != null);
 
 (int riseLocalMin, int setLocalMin) solarMinutesLocal(
   double lat,

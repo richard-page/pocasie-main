@@ -103,8 +103,176 @@ const _kThunderWmoCodes = <int>{95, 96, 99};
 bool _isThunderWmoCode(int code) => _kThunderWmoCodes.contains(code);
 
 /// Rovnaká denná ikona ako v zozname predpovede — podľa nej rozhodneme búrkovú pill.
-bool _chartDayShowsThunderIcon(WeatherData data, int dayIndex) =>
-    _isThunderWmoCode(_dailyMainIconSkyTextCode(data, dayIndex));
+/// Má aspoň jedna hodina v kalendárnom dni radarom potvrdené zrážky?
+bool _chartCalendarDayHasRadarPrecip(
+  HourlyForecast hourly,
+  String datePrefix,
+  DateTime locTime,
+  RadarNowcastContext radarCtx, {
+  int? utcOffsetSeconds,
+}) {
+  if (!radarCtx.eligible) return false;
+  for (var i = 0; i < hourly.time.length; i++) {
+    if (!hourly.time[i].startsWith(datePrefix)) continue;
+    final parsed = _tryParseHourlyTimestamp(hourly.time[i]);
+    if (parsed == null) continue;
+    final localParsed = _hourlyParsedLocal(parsed, utcOffsetSeconds);
+    final slotHour = DateTime(
+      localParsed.year,
+      localParsed.month,
+      localParsed.day,
+      localParsed.hour,
+    );
+    if (radarCtx.authorizesPrecipAtLocalHour(slotHour, locTime)) return true;
+  }
+  return false;
+}
+
+double? _chartDayTempC(WeatherData data, int dayIndex) {
+  final d = data.daily!;
+  final h = data.hourly;
+  final dateStr = d.time[dayIndex];
+  if (h != null) {
+    for (var i = 0; i < h.time.length; i++) {
+      if (!h.time[i].startsWith(dateStr)) continue;
+      final parsed = _tryParseHourlyTimestamp(h.time[i]);
+      if (parsed == null) continue;
+      final local = _hourlyParsedLocal(parsed, data.utcOffsetSeconds);
+      if (local.hour == 12 || local.hour == 13) {
+        return h.temperature?[i];
+      }
+    }
+  }
+  final max = d.tempMax?[dayIndex];
+  final min = d.tempMin?[dayIndex];
+  if (max != null && min != null) return (max + min) / 2;
+  return max ?? min;
+}
+
+/// Denná ikona v grafe — ECMWF + radar (dážď / sneh) keď mapa potvrdí zrážky.
+int _chartDayDisplayIconCode(
+  WeatherData data,
+  int dayIndex, {
+  RadarNowcastContext radarCtx = RadarNowcastContext.inactive,
+}) {
+  var code = _dailyMainIconSkyTextCode(data, dayIndex);
+  if (!radarCtx.eligible) return code;
+
+  final daily = data.daily;
+  final h = data.hourly;
+  if (daily == null || h == null || dayIndex < 0 || dayIndex >= daily.time.length) {
+    return code;
+  }
+
+  final locTime = DateTime.now().toUtc().add(
+        Duration(seconds: data.utcOffsetSeconds ?? 0),
+      );
+  final dateStr = daily.time[dayIndex];
+  if (!_chartCalendarDayHasRadarPrecip(
+    h,
+    dateStr,
+    locTime,
+    radarCtx,
+    utcOffsetSeconds: data.utcOffsetSeconds,
+  )) {
+    return code;
+  }
+
+  return applyRadarPrecipToDayPartIcon(
+    code,
+    radarCtx: radarCtx,
+    partHasRadarPrecip: true,
+    tempC: _chartDayTempC(data, dayIndex),
+  );
+}
+
+/// Nočná ikona v grafe — mesiac, alebo zrážky podľa radaru v nočnom úseku.
+int _chartNightDisplayIconCode(
+  WeatherData data,
+  int dayIndex, {
+  RadarNowcastContext radarCtx = RadarNowcastContext.inactive,
+}) {
+  const moonCode = 0;
+  if (!radarCtx.eligible) return moonCode;
+
+  final daily = data.daily;
+  final h = data.hourly;
+  if (daily == null || h == null || dayIndex < 0 || dayIndex >= daily.time.length) {
+    return moonCode;
+  }
+
+  final locTime = DateTime.now().toUtc().add(
+        Duration(seconds: data.utcOffsetSeconds ?? 0),
+      );
+  final dateStr = daily.time[dayIndex];
+  final nightRadar = _dayPartHasRadarPrecip(
+    h,
+    dateStr,
+    'night',
+    locTime,
+    radarCtx,
+    utcOffsetSeconds: data.utcOffsetSeconds,
+  );
+  if (!nightRadar) return moonCode;
+
+  double? nightTemp;
+  for (var i = 0; i < h.time.length; i++) {
+    if (!h.time[i].startsWith(dateStr)) continue;
+    final parsed = _tryParseHourlyTimestamp(h.time[i]);
+    if (parsed == null) continue;
+    final local = _hourlyParsedLocal(parsed, data.utcOffsetSeconds);
+    if (local.hour >= 22 || local.hour <= 4) {
+      nightTemp = h.temperature?[i];
+      break;
+    }
+  }
+  nightTemp ??= _chartDayTempC(data, dayIndex);
+
+  return applyRadarPrecipToDayPartIcon(
+    moonCode,
+    radarCtx: radarCtx,
+    partHasRadarPrecip: true,
+    tempC: nightTemp,
+  );
+}
+
+int _chartRadarProbForDay(
+  WeatherData data,
+  int dayIndex,
+  RadarNowcastContext radarCtx,
+) {
+  if (!radarCtx.eligible) return 0;
+  final h = data.hourly;
+  final daily = data.daily;
+  if (h == null || daily == null || dayIndex < 0 || dayIndex >= daily.time.length) {
+    return 0;
+  }
+  final locTime = DateTime.now().toUtc().add(
+        Duration(seconds: data.utcOffsetSeconds ?? 0),
+      );
+  if (!_chartCalendarDayHasRadarPrecip(
+    h,
+    daily.time[dayIndex],
+    locTime,
+    radarCtx,
+    utcOffsetSeconds: data.utcOffsetSeconds,
+  )) {
+    return 0;
+  }
+  final dbz = radarCtx.precipNow || radarCtx.rainAtPinNow
+      ? radarCtx.precipIntensityDbz
+      : radarCtx.stripDisplayDbz;
+  return effectiveRadarProbFromDbz(dbz, radarCtx);
+}
+
+bool _chartDayShowsThunderIcon(
+  WeatherData data,
+  int dayIndex, {
+  RadarNowcastContext radarCtx = RadarNowcastContext.inactive,
+}) =>
+    _isThunderWmoCode(
+      _chartDayDisplayIconCode(data, dayIndex, radarCtx: radarCtx),
+    );
 
 String _chartCalendarDateKey(String dateStr) {
   final dt = DateTime.tryParse(dateStr);
@@ -149,10 +317,11 @@ int _chartThunderRaw({
   required int dayIndex,
   required String dayKey,
   required int dailyProb,
+  RadarNowcastContext radarCtx = RadarNowcastContext.inactive,
 }) {
   final h = data.hourly;
   final daily = data.daily!;
-  if (!_chartDayShowsThunderIcon(data, dayIndex)) return 0;
+  if (!_chartDayShowsThunderIcon(data, dayIndex, radarCtx: radarCtx)) return 0;
 
   var maxThunder = 0;
 
@@ -220,6 +389,7 @@ int _chartThunderRaw({
 ({int rain, int? thunder}) _chartPrecipProbsForDay({
   required WeatherData data,
   required int dayIndex,
+  RadarNowcastContext radarCtx = RadarNowcastContext.inactive,
 }) {
   final daily = data.daily!;
   final hourly = data.hourly;
@@ -232,9 +402,11 @@ int _chartThunderRaw({
       rainRaw = math.max(rainRaw, _chartHourPrecipProb(hourly, i));
     }
   }
+  rainRaw = math.max(rainRaw, _chartRadarProbForDay(data, dayIndex, radarCtx));
   final rain = _chartPercentForChip(rainRaw);
 
-  if (rain <= 0 || !_chartDayShowsThunderIcon(data, dayIndex)) {
+  if (rain <= 0 ||
+      !_chartDayShowsThunderIcon(data, dayIndex, radarCtx: radarCtx)) {
     return (rain: rain, thunder: null);
   }
 
@@ -243,6 +415,7 @@ int _chartThunderRaw({
     dayIndex: dayIndex,
     dayKey: dayKey,
     dailyProb: dailyProb,
+    radarCtx: radarCtx,
   );
   if (thunderRaw <= 0) return (rain: rain, thunder: null);
 
@@ -379,627 +552,22 @@ class ForecastSubpageScaffold extends StatelessWidget {
   }
 }
 
-Color _warningSeverityAccent(String severity) {
-  final s = severity.toLowerCase();
-  if (s.contains('red') || s.contains('cerven') || s.contains('červen')) {
-    return const Color(0xFFE53935);
-  }
-  if (s.contains('orange') || s.contains('oranz') || s.contains('oranž')) {
-    return const Color(0xFFFF9800);
-  }
-  if (s.contains('green') || s.contains('zelen')) {
-    return const Color(0xFF66BB6A);
-  }
-  return const Color(0xFFFDD835);
-}
-
-String _warningPhenomenonLabel(String phenomenon) {
-  final p = phenomenon.toLowerCase();
-  // Map raw codes to readable Slovak labels
-  if (p.contains('teploty_vysoke') || p.contains('vysoke_teploty')) {
-    return 'Vysoké teploty';
-  }
-  if (p.contains('teploty_nizke') || p.contains('nizke_teploty')) {
-    return 'Nízke teploty';
-  }
-  if (p.contains('vietor') || p.contains('wind')) {
-    return 'Vietor';
-  }
-  if (p.contains('burk') || p.contains('storm')) {
-    return 'Búrky';
-  }
-  if (p.contains('dazd') || p.contains('rain') || p.contains('zrazk')) {
-    return 'Dážď';
-  }
-  if (p.contains('sneH') || p.contains('snow')) {
-    return 'Sneh';
-  }
-  if (p.contains('povoden') || p.contains('flood')) {
-    return 'Povodeň';
-  }
-  if (p.contains('hmla') || p.contains('fog')) {
-    return 'Hmla';
-  }
-  if (p.contains('klzkost') || p.contains('ice')) {
-    return 'Klzkosť';
-  }
-  // Fallback: remove underscores and capitalize
-  return phenomenon.replaceAll('_', ' ');
-}
-
-IconData _warningPhenomenonIcon(String phenomenon) {
-  final p = phenomenon.toLowerCase();
-  if (p.contains('temp') || p.contains('teplot') || p.contains('horuc')) {
-    return Icons.wb_sunny_outlined;
-  }
-  if (p.contains('rain') || p.contains('dazd') || p.contains('dažd')) {
-    return Icons.water_drop_outlined;
-  }
-  if (p.contains('wind') || p.contains('vietor')) {
-    return Icons.air_rounded;
-  }
-  if (p.contains('snow') || p.contains('sneh')) {
-    return Icons.ac_unit;
-  }
-  if (p.contains('storm') || p.contains('burk')) {
-    return Icons.thunderstorm_outlined;
-  }
-  return Icons.warning_amber_rounded;
-}
-
-class WarningsListPage extends StatelessWidget {
-  final List<WarningData> warnings;
-  final GeoCity? city;
-  final String? webFallbackUrl;
-
-  const WarningsListPage({
-    super.key,
-    required this.warnings,
-    this.city,
-    this.webFallbackUrl,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final title = warnings.length == 1 ? 'Výstraha' : 'Výstrahy';
-
-    return ForecastSubpageScaffold(
-      title: title,
-      body: warnings.isEmpty
-          ? Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text(
-                  city != null
-                      ? 'Pre ${city!.name} momentálne nie sú aktívne výstrahy.'
-                      : 'Momentálne nie sú aktívne výstrahy.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.75),
-                    fontSize: 16,
-                    height: 1.45,
-                  ),
-                ),
-              ),
-            )
-          : ListView.separated(
-              padding: const EdgeInsets.fromLTRB(4, 12, 4, 16),
-              itemCount: warnings.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 14),
-              itemBuilder: (context, index) {
-                return _WarningNativeCard(warning: warnings[index]);
-              },
-            ),
-    );
-  }
-}
-
-class _WarningNativeCard extends StatelessWidget {
-  final WarningData warning;
-
-  const _WarningNativeCard({required this.warning});
-
-
-  String get _severityLabel {
-    final s = warning.severity.toLowerCase();
-    if (s.contains('red') || s.contains('cerven') || s.contains('červen')) {
-      return 'Červená výstraha';
-    }
-    if (s.contains('orange') || s.contains('oranz') || s.contains('oranž')) {
-      return 'Oranžová výstraha';
-    }
-    if (s.contains('yellow') || s.contains('zlta') || s.contains('žltá') || s.contains('zlty')) {
-      return 'Žltá výstraha';
-    }
-    return 'Výstraha';
-  }
-
-  Widget _buildDescriptionWithBlueValues(String text) {
-    // Regex to match any numbers (temperatures like "33 - 34 °C" or just "33")
-    final regex = RegExp(r'[0-9]+(?:\.[0-9]+)?(?:\s*(?:-|–|—|‑)\s*[0-9]+(?:\.[0-9]+)?)?(?:\s*°[Cc]?)?');
-    final matches = regex.allMatches(text).where((m) => m.group(0)?.trim().isNotEmpty == true).toList();
-
-    if (matches.isEmpty) {
-      return Text(
-        text,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 14,
-          fontWeight: FontWeight.w500,
-          height: 1.4,
-        ),
-      );
-    }
-
-    final spans = <TextSpan>[];
-    var currentIndex = 0;
-
-    for (final match in matches) {
-      if (match.start > currentIndex) {
-        spans.add(TextSpan(
-          text: text.substring(currentIndex, match.start),
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: 0.9),
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-            height: 1.4,
-          ),
-        ));
-      }
-      spans.add(TextSpan(
-        text: match.group(0),
-        style: const TextStyle(
-          color: Color(0xFF64B5F6),
-          fontSize: 14,
-          fontWeight: FontWeight.w700,
-          height: 1.4,
-        ),
-      ));
-      currentIndex = match.end;
-    }
-
-    if (currentIndex < text.length) {
-      spans.add(TextSpan(
-        text: text.substring(currentIndex),
-        style: TextStyle(
-          color: Colors.white.withValues(alpha: 0.9),
-          fontSize: 14,
-          fontWeight: FontWeight.w500,
-          height: 1.4,
-        ),
-      ));
-    }
-
-    return RichText(
-      text: TextSpan(
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 14,
-          fontWeight: FontWeight.w500,
-          height: 1.4,
-        ),
-        children: spans,
-      ),
-    );
-  }
-
-  String _warningSeverityKey(String severity) {
-    final s = severity.toLowerCase();
-    if (s.contains('red') || s.contains('cerven') || s.contains('červen')) return 'red';
-    if (s.contains('orange') || s.contains('oranz') || s.contains('oranž')) return 'orange';
-    if (s.contains('green') || s.contains('zelen')) return 'green';
-    return 'yellow';
-  }
-
-  String? _warningExpectedRangeHint(String label, String severityKey) {
-    String? pick(Map<String, String> values) => values[severityKey] ?? values['yellow'];
-
-    if (label.contains('horúc') || label.contains('teplot')) {
-      return pick({
-        'yellow': '33 – 34 °C',
-        'orange': '35 – 37 °C',
-        'red': '38 – 40 °C',
-      });
-    }
-    if (label.contains('mraz') || label.contains('niz')) {
-      return pick({
-        'yellow': '-10 – -15 °C',
-        'orange': '-15 – -20 °C',
-        'red': '-20 – -25 °C',
-      });
-    }
-    if (label.contains('vietor')) {
-      return pick({
-        'yellow': 'nárazy 65 – 85 km/h',
-        'orange': 'nárazy 80 – 105 km/h',
-        'red': 'nárazy 100 – 130 km/h',
-      });
-    }
-    if (label.contains('búrk') || label.contains('burk')) {
-      return pick({
-        'yellow': 'zrážky 20 – 30 mm, vietor 65 km/h',
-        'orange': 'zrážky 30 – 50 mm, vietor 90 km/h',
-        'red': 'zrážky 50+ mm, vietor 110 km/h',
-      });
-    }
-    if (label.contains('dážď') || label.contains('dazd')) {
-      return pick({
-        'yellow': 'úhrn 30 – 50 mm',
-        'orange': 'úhrn 50 – 80 mm',
-        'red': 'úhrn 80+ mm',
-      });
-    }
-    if (label.contains('sneh')) {
-      return pick({
-        'yellow': 'nový sneh 10 – 20 cm',
-        'orange': 'nový sneh 20 – 35 cm',
-        'red': 'nový sneh 35+ cm',
-      });
-    }
-    if (label.contains('povod')) {
-      return pick({
-        'yellow': 'mierne vzostupy hladín',
-        'orange': 'výrazné vzostupy hladín',
-        'red': 'extrémne vzostupy hladín',
-      });
-    }
-    if (label.contains('hmla')) {
-      return pick({
-        'yellow': 'viditeľnosť 200 – 500 m',
-        'orange': 'viditeľnosť 50 – 200 m',
-        'red': 'viditeľnosť < 50 m',
-      });
-    }
-    if (label.contains('klzk') || label.contains('ľad')) {
-      return pick({
-        'yellow': 'ľadová vrstva do 1 cm',
-        'orange': 'ľadová vrstva 1 – 3 cm',
-        'red': 'ľadová vrstva > 3 cm',
-      });
-    }
-    return null;
-  }
-
-  String _formatExpectation(String base, String? range) {
-    if (range == null || range.isEmpty) {
-      return base.endsWith('.') ? base : '$base.';
-    }
-    return '$base: $range';
-  }
-
-  String _warningExpectationText(WarningData warning) {
-    final desc = warning.description.trim();
-    if (desc.isNotEmpty) return desc;
-
-    final label = _warningPhenomenonLabel(warning.phenomenon).toLowerCase();
-    final severityKey = _warningSeverityKey(warning.severity);
-    final range = _warningExpectedRangeHint(label, severityKey);
-
-    if (label.contains('horúc') || label.contains('teplot')) {
-      return _formatExpectation('Očakávajú sa horúčavy', range);
-    }
-    if (label.contains('mraz') || label.contains('niz')) {
-      return _formatExpectation('Očakávajú sa mrazy', range);
-    }
-    if (label.contains('vietor')) {
-      return _formatExpectation('Očakáva sa silný vietor', range);
-    }
-    if (label.contains('búrk') || label.contains('burk')) {
-      return _formatExpectation('Očakávajú sa búrky', range);
-    }
-    if (label.contains('dážď') || label.contains('dazd')) {
-      return _formatExpectation('Očakáva sa výdatný dážď', range);
-    }
-    if (label.contains('sneh')) {
-      return _formatExpectation('Očakáva sa sneženie', range);
-    }
-    if (label.contains('povod')) {
-      return _formatExpectation('Hrozí povodeň', range);
-    }
-    if (label.contains('hmla')) {
-      return _formatExpectation('Očakáva sa hmla', range);
-    }
-    if (label.contains('klzk') || label.contains('ľad')) {
-      return _formatExpectation('Hrozí poľadovica', range);
-    }
-
-    if (label.isEmpty) return '';
-    final capitalized = label[0].toUpperCase() + label.substring(1);
-    return _formatExpectation('Očakáva sa $capitalized', range);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = _warningSeverityAccent(warning.severity);
-    final phenomenon = warning.phenomenon.trim();
-    final validFrom = warning.validFrom.trim();
-    final validTo = warning.validTo.trim();
-    final validity = validFrom.isNotEmpty && validTo.isNotEmpty
-        ? '$validFrom – $validTo'
-        : (validFrom.isNotEmpty ? validFrom : validTo);
-    final author = warning.author.trim();
-    final expectation = _warningExpectationText(warning);
-    final hasExpectation = expectation.isNotEmpty;
-    final severityLabel = _severityLabel;
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
-        color: const Color(0xFF3A4551),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Container(width: 5, color: accent),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Icon box
-                    Container(
-                      width: 44,
-                      height: 44,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.08),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
-                      ),
-                      child: Icon(
-                        _warningPhenomenonIcon(phenomenon),
-                        color: Colors.white.withValues(alpha: 0.9),
-                        size: 24,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    // Title
-                    Text(
-                      severityLabel + (warning.region.isNotEmpty ? ' - ${warning.region}' : ''),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w700,
-                        height: 1.3,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    // Details box
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF2E3844),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          // Typ javu
-                          if (phenomenon.isNotEmpty)
-                            Row(
-                              children: [
-                                const Icon(
-                                  Icons.wb_sunny_outlined,
-                                  size: 18,
-                                  color: Color(0xFF64B5F6),
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  'Typ javu: ',
-                                  style: TextStyle(
-                                    color: Colors.white.withValues(alpha: 0.6),
-                                    fontSize: 13,
-                                  ),
-                                ),
-                                Text(
-                                  _warningPhenomenonLabel(phenomenon),
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          const SizedBox(height: 6),
-                          // Platnosť
-                          if (validity.isNotEmpty)
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Icon(
-                                  Icons.calendar_today_outlined,
-                                  size: 18,
-                                  color: Color(0xFF64B5F6),
-                                ),
-                                const SizedBox(width: 8),
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'Platnosť:',
-                                      style: TextStyle(
-                                        color: Colors.white.withValues(alpha: 0.6),
-                                        fontSize: 13,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      validity,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          const SizedBox(height: 6),
-                          // Zdroj dát
-                          if (author.isNotEmpty)
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Icon(
-                                  Icons.account_balance_outlined,
-                                  size: 18,
-                                  color: Color(0xFF64B5F6),
-                                ),
-                                const SizedBox(width: 8),
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'Zdroj dát:',
-                                      style: TextStyle(
-                                        color: Colors.white.withValues(alpha: 0.6),
-                                        fontSize: 13,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      author,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          if (hasExpectation) ...[
-                            const SizedBox(height: 12),
-                            Divider(
-                              height: 1,
-                              color: Colors.white.withValues(alpha: 0.12),
-                            ),
-                            const SizedBox(height: 12),
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Icon(
-                                  Icons.show_chart,
-                                  size: 18,
-                                  color: Color(0xFF64B5F6),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: _buildDescriptionWithBlueValues(expectation),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF2F3A47),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.info_outline_rounded,
-                            size: 18,
-                            color: const Color(0xFF64B5F6).withValues(alpha: 0.95),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              'Meteoalarm (EUMETNET) • oficiálne výstrahy pre európske krajiny',
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.72),
-                                fontSize: 12.5,
-                                height: 1.35,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ignore: unused_element
-class _WarningDetailRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String value;
-
-  const _WarningDetailRow({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 18, color: Colors.white.withValues(alpha: 0.55)),
-          const SizedBox(width: 10),
-          Expanded(
-            child: RichText(
-              text: TextSpan(
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.72),
-                  fontSize: 14,
-                  height: 1.35,
-                ),
-                children: [
-                  TextSpan(
-                    text: '$label: ',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  TextSpan(
-                    text: value,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
 
 class WeatherChartPage extends StatelessWidget {
   final GeoCity city;
   final WeatherData data;
+  final RadarNowcastContext radarCtx;
 
   const WeatherChartPage({
     super.key,
     required this.city,
     required this.data,
+    this.radarCtx = RadarNowcastContext.inactive,
   });
 
   String get _modelLabel => 'ECMWF IFS';
+  bool get _radarAugmentsChart =>
+      radarCtx.eligible && radarNowcastActiveForCity(city);
 
   @override
   Widget build(BuildContext context) {
@@ -1038,7 +606,10 @@ class WeatherChartPage extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
               child: Text(
-                'Denné maximum, minimum, pravdepodobnosť zrážok a typ počasia z aktuálnej predpovede Open-Meteo.',
+                _radarAugmentsChart
+                    ? 'Denné maximum, minimum a pravdepodobnosť zrážok z Open-Meteo (ECMWF). '
+                        'Ak radar detekuje dážď alebo sneh, dnes sa zobrazí zrážková ikona.'
+                    : 'Denné maximum, minimum, pravdepodobnosť zrážok a typ počasia z aktuálnej predpovede Open-Meteo.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.72),
@@ -1098,10 +669,11 @@ class WeatherChartPage extends StatelessWidget {
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          _ChartSummaryStrip(data: data),
+                          _ChartSummaryStrip(data: data, radarCtx: radarCtx),
                           _ChartDaysScroller(
                             data: data,
                             dayCount: dayCount,
+                            radarCtx: radarCtx,
                           ),
                         ],
                       ),
@@ -1133,7 +705,10 @@ class _ChartPeriodStats {
     this.rainProb = 0,
   });
 
-  factory _ChartPeriodStats.from(WeatherData data) {
+  factory _ChartPeriodStats.from(
+    WeatherData data, {
+    RadarNowcastContext radarCtx = RadarNowcastContext.inactive,
+  }) {
     final d = data.daily;
     if (d == null || d.time.isEmpty) return const _ChartPeriodStats();
 
@@ -1156,8 +731,11 @@ class _ChartPeriodStats {
         coldVal = min;
         coldIdx = i;
       }
-      final displayProb =
-          _chartPrecipProbsForDay(data: data, dayIndex: i).rain;
+      final displayProb = _chartPrecipProbsForDay(
+        data: data,
+        dayIndex: i,
+        radarCtx: radarCtx,
+      ).rain;
       if (displayProb > rainVal) {
         rainVal = displayProb;
         rainIdx = i;
@@ -1185,12 +763,16 @@ String _chartDayLabel(DailyForecast d, int? index) {
 
 class _ChartSummaryStrip extends StatelessWidget {
   final WeatherData data;
+  final RadarNowcastContext radarCtx;
 
-  const _ChartSummaryStrip({required this.data});
+  const _ChartSummaryStrip({
+    required this.data,
+    this.radarCtx = RadarNowcastContext.inactive,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final stats = _ChartPeriodStats.from(data);
+    final stats = _ChartPeriodStats.from(data, radarCtx: radarCtx);
     final d = data.daily!;
 
     return Padding(
@@ -1381,10 +963,12 @@ class _ChartTempLegend extends StatelessWidget {
 class _ChartDayColumn extends StatelessWidget {
   final WeatherData data;
   final int dayIndex;
+  final RadarNowcastContext radarCtx;
 
   const _ChartDayColumn({
     required this.data,
     required this.dayIndex,
+    this.radarCtx = RadarNowcastContext.inactive,
   });
 
   static const _weekdayShort = <String>['Po', 'Ut', 'St', 'Št', 'Pi', 'So', 'Ne'];
@@ -1409,10 +993,20 @@ class _ChartDayColumn extends StatelessWidget {
       min ??= fb['min'];
     }
 
-    final dayIconCode = _dailyMainIconSkyTextCode(data, dayIndex);
+    final dayIconCode = _chartDayDisplayIconCode(
+      data,
+      dayIndex,
+      radarCtx: radarCtx,
+    );
+    final nightIconCode = _chartNightDisplayIconCode(
+      data,
+      dayIndex,
+      radarCtx: radarCtx,
+    );
     final precip = _chartPrecipProbsForDay(
       data: data,
       dayIndex: dayIndex,
+      radarCtx: radarCtx,
     );
 
     return SizedBox(
@@ -1432,8 +1026,10 @@ class _ChartDayColumn extends StatelessWidget {
           _TempPill(value: min, tall: false),
           const SizedBox(height: 3),
           getWeatherIcon(
-            0,
-            forceNight: true,
+            nightIconCode,
+            forceNight: !kPrecipitationCodes.contains(
+              normalizeDisplayWeatherCode(nightIconCode),
+            ),
             size: 52,
             daily: d,
             hourTime: '${dateStr}T23:00',
@@ -1519,10 +1115,12 @@ List<double?> _chartDailyMaxTemps(WeatherData data, int dayCount) =>
 class _ChartDaysScroller extends StatefulWidget {
   final WeatherData data;
   final int dayCount;
+  final RadarNowcastContext radarCtx;
 
   const _ChartDaysScroller({
     required this.data,
     required this.dayCount,
+    this.radarCtx = RadarNowcastContext.inactive,
   });
 
   @override
@@ -1598,6 +1196,7 @@ class _ChartDaysScrollerState extends State<_ChartDaysScroller> {
               child: _ChartDayColumn(
                 data: widget.data,
                 dayIndex: index,
+                radarCtx: widget.radarCtx,
               ),
             ),
           ),

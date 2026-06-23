@@ -18,33 +18,50 @@ const double kRainViewerMinDbzEcho = 15.0;
 const double kRainViewerMinDbzAtPin = 15.0;
 /// RainViewer legenda — pod 15 dBZ / 0,3 mm/h = žiadne zrážky.
 const double kRainViewerLegendMinDbz = 15.0;
-
-/// dBZ z palety — bez umelého znižovania (legenda mapy).
-double rainViewerDbzForUi(double rawDbz) => rawDbz.clamp(0.0, 60.0);
+const double kRainViewerLegendDrizzleDbz = 15.0;
+const double kRainViewerLegendLightRainDbz = 20.0;
+const double kRainViewerLegendModerateRainDbz = 30.0;
+const double kRainViewerLegendHeavyRainDbz = 40.0;
+const double kRainViewerLegendLightSnowDbz = 15.0;
+const double kRainViewerLegendModerateSnowDbz = 22.0;
+const double kRainViewerLegendHeavySnowDbz = 30.0;
 
 /// mm/h podľa RainViewer legendy (15→0,3 · 20→1,3 · 30→3 · 40→12).
 double rainViewerMmFromDbz(double dbz) {
   if (dbz < kRainViewerLegendMinDbz) return 0;
-  if (dbz < 20) {
-    return 0.3 + (dbz - 15) / 5 * (1.3 - 0.3);
+  if (dbz < kRainViewerLegendLightRainDbz) {
+    return 0.3 +
+        (dbz - kRainViewerLegendDrizzleDbz) /
+            (kRainViewerLegendLightRainDbz - kRainViewerLegendDrizzleDbz) *
+            (1.3 - 0.3);
   }
-  if (dbz < 30) {
-    return 1.3 + (dbz - 20) / 10 * (3.0 - 1.3);
+  if (dbz < kRainViewerLegendModerateRainDbz) {
+    return 1.3 +
+        (dbz - kRainViewerLegendLightRainDbz) /
+            (kRainViewerLegendModerateRainDbz - kRainViewerLegendLightRainDbz) *
+            (3.0 - 1.3);
   }
-  if (dbz < 40) {
-    return 3.0 + (dbz - 30) / 10 * (12.0 - 3.0);
+  if (dbz < kRainViewerLegendHeavyRainDbz) {
+    return 3.0 +
+        (dbz - kRainViewerLegendModerateRainDbz) /
+            (kRainViewerLegendHeavyRainDbz - kRainViewerLegendModerateRainDbz) *
+            (12.0 - 3.0);
   }
-  return (12.0 + (dbz - 40) * 0.35).clamp(12.0, 25.0);
+  return (12.0 + (dbz - kRainViewerLegendHeavyRainDbz) * 0.35)
+      .clamp(12.0, 25.0);
 }
 
-/// % šanca — od 15 dBZ (mrholenie) minimálne 50 %.
+/// % šanca — od 15 dBZ (mrholenie) min. 50 %; stupne po 10 % podľa legendy.
 int rainViewerProbPercentFromDbz(double dbz) {
   if (dbz < kRainViewerLegendMinDbz) return 0;
-  if (dbz < 20) return kMinPrecipProbPercent;
-  if (dbz < 30) return 65;
-  if (dbz < 40) return 80;
+  if (dbz < kRainViewerLegendLightRainDbz) return kMinPrecipProbPercent;
+  if (dbz < kRainViewerLegendModerateRainDbz) return 60;
+  if (dbz < kRainViewerLegendHeavyRainDbz) return 80;
   return 90;
 }
+
+/// dBZ z palety — bez umelého znižovania (legenda mapy).
+double rainViewerDbzForUi(double rawDbz) => rawDbz.clamp(0.0, 60.0);
 
 /// Intenzita pri pine — stred pinu; ak je slabý, peak v okolí (legenda od 15 dBZ).
 double rainViewerIntensityDbz({
@@ -74,14 +91,14 @@ bool rainViewerSnowLikely({
 
 int wmoFromRainViewerDbz(double dbz, {required bool snow}) {
   if (snow) {
-    if (dbz >= 35) return 75;
-    if (dbz >= 25) return 73;
-    if (dbz >= kRainViewerLegendMinDbz) return 71;
+    if (dbz >= kRainViewerLegendHeavySnowDbz) return 75;
+    if (dbz >= kRainViewerLegendModerateSnowDbz) return 73;
+    if (dbz >= kRainViewerLegendLightSnowDbz) return 71;
     return 51;
   }
-  if (dbz >= 40) return 65;
-  if (dbz >= 30) return 63;
-  if (dbz >= 20) return 61;
+  if (dbz >= kRainViewerLegendHeavyRainDbz) return 65;
+  if (dbz >= kRainViewerLegendModerateRainDbz) return 63;
+  if (dbz >= kRainViewerLegendLightRainDbz) return 61;
   if (dbz >= kRainViewerLegendMinDbz) return 53;
   return 51;
 }
@@ -363,14 +380,10 @@ Future<RadarFrameSample?> _sampleRainViewerFrameFromBytes(
       final centerDbz = center.dbz;
       final p48 = peakWide.dbz;
       final p96 = peakOuter.dbz;
-      var peakDbz = [p48, p96]
+      final peakInner = p48 ?? centerDbz;
+      var peakDbz = [peakInner, p96]
           .whereType<double>()
           .fold<double?>(null, (m, v) => m == null ? v : math.max(m, v));
-      if (center.dbz != null) {
-        peakDbz = peakDbz == null
-            ? center.dbz
-            : math.max(peakDbz, center.dbz!);
-      }
 
       final coherentPx12 = _rainViewerCountDbzAboveInNeighborhood(
         rgba,
@@ -391,8 +404,8 @@ Future<RadarFrameSample?> _sampleRainViewerFrameFromBytes(
         10,
       );
 
-      final nearbyEcho = (peakDbz ?? 0) >= kRainViewerLegendMinDbz ||
-          (centerDbz ?? 0) >= kRainViewerLegendMinDbz;
+      // Len jadro / blízke okolie pinu — nie izolované bunky v 96px diali (šum na mape).
+      final nearbyEcho = (peakInner ?? 0) >= kRainViewerLegendMinDbz;
       // Len stred pinu (12 px) — nie peak v diali; inak falošný dážď pri suchom mieste.
       final atPoint = (centerDbz ?? 0) >= kRainViewerLegendMinDbz;
 

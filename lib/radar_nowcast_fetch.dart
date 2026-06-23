@@ -384,7 +384,7 @@ void resetRadarTrackerStabilizer() {
 class RadarNowcastContext {
   const RadarNowcastContext({
     required this.eligible,
-    required this.history,
+    required this.history, 
     this.fromRainViewer = false,
     this.nowcastHistory = const [],
   });
@@ -407,19 +407,6 @@ class RadarNowcastContext {
         _localHourFloor(DateTime.now()),
         DateTime.now(),
       );
-
-  DateTime _rainViewerFrameLocalHour(int frameUnix, DateTime locNow) {
-    final frameLocal = DateTime.fromMillisecondsSinceEpoch(
-      frameUnix * 1000,
-      isUtc: true,
-    ).add(locNow.timeZoneOffset);
-    return DateTime(
-      frameLocal.year,
-      frameLocal.month,
-      frameLocal.day,
-      frameLocal.hour,
-    );
-  }
 
   bool _rainViewerFrameWetAtPin(RadarFrameSample f) => f.precipAtPoint;
 
@@ -445,37 +432,73 @@ class RadarNowcastContext {
   DateTime? _rainViewerStripRainMinuteEndAt(DateTime locNow) {
     if (!fromRainViewer) return null;
 
+    final nowcastEnd = _rainViewerDryAtFromNowcast(locNow);
+    if (nowcastEnd != null) return nowcastEnd;
+
     DateTime? end;
     if (precipNow || rainAtPinNow) {
+      final mins = _rainViewerIntensityFallbackMinutes();
       end = _roundLocalTimeToMinutes(
-        locNow.add(
-          Duration(
-            minutes: _trackerRemainingMinutesAtPin(locNow).clamp(5, 35),
-          ),
-        ),
+        locNow.add(Duration(minutes: mins)),
       );
     }
 
+    return end;
+  }
+
+  /// Prvá suchá snímka nowcastu pri pine — presný koniec zrážok.
+  DateTime? _rainViewerDryAtFromNowcast(DateTime locNow) {
+    if (!fromRainViewer || nowcastHistory.isEmpty) return null;
     final nowSec = locNow.millisecondsSinceEpoch ~/ 1000;
-    DateTime? lastNowcastWet;
+    DateTime? lastWet;
     for (final f in nowcastHistory) {
-      if (f.unix <= nowSec || !_rainViewerFrameWetAtPin(f)) continue;
+      if (f.unix <= nowSec) continue;
       final frameLocal = DateTime.fromMillisecondsSinceEpoch(
         f.unix * 1000,
         isUtc: true,
       ).add(locNow.timeZoneOffset);
-      if (lastNowcastWet == null || frameLocal.isAfter(lastNowcastWet)) {
-        lastNowcastWet = frameLocal;
+      if (_rainViewerFrameWetAtPin(f)) {
+        lastWet = frameLocal;
+        continue;
+      }
+      if (lastWet != null) {
+        return _roundLocalTimeToMinutes(frameLocal);
       }
     }
-    if (lastNowcastWet != null) {
-      final nowcastEnd = _roundLocalTimeToMinutes(
-        lastNowcastWet.add(const Duration(minutes: 10)),
+    if (lastWet != null) {
+      return _roundLocalTimeToMinutes(
+        lastWet.add(const Duration(minutes: 10)),
       );
-      if (end == null || nowcastEnd.isAfter(end)) end = nowcastEnd;
     }
+    return null;
+  }
 
-    return end;
+  /// Zostávajúce minúty do sucha pri pine — nowcast má prioritu.
+  int? _rainViewerMinutesUntilDryAtPin(DateTime locNow) {
+    if (!fromRainViewer) return null;
+    final dryAt = _rainViewerDryAtFromNowcast(locNow);
+    if (dryAt != null) {
+      final mins = dryAt.difference(locNow).inMinutes;
+      return mins <= 0 ? 0 : mins;
+    }
+    if (!precipNow && !rainAtPinNow) return 0;
+    if (precipNow || rainAtPinNow) {
+      final slope = _centerDbzSlopePerMin;
+      if (slope != null && slope < -0.08) {
+        return _departingRainMinutesLeft();
+      }
+      return _rainViewerIntensityFallbackMinutes();
+    }
+    return null;
+  }
+
+  int _rainViewerIntensityFallbackMinutes() {
+    final dbz = precipIntensityDbz;
+    if (dbz >= kRainViewerLegendHeavyRainDbz) return 70;
+    if (dbz >= kRainViewerLegendModerateRainDbz) return 50;
+    if (dbz >= kRainViewerLegendLightRainDbz) return 35;
+    if (dbz >= kRainViewerLegendMinDbz) return 22;
+    return 15;
   }
 
   double _rainViewerIntensityFromFrame(RadarFrameSample f) =>
@@ -763,18 +786,6 @@ class RadarNowcastContext {
     return 0;
   }
 
-  bool _rainViewerSlotInWetWindow(DateTime slotHour, DateTime locNow) {
-    if (!fromRainViewer) return false;
-    if (slotHour.isBefore(_localHourFloor(locNow))) return false;
-    final window = _rainViewerPrecipWindow(locNow);
-    if (window == null) return false;
-    return _hourlySlotOverlapsPrecipWindow(
-      slotHour,
-      window.start,
-      window.end,
-    );
-  }
-
   bool _radarSnowLikely({double? tempC, double? uiDbz}) {
     if (fromRainViewer) {
       return rainViewerSnowLikely(
@@ -812,13 +823,6 @@ class RadarNowcastContext {
     }
     return frame.precipAtPoint || frame.precip;
   }
-
-  /// RainViewer nowcast — zrážky v danom slote pri pine.
-  bool _rainViewerPredictsPrecipAtHour(
-    DateTime slotHour,
-    DateTime locNow,
-  ) =>
-      _rainViewerNowcastWetAtHour(slotHour, locNow);
 
   /// Verejný prístup — radar nowcast / trajektória predpovedá zrážky.
   bool get rainViewerPredictsPrecip =>
@@ -1049,6 +1053,10 @@ class RadarNowcastContext {
   bool get _trackerMapEchoVisible {
     final frame = latest;
     if (frame == null) return false;
+    if (fromRainViewer) {
+      if (frame.precipAtPoint) return true;
+      return _rainViewerTrajectoryIncoming || _rainViewerNearbyPrecipField;
+    }
     if (_skipCmaxNoiseFilters) {
       return frame.precipAtPoint || frame.precip;
     }
@@ -1656,14 +1664,14 @@ class RadarNowcastContext {
     return _passingCellMinutesRemaining().clamp(10, 28);
   }
 
-  /// Zostávajúce minúty zrážok pri pine — podľa pohybu bunky, nie fixná hodina.
+  /// Zostávajúce minúty zrážok pri pine — nowcast RainViewer, potom trend bunky.
   int _trackerRemainingMinutesAtPin(DateTime locNow) {
-    if (fromRainViewer && precipNow) {
-      final dbz = precipIntensityDbz;
-      if (dbz >= 35) return 120;
-      if (dbz >= 25) return 90;
-      if (dbz >= 20) return 60;
-      return 45;
+    if (fromRainViewer) {
+      final fromNowcast = _rainViewerMinutesUntilDryAtPin(locNow);
+      if (fromNowcast != null) {
+        if (fromNowcast <= 0) return 0;
+        return fromNowcast.clamp(5, 180);
+      }
     }
 
     if (_precipBandPassedPin || _cellTailPassedPin()) return 0;
@@ -2076,6 +2084,11 @@ class RadarNowcastContext {
   bool _coherentEchoNearPinRaw() {
     final frame = latest;
     if (frame == null) return false;
+    if (fromRainViewer) {
+      return frame.precipAtPoint ||
+          _rainViewerTrajectoryIncoming ||
+          _rainViewerNearbyPrecipField;
+    }
     if (_skipCmaxNoiseFilters) {
       return frame.precipAtPoint || frame.precip;
     }
@@ -2126,6 +2139,19 @@ class RadarNowcastContext {
 
   /// Radarový šum — izolované bodky bez súdržnosti (Hlohovec / Košice).
   bool get _isRadarNoiseOnly {
+    if (fromRainViewer) {
+      if (_confirmedRainAtPinCore || precipNow) return false;
+      if (_rainViewerTrajectoryIncoming || _rainViewerNearbyPrecipField) {
+        return false;
+      }
+      final frame = latest;
+      if (frame == null) return true;
+      if (frame.precipAtPoint) return false;
+      // Slabé / vzdialené echo bez príchodu — nie „zrážky v okolí“.
+      return frame.precip ||
+          (frame.peakDbz ?? 0) >= kRainViewerLegendMinDbz ||
+          (_maxNearbyDbz ?? 0) >= kRainViewerLegendMinDbz;
+    }
     if (_skipCmaxNoiseFilters) return false;
     if (_confirmedRainAtPinCore) return false;
     if (_staticDistantCellNearMap) return true;
@@ -2219,6 +2245,11 @@ class RadarNowcastContext {
 
   /// Echo nie je izolovaný šum — silné alebo opakované v histórii.
   bool get _echoPersistedOrStrong {
+    if (fromRainViewer) {
+      return _rainViewerTrajectoryIncoming ||
+          _rainViewerNearbyPrecipField ||
+          (latest?.precipAtPoint ?? false);
+    }
     if (_skipCmaxNoiseFilters) {
       final frame = latest;
       if (frame == null) return false;
@@ -2424,36 +2455,6 @@ class RadarNowcastContext {
     }
 
     return _rawCentroidMovingAwayFromPin();
-  }
-
-  /// Stred zachytí len okraj bunky, hlavná masa je inde / odchádza.
-  bool get _fringePrecipAtPoint {
-    if (!_rawPrecipAtPoint) return false;
-    final frame = latest;
-    if (frame == null) return false;
-
-    final center = frame.dbz ?? 0;
-    final peak = frame.peakDbz ?? center;
-
-    if (_precipDepartingRaw) return true;
-
-    if (_rainBandNearPin || _echoEngulfsPin) return false;
-    if (center >= 14 && peak >= 16) return false;
-
-    if (_echoEngulfsPin && center >= 16) return false;
-
-    if (peak - center >= 7) {
-      final dom = _dominantEchoDirection();
-      if (dom != null && dom.dbz > center + 5) {
-        final wetFrames = _recentHistory.where((f) => f.precipAtPoint).length;
-        if (wetFrames <= 2 && peak < 20) return true;
-        final slope = _centerDbzSlopePerMin;
-        if (slope != null && slope < 0 && peak < 22) return true;
-      }
-    }
-
-    if (_echoPassingBySingleCell && center < 28 && peak < 22) return true;
-    return false;
   }
 
   /// Echo v okolí, ale bunka nejde cez pin (iný smer / ustupuje).
@@ -3071,8 +3072,6 @@ class RadarNowcastContext {
   /// ETA pre vzdialenú bunku — podľa smeru, rýchlosti a sily echo.
   int _distantIncomingMinutesEstimate() {
     final approach = _incomingApproach;
-    final nearby = _maxNearbyDbz ?? approach?.dbz ?? 0;
-    final approachDbz = approach?.dbz ?? nearby;
     final center = latest?.dbz ?? 0;
 
     if (approach?.dir != null && history.length >= 3) {
@@ -3177,14 +3176,6 @@ class RadarNowcastContext {
       );
     }
     return start;
-  }
-
-  /// Spätná kompatibilita pre logiku založenú na hodinách (24 h pás).
-  int _incomingArrivalHoursFromNow([DateTime? at]) {
-    final mins = _incomingArrivalMinutesFromNow(at ?? DateTime.now());
-    if (mins < 0) return -1;
-    if (mins <= 15) return 0;
-    return (mins / 60).ceil().clamp(1, 3);
   }
 
   int _incomingPassageMinutes() =>
@@ -3459,6 +3450,10 @@ class RadarNowcastContext {
   }
 
   DateTime? _resolvedPrecipMinuteEnd(DateTime locNow) {
+    if (fromRainViewer) {
+      final nowcastDry = _rainViewerDryAtFromNowcast(locNow);
+      if (nowcastDry != null) return nowcastDry;
+    }
     if (precipNow || _trackerRainActiveAtPin) {
       return _roundLocalTimeToMinutes(
         locNow.add(Duration(minutes: _trackerRemainingMinutesAtPin(locNow))),
@@ -3894,9 +3889,6 @@ class RadarNowcastContext {
     return _trackerSoftIncomingConfirmed;
   }
 
-  /// Potvrdený príchod — nie len echo/šum v okolí.
-  bool get _strictIncomingConfirmed => _trackerIncomingConfirmed;
-
   String _trackerClockLabel(DateTime dt) =>
       '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
 
@@ -4074,11 +4066,6 @@ class RadarNowcastContext {
     );
   }
 
-  String _trackerIntensityTitle(double dbz, {required bool snow}) {
-    if (snow) return 'Sneženie';
-    return 'Dážď';
-  }
-
   DateTime _localHourFloor(DateTime locNow) => DateTime(
         locNow.year,
         locNow.month,
@@ -4206,7 +4193,11 @@ class RadarNowcastContext {
       );
     }
 
-    if (_trackerMapEchoVisible) {
+    final nearbyWatch = fromRainViewer
+        ? (_rainViewerTrajectoryIncoming || _rainViewerNearbyPrecipField)
+        : _trackerMapEchoVisible;
+
+    if (nearbyWatch) {
       final rawDbz = math.max(intensityDbz, _maxNearbyDbz ?? intensityDbz);
       final dbz = fromRainViewer ? rainViewerDbzForUi(rawDbz) : rawDbz;
       return RadarPrecipTrackerInfo(
@@ -4329,53 +4320,6 @@ RadarNowcastContext _contextFromHistory(
   );
 }
 
-bool _latestFramePrecipAtPoint(List<RadarFrameSample> history) =>
-    history.isNotEmpty && history.last.precipAtPoint;
-
-double? _latestCenterDbz(List<RadarFrameSample> history) =>
-    history.isEmpty ? null : history.last.dbz;
-
-List<RadarFrameSample> _pickBestRadarHistory(
-  List<RadarFrameSample>? webHistory,
-  List<RadarFrameSample> httpHistory,
-) {
-  final web = webHistory ?? const <RadarFrameSample>[];
-  final webAtPoint = _latestFramePrecipAtPoint(web);
-  final httpAtPoint = _latestFramePrecipAtPoint(httpHistory);
-
-  if (webAtPoint && !httpAtPoint) return web;
-  if (httpAtPoint && !webAtPoint) return httpHistory;
-  if (webAtPoint && httpAtPoint) {
-    final webDbz = _latestCenterDbz(web) ?? 0;
-    final httpDbz = _latestCenterDbz(httpHistory) ?? 0;
-    return webDbz >= httpDbz ? web : httpHistory;
-  }
-
-  final webPeak = web.isEmpty ? 0.0 : (web.last.peakDbz ?? web.last.dbz ?? 0);
-  final httpPeak = httpHistory.isEmpty
-      ? 0.0
-      : (httpHistory.last.peakDbz ?? httpHistory.last.dbz ?? 0);
-  if (httpPeak > webPeak + 2) return httpHistory;
-  if (webPeak > httpPeak + 2) return web;
-
-  final webScore =
-      web.isEmpty ? -1 : _radarHistoryWetScore(web);
-  final httpScore =
-      httpHistory.isEmpty ? -1 : _radarHistoryWetScore(httpHistory);
-  if (httpScore > webScore) return httpHistory;
-  if (webScore >= 0 && web.isNotEmpty) return web;
-  if (httpHistory.isNotEmpty) return httpHistory;
-  return web;
-}
-
-RadarNowcastContext _contextFromBestHistories(
-  List<RadarFrameSample>? webHistory,
-  List<RadarFrameSample> httpHistory,
-) {
-  final best = _pickBestRadarHistory(webHistory, httpHistory);
-  return _contextFromHistory(best);
-}
-
 void _storeRadarNowcastCache(GeoCity city, RadarNowcastContext ctx) {
   final key =
       '${city.lat.toStringAsFixed(3)}:${city.lon.toStringAsFixed(3)}:${city.countryCode}';
@@ -4386,48 +4330,6 @@ void _storeRadarNowcastCache(GeoCity city, RadarNowcastContext ctx) {
 
 Future<void> ensureRadarWebViewSamplerInjected(WebViewController controller) async {
   await controller.runJavaScript(_kRadarWebViewSamplerJs);
-}
-
-List<RadarFrameSample>? _parseWebViewRadarHistory(Object? result) {
-  if (result == null) return null;
-  try {
-    var raw = result is String ? result : result.toString();
-    if (raw.startsWith('"') && raw.endsWith('"')) {
-      raw = json.decode(raw) as String;
-    }
-    final decoded = json.decode(raw);
-    if (decoded is! Map) return null;
-    if (decoded['ok'] != true) return null;
-    final frames = decoded['frames'];
-    if (frames is! List) return null;
-
-    final out = <RadarFrameSample>[];
-    for (final f in frames) {
-      if (f is! Map) continue;
-      final m = Map<String, dynamic>.from(f);
-      final unix = m['unix'] is int
-          ? m['unix'] as int
-          : int.tryParse('${m['unix']}') ?? 0;
-      if (unix <= 0) continue;
-      double? readDbz(dynamic v) =>
-          v == null ? null : (v is num ? v.toDouble() : double.tryParse('$v'));
-      out.add(RadarFrameSample(
-        unix: unix,
-        precip: m['precip'] == true,
-        precipAtPoint: m['precipAtPoint'] == true,
-        dbz: readDbz(m['dbz']),
-        peakDbz: readDbz(m['peakDbz']),
-        northDbz: readDbz(m['northDbz']),
-        southDbz: readDbz(m['southDbz']),
-        eastDbz: readDbz(m['eastDbz']),
-        westDbz: readDbz(m['westDbz']),
-      ));
-    }
-    return out.isEmpty ? null : out;
-  } catch (e) {
-    debugPrint('_parseWebViewRadarHistory: $e');
-    return null;
-  }
 }
 
 const String _kRadarWebViewSamplerJs = r'''
@@ -4881,17 +4783,6 @@ int _countDbzAboveInNeighborhood(
     centerPy,
     kRadarCoreSampleRadiusPx,
   );
-}
-
-/// Prší priamo nad pinom alebo v dosahu vzorkovania.
-bool _isPrecipAtPoint({
-  required double? centerDbz,
-  double? peakDbz,
-  int coherentCorePx = 0,
-  int coherentPx14 = 0,
-}) {
-  return (centerDbz ?? 0) >= kRadarMinDbzPrecipNow ||
-      (peakDbz ?? 0) >= kRadarMinDbzPrecipNow;
 }
 
 double? _estimateDbzFromRadarPixel(int r, int g, int b, int a) {
