@@ -10,7 +10,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedSha1 = "B9:C2:3E:69:E6:D7:05:3F:C8:10:18:13:1C:94:C5:8B:7A:5A:78:28"
+$ExpectedSha1 = (Get-Content (Join-Path $PSScriptRoot "play_upload_sha1.txt") |
+    Where-Object { $_ -notmatch '^\s*#' -and $_.Trim() } | Select-Object -Last 1).Trim()
 
 function Get-KeystoreSha1([string]$Path, [string]$StorePass, [string]$Alias) {
     $keytool = Get-Command keytool -ErrorAction Stop
@@ -38,8 +39,11 @@ if (-not [string]::IsNullOrWhiteSpace($SourceDir)) {
     $source = Resolve-Path $SourceDir
     $srcKeystore = Join-Path $source "upload-keystore.jks"
     $srcProps = Join-Path $source "signing.properties"
+    if (-not (Test-Path $srcProps)) {
+        $srcProps = Join-Path $source "key.properties"
+    }
     if (-not (Test-Path $srcKeystore)) { throw "Chýba upload-keystore.jks" }
-    if (-not (Test-Path $srcProps)) { throw "Chýba signing.properties" }
+    if (-not (Test-Path $srcProps)) { throw "Chýba signing.properties alebo key.properties" }
     Copy-Item $srcKeystore $destKeystore -Force
     Copy-Item $srcProps $destProps -Force
     $props = @{}

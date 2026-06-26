@@ -13,3 +13,4 @@ key.properties
 **/*.keystore
 **/*.jks
 signing-backup-*/
+signing-backup-USB/
