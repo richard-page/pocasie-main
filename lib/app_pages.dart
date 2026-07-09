@@ -2445,6 +2445,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
     return ForecastSubpageScaffold(
       title: 'Vyhľadávanie miest',
       wrapBodyInGlass: false,
+      resizeToAvoidBottomInset: false,
       leading: GestureDetector(
           onTap: () {
             if (_editMode) {
@@ -2576,7 +2577,12 @@ class _CitySearchPageState extends State<CitySearchPage> {
         ),
         Expanded(
           child: ListView.separated(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
+            padding: EdgeInsets.fromLTRB(
+              12,
+              0,
+              12,
+              16 + MediaQuery.of(context).viewInsets.bottom,
+            ),
             itemCount: _searchHistory.length,
             separatorBuilder: (_, __) => const SizedBox(height: 8),
             itemBuilder: (_, i) {
@@ -2672,7 +2678,12 @@ class _CitySearchPageState extends State<CitySearchPage> {
     }
 
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+      padding: EdgeInsets.fromLTRB(
+        12,
+        12,
+        12,
+        16 + MediaQuery.of(context).viewInsets.bottom,
+      ),
       itemCount: _results.length,
       separatorBuilder: (_, __) => const SizedBox(height: 6),
       itemBuilder: (_, i) {
@@ -2793,20 +2804,34 @@ class _CitySearchPageState extends State<CitySearchPage> {
   }
 
   List<GeoCity> _finalizeSearchResults(List<GeoCity> cities, String q) {
-    final Map<String, GeoCity> uniqueByDisplayKey = {};
+    final Map<String, GeoCity> uniqueByDedupKey = {};
     for (final c in cities) {
-      final key = _cityDisplayKey(c);
-      final prev = uniqueByDisplayKey[key];
-      if (prev == null || (c.population ?? 0) > (prev.population ?? 0)) {
-        uniqueByDisplayKey[key] = c;
+      final key = _cityDedupKey(c);
+      final prev = uniqueByDedupKey[key];
+      if (prev == null || _preferSearchCity(c, prev)) {
+        uniqueByDedupKey[key] = c;
       }
     }
     final mergedCities =
-        _mergeNearDuplicateCities(uniqueByDisplayKey.values.toList());
+        _mergeNearDuplicateCities(uniqueByDedupKey.values.toList());
     final normalizedQuery = _normalizeSearchPart(q);
     return mergedCities
         .where((c) => _isRelevantCityForQuery(c, normalizedQuery))
         .toList();
+  }
+
+  /// Lepší záznam pri zhode z Open-Meteo + Nominatim (populácia, diakritika, úplnejší kraj).
+  bool _preferSearchCity(GeoCity candidate, GeoCity current) {
+    final candPop = candidate.population ?? 0;
+    final currPop = current.population ?? 0;
+    if (candPop != currPop) return candPop > currPop;
+    if (_hasDiacritics(candidate.name) != _hasDiacritics(current.name)) {
+      return _hasDiacritics(candidate.name);
+    }
+    if (candidate.admin1.length != current.admin1.length) {
+      return candidate.admin1.length > current.admin1.length;
+    }
+    return false;
   }
 
   Future<List<GeoCity>> _searchOpenMeteo(String q) async {
@@ -2923,30 +2948,29 @@ class _CitySearchPageState extends State<CitySearchPage> {
         ])
       : '';
 
-  String _cityDisplayKey(GeoCity c) {
+  /// Kľúč deduplikácie — rovnaké mesto z viacerých API (Košický vs Košický kraj).
+  String _cityDedupKey(GeoCity c) {
     return [
       _normalizeSearchPart(c.name),
-      _normalizeSearchPart(c.admin2),
-      _normalizeSearchPart(c.admin1),
-      _normalizeSearchPart(c.country),
+      _normalizeAdminRegion(c.admin1),
+      _normalizeAdminRegion(c.admin2),
       _normalizeSearchPart(c.countryCode),
-      // rozlíši napr. dve Hlohovce v SR bez zlučovania do jedného riadku
-      (c.lat * 1e5).round(),
-      (c.lon * 1e5).round(),
+      (c.lat * 1e2).round(),
+      (c.lon * 1e2).round(),
     ].join('|');
   }
 
   /// Druhý stupeň deduplikácie pre API varianty typu `Plzeň` vs `Plzen`:
   /// rovnaký názov (bez diakritiky), rovnaký kraj/štát a takmer rovnaké súradnice.
   List<GeoCity> _mergeNearDuplicateCities(List<GeoCity> input) {
-    const double maxLatDiff = 0.25; // ~27 km
-    const double maxLonDiff = 0.25; // ~17-20 km v našich zem. šírkach
+    const double maxLatDiff = 0.08; // ~9 km — rovnaké mesto z dvoch API
+    const double maxLonDiff = 0.08;
 
     final Map<String, List<GeoCity>> groups = <String, List<GeoCity>>{};
     for (final c in input) {
       final key = [
         _normalizeSearchPart(c.name),
-        _normalizeSearchPart(c.admin1),
+        _normalizeAdminRegion(c.admin1),
         _normalizeSearchPart(c.countryCode),
       ].join('|');
       groups.putIfAbsent(key, () => <GeoCity>[]).add(c);
@@ -2967,18 +2991,8 @@ class _CitySearchPageState extends State<CitySearchPage> {
           continue;
         }
 
-        final selectedPop = selected.population ?? 0;
-        final candidatePop = c.population ?? 0;
-        if (candidatePop > selectedPop) {
+        if (_preferSearchCity(c, selected)) {
           selected = c;
-          continue;
-        }
-        if (candidatePop == selectedPop &&
-            !_hasDiacritics(selected.name) &&
-            _hasDiacritics(c.name)) {
-          // Ak je všetko rovnaké, preferujeme názov s diakritikou (`Plzeň` pred `Plzen`).
-          selected = c;
-          continue;
         }
       }
       if (selected != null) out.add(selected);
@@ -3082,6 +3096,16 @@ class _CitySearchPageState extends State<CitySearchPage> {
   String _normalizeSearchPart(String v) {
     final x = _foldDiacritics(v).toLowerCase().trim();
     return x.replaceAll(RegExp(r'\s+'), ' ');
+  }
+
+  /// „Košický kraj“ a „Košický“ → rovnaký kľúč pri deduplikácii.
+  String _normalizeAdminRegion(String v) {
+    var x = _normalizeSearchPart(v);
+    x = x.replaceAll(
+      RegExp(r'\s+(kraj|region|county|oblast|okres|district|kraje)$'),
+      '',
+    );
+    return x.trim();
   }
 
   String _foldDiacritics(String input) {
@@ -3476,6 +3500,483 @@ class _LaunchSplashScreenState extends State<LaunchSplashScreen> {
     );
   }
 }
+
+class VystrahyWebViewPreloader extends ChangeNotifier {
+  VystrahyWebViewPreloader._();
+  static final VystrahyWebViewPreloader instance = VystrahyWebViewPreloader._();
+
+  static const Color pageBg = Color(0xFF091628);
+  static const List<int> _mapResizeInjectDelaysMs = [
+    0,
+    150,
+    400,
+    900,
+    2000,
+    5000,
+    10000,
+  ];
+
+  WebViewController? _controller;
+  bool _warming = false;
+  bool _attachedToPage = false;
+  bool loaded = false;
+  bool loading = false;
+  bool failed = false;
+  Timer? _loadTimeout;
+  final List<Timer> _mapResizeInjectTimers = [];
+  double? _userLat;
+  double? _userLon;
+
+  WebViewController? get controller => _controller;
+  bool get attachedToPage => _attachedToPage;
+
+  void _notifySafely() {
+    final binding = WidgetsBinding.instance;
+    if (binding.schedulerPhase == scheduler.SchedulerPhase.idle) {
+      notifyListeners();
+      return;
+    }
+    binding.addPostFrameCallback((_) {
+      if (hasListeners) notifyListeners();
+    });
+  }
+
+  void warmup() {
+    if (_controller != null || _warming) return;
+    _warming = true;
+    unawaited(_ensureController());
+  }
+
+  void updateUserLocation(double lat, double lon) {
+    if (!coordsWithinSlovakiaVystrahyExtent(lat, lon)) return;
+    _userLat = lat;
+    _userLon = lon;
+    unawaited(_injectLocationMarker());
+  }
+
+  Future<void> _injectLocationMarker() async {
+    final lat = _userLat;
+    final lon = _userLon;
+    final c = _controller;
+    if (lat == null || lon == null || c == null) return;
+    try {
+      await c.runJavaScript(buildVystrahyUserLocationMarkerJs(lat, lon));
+    } catch (_) {}
+  }
+
+  void markAttached() {
+    if (_attachedToPage) return;
+    _attachedToPage = true;
+    _notifySafely();
+  }
+
+  void markDetached() {
+    if (!_attachedToPage) return;
+    _attachedToPage = false;
+    _notifySafely();
+  }
+
+  Widget buildWarmupHost() {
+    final c = _controller;
+    if (c == null || _attachedToPage) return const SizedBox.shrink();
+    return Offstage(
+      child: SizedBox(
+        width: 1,
+        height: 1,
+        child: _VystrahyWarmupWebView(),
+      ),
+    );
+  }
+
+  Future<void> _ensureController() async {
+    if (_controller != null) return;
+
+    late final PlatformWebViewControllerCreationParams params;
+    if (WebViewPlatform.instance is AndroidWebViewPlatform) {
+      params = AndroidWebViewControllerCreationParams();
+    } else {
+      params = const PlatformWebViewControllerCreationParams();
+    }
+
+    final controller = WebViewController.fromPlatformCreationParams(params)
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(pageBg)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (_) => _onLoadStarted(),
+          onPageFinished: (_) => unawaited(_onLoadFinished()),
+          onWebResourceError: (WebResourceError error) {
+            final mainFrame = error.isForMainFrame ?? true;
+            if (!mainFrame) return;
+            _onLoadFailed();
+          },
+        ),
+      );
+
+    if (controller.platform is AndroidWebViewController) {
+      final androidCtrl = controller.platform as AndroidWebViewController;
+      await androidCtrl.setMixedContentMode(MixedContentMode.alwaysAllow);
+    }
+
+    _controller = controller;
+    _notifySafely();
+    await controller.loadRequest(Uri.parse(kMeteoVystrahyUrl));
+  }
+
+  Future<void> _injectMapResize() async {
+    final c = _controller;
+    if (c == null) return;
+    try {
+      await c.runJavaScript(_kVystrahyMobileInjectJs);
+    } catch (_) {}
+    await _injectLocationMarker();
+  }
+
+  void _scheduleMapResizeInject() {
+    for (final timer in _mapResizeInjectTimers) {
+      timer.cancel();
+    }
+    _mapResizeInjectTimers.clear();
+    for (final delayMs in _mapResizeInjectDelaysMs) {
+      _mapResizeInjectTimers.add(
+        Timer(Duration(milliseconds: delayMs), () {
+          unawaited(_injectMapResize());
+        }),
+      );
+    }
+  }
+
+  void _onLoadStarted() {
+    _loadTimeout?.cancel();
+    loading = true;
+    loaded = false;
+    failed = false;
+    _notifySafely();
+    _loadTimeout = Timer(const Duration(seconds: 18), () {
+      if (loading) _onLoadFailed();
+    });
+  }
+
+  Future<void> _onLoadFinished() async {
+    _loadTimeout?.cancel();
+    loading = false;
+    loaded = true;
+    failed = false;
+    _notifySafely();
+    _scheduleMapResizeInject();
+  }
+
+  void _onLoadFailed() {
+    _loadTimeout?.cancel();
+    loading = false;
+    loaded = false;
+    failed = true;
+    _notifySafely();
+  }
+
+  Future<void> reload() async {
+    final c = _controller;
+    if (c == null) {
+      _warming = false;
+      await _ensureController();
+      return;
+    }
+    _onLoadStarted();
+    await c.loadRequest(
+      Uri.parse('$kMeteoVystrahyUrl?_cb=${DateTime.now().millisecondsSinceEpoch}'),
+    );
+  }
+
+  void refreshMapLayout() => _scheduleMapResizeInject();
+
+  Future<void> scrollToTop() async {
+    final c = _controller;
+    if (c == null) return;
+    try {
+      await c.runJavaScript(_kVystrahyScrollToTopJs);
+    } catch (_) {}
+  }
+
+  void prepareForDisplay() {
+    unawaited(scrollToTop());
+    refreshMapLayout();
+    unawaited(_injectLocationMarker());
+  }
+}
+
+class _VystrahyWarmupWebView extends StatelessWidget {
+  const _VystrahyWarmupWebView();
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = VystrahyWebViewPreloader.instance.controller;
+    if (controller == null) return const SizedBox.shrink();
+    return WebViewWidget(controller: controller);
+  }
+}
+
+class MeteoVystrahyPage extends StatefulWidget {
+  final GeoCity city;
+
+  const MeteoVystrahyPage({super.key, required this.city});
+
+  @override
+  State<MeteoVystrahyPage> createState() => _MeteoVystrahyPageState();
+}
+
+class _MeteoVystrahyPageState extends State<MeteoVystrahyPage> {
+  static const Color _pageBg = VystrahyWebViewPreloader.pageBg;
+  final VystrahyWebViewPreloader _preloader = VystrahyWebViewPreloader.instance;
+  bool _pendingDisplayPrep = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _pendingDisplayPrep = !_preloader.loaded;
+    _preloader.updateUserLocation(widget.city.lat, widget.city.lon);
+    _preloader.addListener(_onPreloaderChanged);
+    _preloader.warmup();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _preloader.prepareForDisplay();
+    });
+  }
+
+  @override
+  void dispose() {
+    _preloader.removeListener(_onPreloaderChanged);
+    _preloader.markDetached();
+    super.dispose();
+  }
+
+  void _onPreloaderChanged() {
+    if (!mounted) return;
+    if (_pendingDisplayPrep && _preloader.loaded) {
+      _pendingDisplayPrep = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _preloader.prepareForDisplay();
+      });
+    }
+    final phase = WidgetsBinding.instance.schedulerPhase;
+    if (phase == scheduler.SchedulerPhase.idle) {
+      setState(() {});
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  Future<void> _reload() => _preloader.reload();
+
+  @override
+  Widget build(BuildContext context) {
+    final top = MediaQuery.paddingOf(context).top;
+    final controller = _preloader.controller;
+    final loading = _preloader.loading;
+    final failed = _preloader.failed;
+    return Scaffold(
+      backgroundColor: _pageBg,
+      body: Column(
+        children: [
+          Container(
+            color: const Color(0xFF0D1F35),
+            padding: EdgeInsets.fromLTRB(8, top + 6, 8, 10),
+            child: Row(
+              children: [
+                GestureDetector(
+                  onTap: () => Navigator.of(context).pop(),
+                  child: Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.arrow_back, color: Colors.white, size: 22),
+                  ),
+                ),
+                const Expanded(
+                  child: Text(
+                    'Meteo výstrahy SR',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () => unawaited(_reload()),
+                  child: Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.refresh_rounded, color: Colors.white, size: 22),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (controller != null)
+                  WebViewWidget(
+                    controller: controller,
+                    gestureRecognizers: {
+                      Factory<OneSequenceGestureRecognizer>(
+                        () => EagerGestureRecognizer(),
+                      ),
+                    },
+                  ),
+                if (loading)
+                  const ColoredBox(
+                    color: _pageBg,
+                    child: Center(
+                      child: SizedBox(
+                        width: 32,
+                        height: 32,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.6,
+                          color: Color(0xFF4B9CFF),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (failed && !loading)
+                  ColoredBox(
+                    color: _pageBg,
+                    child: Center(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 28),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.cloud_off_rounded,
+                              size: 48,
+                              color: Colors.white54,
+                            ),
+                            const SizedBox(height: 14),
+                            const Text(
+                              'Mapu výstrah sa nepodarilo načítať.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            FilledButton(
+                              onPressed: () => unawaited(_reload()),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFF3498DB),
+                                foregroundColor: Colors.white,
+                              ),
+                              child: const Text('Skúsiť znova'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+const String _kVystrahyScrollToTopJs = r'''
+(function() {
+  window.scrollTo(0, 0);
+  document.documentElement.scrollTop = 0;
+  document.body.scrollTop = 0;
+})();
+''';
+
+const String _kVystrahyMobileInjectJs = r'''
+(function() {
+  var meta = document.querySelector('meta[name="viewport"]');
+  if (!meta) {
+    meta = document.createElement('meta');
+    meta.setAttribute('name', 'viewport');
+    document.head.appendChild(meta);
+  }
+  meta.setAttribute('content',
+    'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover');
+  document.documentElement.style.height = '100%';
+  document.documentElement.style.margin = '0';
+  document.documentElement.style.padding = '0';
+  document.body.style.margin = '0';
+  document.body.style.padding = '0';
+  document.body.style.minHeight = '100%';
+  document.body.style.webkitTextSizeAdjust = '100%';
+  document.body.style.touchAction = 'manipulation';
+
+  function findLeafletMap(el) {
+    if (!el) return null;
+    try {
+      if (el._leaflet) return el._leaflet;
+      var keys = Object.keys(el);
+      for (var i = 0; i < keys.length; i++) {
+        if (keys[i].indexOf('leaflet') === 0 && el[keys[i]] && el[keys[i]].invalidateSize) {
+          return el[keys[i]];
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function resizeVystrahyMap() {
+    var wrapper = document.getElementById('mapWrapper') || document.querySelector('.map-wrapper');
+    var mapEl = document.getElementById('map');
+    if (wrapper && mapEl) {
+      var viewportH = window.innerHeight || document.documentElement.clientHeight || 640;
+      var h = Math.round(Math.max(260, Math.min(420, viewportH * 0.36)));
+      wrapper.style.height = h + 'px';
+      wrapper.style.minHeight = h + 'px';
+      mapEl.style.position = 'absolute';
+      mapEl.style.top = '0';
+      mapEl.style.left = '0';
+      mapEl.style.width = '100%';
+      mapEl.style.height = '100%';
+      mapEl.style.minHeight = h + 'px';
+      mapEl.style.display = 'block';
+    }
+    if (window.dispatchEvent) {
+      window.dispatchEvent(new Event('resize'));
+    }
+    var lm = findLeafletMap(mapEl);
+    if (lm && lm.invalidateSize) {
+      try {
+        lm.invalidateSize({ animate: false, pan: false });
+      } catch (e1) {
+        try { lm.invalidateSize(true); } catch (e2) {}
+      }
+      try {
+        if (typeof prerozdelBounndy === 'function') {
+          prerozdelBounndy();
+        } else if (lm.fitBounds) {
+          lm.fitBounds([[47.73, 16.83], [49.61, 22.58]], { animate: false, padding: [12, 12] });
+        }
+      } catch (e3) {}
+    } else if (typeof prerozdelBounndy === 'function') {
+      try { prerozdelBounndy(); } catch (e4) {}
+    }
+  }
+
+  resizeVystrahyMap();
+})();
+''';
 
 class _SplashScreenContent extends StatelessWidget {
   const _SplashScreenContent();

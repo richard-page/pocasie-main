@@ -17,8 +17,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:onesignal_flutter/onesignal_flutter.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:pocasie/weather_hero_ambient.dart';
 import 'package:pocasie/weather_home_widget.dart';
+import 'package:pocasie/weather_labels_sk.dart';
 import 'package:pocasie/widget_background_refresh.dart';
 import 'package:workmanager/workmanager.dart';
 import 'package:android_intent_plus/android_intent.dart';
@@ -1986,6 +1988,7 @@ Map<String, dynamic> _getDayPartWeather(
   int? utcOffsetSeconds,
   RadarNowcastContext radarNowcast = RadarNowcastContext.inactive,
   bool lightningNearby = false,
+  int? daysFromToday,
 }) {
 
   bool forceDayForBlock = part == 'morning' || part == 'afternoon';
@@ -2100,6 +2103,7 @@ Map<String, dynamic> _getDayPartWeather(
         timeStr: timeStr,
         trimPrecipTail: precipTailTrim[i],
         cloudCoverPercent: ccList != null && i < ccList.length ? ccList[i] : null,
+        daysFromToday: daysFromToday,
       );
 
       codes.add(processed.code);
@@ -2257,13 +2261,19 @@ Map<String, dynamic> _getDayPartWeather(
       : seededFromHourlyFairGrid;
   final bool dailyPrecipSummary = kPrecipitationCodes.contains(dailyWeatherCode) &&
       dailyPrecipProbMax >= kMinPrecipProbPercent;
+  final int wetSignalProbThreshold = daysFromToday != null
+      ? dailyForecastPrecipProbThreshold(daysFromToday)
+      : kMinPrecipProbPercent;
   /// Mokré signály — v pásme 24 h len z finálnych ikon (radar / orez), nie zo surového ECMWF.
   final bool blockShowsWetSignals = codesForPartIcon.any(kPrecipitationCodes.contains) ||
       (codesForPartIcon.isEmpty &&
-          ((maxProbRawInPart >= kMinPrecipProbPercent &&
+          ((maxProbRawInPart >= wetSignalProbThreshold &&
                   maxPrecipRawInPart >= kMeaningfulPrecipMmPerHour) ||
-              (maxProbRawInPart >= kMinPrecipProbPercent &&
-                  sumPrecipRawInPart >= kMeaningfulPrecipMmPerHour)));
+              (maxProbRawInPart >= wetSignalProbThreshold &&
+                  sumPrecipRawInPart >= kMeaningfulPrecipMmPerHour) ||
+              (daysFromToday != null &&
+                  maxProbRawInPart >= wetSignalProbThreshold &&
+                  dailyPrecipSummary)));
 
   final bool partIconsShowPrecip =
       codesForPartIcon.any(kPrecipitationCodes.contains);
@@ -2317,13 +2327,20 @@ Map<String, dynamic> _getDayPartWeather(
       alignPartIconWithHourlyPipeline && !mergedDailyPrecipIntoBlock;
 
   /// Ikona bloku z úseku; pri suchom dni na karte ignorujeme mokré signály z jednotlivých hodín.
+  final double mmForPrecipThreshold = suppressWetDayIcons
+      ? 0.0
+      : (iconMaxMm >= kMeaningfulPrecipMmPerHour
+          ? iconMaxMm
+          : (iconProb >= wetSignalProbThreshold
+              ? displayMmFromPrecipProbability(iconProb)
+              : iconMaxMm));
   final int afterPrecipThreshold = skipBlockAggregateThreshold
       ? blockIconCandidate
       : _weatherIconCodeWithPrecipThreshold(
           blockIconCandidate,
           iconProb,
           cloudCoverPercent: avgCloudInPart,
-          hourlyPrecipitationMm: iconMaxMm,
+          hourlyPrecipitationMm: mmForPrecipThreshold,
           snowfallCm: suppressWetDayIcons ? 0.0 : dailyTotalSnowCm,
         );
   var blockIconCode = _applyDayPartPrecipIconIntensity(

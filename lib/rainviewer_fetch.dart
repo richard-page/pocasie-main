@@ -11,82 +11,95 @@ const Duration _kRainViewerMapsCacheTtl = Duration(seconds: 90);
 
 /// Vzorkovacie okná na 512 px tile (RainViewer lat/lon tile).
 const int kRainViewerCoreRadiusPx = 12;
-const int kRainViewerPeakRadiusPx = 48;
-const int kRainViewerOuterRadiusPx = 96;
-const int kRainViewerDirectionalOffsetPx = 72;
+const int kRainViewerPeakRadiusPx = 64;
+const int kRainViewerOuterRadiusPx = 140;
+const int kRainViewerDirectionalOffsetPx = 110;
 const double kRainViewerMinDbzEcho = 15.0;
 const double kRainViewerMinDbzAtPin = 15.0;
-/// RainViewer legenda — pod 15 dBZ / 0,3 mm/h = žiadne zrážky.
+/// RainViewer legenda — pod 15 dBZ = žiadne zrážky (trace).
 const double kRainViewerLegendMinDbz = 15.0;
-const double kRainViewerLegendDrizzleDbz = 15.0;
-const double kRainViewerLegendLightRainDbz = 20.0;
-const double kRainViewerLegendModerateRainDbz = 30.0;
-const double kRainViewerLegendHeavyRainDbz = 40.0;
-const double kRainViewerLegendLightSnowDbz = 15.0;
-const double kRainViewerLegendModerateSnowDbz = 22.0;
-const double kRainViewerLegendHeavySnowDbz = 30.0;
+/// Trace / mrholenie — zelené pixely na mape (8–12 dBZ).
+const double kRainViewerLegendTraceDbz = 8.0;
+/// Marshall-Palmer škála (dBZ → mm/h): 25→0,1 · 40→1,3 · 50→5,6 · 55→12.
+const double kRainViewerLegendDrizzleDbz = 25.0;
+const double kRainViewerLegendLightRainDbz = 40.0;
+const double kRainViewerLegendModerateRainDbz = 50.0;
+const double kRainViewerLegendHeavyRainDbz = 55.0;
+/// Sneženie — nižšia odrazivosť; prahy podľa ekvivalentnej intenzity.
+const double kRainViewerLegendLightSnowDbz = 20.0;
+const double kRainViewerLegendModerateSnowDbz = 28.0;
+const double kRainViewerLegendHeavySnowDbz = 35.0;
 
-/// mm/h podľa RainViewer legendy (15→0,3 · 20→1,3 · 30→3 · 40→12).
-double rainViewerMmFromDbz(double dbz) {
+const List<({double dbz, double mm})> _kRadarLegendDbzMmStops = [
+  (dbz: 15.0, mm: 0.02),
+  (dbz: 25.0, mm: 0.1),
+  (dbz: 30.0, mm: 0.2),
+  (dbz: 35.0, mm: 0.6),
+  (dbz: 40.0, mm: 1.3),
+  (dbz: 45.0, mm: 2.7),
+  (dbz: 50.0, mm: 5.6),
+  (dbz: 55.0, mm: 12.0),
+  (dbz: 60.0, mm: 24.0),
+  (dbz: 65.0, mm: 50.0),
+  (dbz: 70.0, mm: 100.0),
+];
+
+/// mm/h podľa radarovej legendy (Marshall-Palmer dBZ → mm/h).
+double radarLegendMmFromDbz(double dbz) {
   if (dbz < kRainViewerLegendMinDbz) return 0;
-  if (dbz < kRainViewerLegendLightRainDbz) {
-    return 0.3 +
-        (dbz - kRainViewerLegendDrizzleDbz) /
-            (kRainViewerLegendLightRainDbz - kRainViewerLegendDrizzleDbz) *
-            (1.3 - 0.3);
+  for (var i = 1; i < _kRadarLegendDbzMmStops.length; i++) {
+    final prev = _kRadarLegendDbzMmStops[i - 1];
+    final next = _kRadarLegendDbzMmStops[i];
+    if (dbz <= next.dbz) {
+      final t = (dbz - prev.dbz) / (next.dbz - prev.dbz);
+      return prev.mm + t * (next.mm - prev.mm);
+    }
   }
-  if (dbz < kRainViewerLegendModerateRainDbz) {
-    return 1.3 +
-        (dbz - kRainViewerLegendLightRainDbz) /
-            (kRainViewerLegendModerateRainDbz - kRainViewerLegendLightRainDbz) *
-            (3.0 - 1.3);
-  }
-  if (dbz < kRainViewerLegendHeavyRainDbz) {
-    return 3.0 +
-        (dbz - kRainViewerLegendModerateRainDbz) /
-            (kRainViewerLegendHeavyRainDbz - kRainViewerLegendModerateRainDbz) *
-            (12.0 - 3.0);
-  }
-  return (12.0 + (dbz - kRainViewerLegendHeavyRainDbz) * 0.35)
-      .clamp(12.0, 25.0);
+  return _kRadarLegendDbzMmStops.last.mm;
 }
 
-/// % šanca — od 15 dBZ (mrholenie) min. 50 %; stupne po 10 % podľa legendy.
+/// mm/h podľa RainViewer legendy.
+double rainViewerMmFromDbz(double dbz) => radarLegendMmFromDbz(dbz);
+
+/// % šanca — stupne podľa dBZ na legende.
 int rainViewerProbPercentFromDbz(double dbz) {
   if (dbz < kRainViewerLegendMinDbz) return 0;
-  if (dbz < kRainViewerLegendLightRainDbz) return kMinPrecipProbPercent;
-  if (dbz < kRainViewerLegendModerateRainDbz) return 60;
-  if (dbz < kRainViewerLegendHeavyRainDbz) return 80;
+  if (dbz < kRainViewerLegendDrizzleDbz) return kMinPrecipProbPercent;
+  if (dbz < kRainViewerLegendLightRainDbz) return 55;
+  if (dbz < kRainViewerLegendModerateRainDbz) return 70;
+  if (dbz < kRainViewerLegendHeavyRainDbz) return 85;
   return 90;
 }
 
 /// dBZ z palety — bez umelého znižovania (legenda mapy).
 double rainViewerDbzForUi(double rawDbz) => rawDbz.clamp(0.0, 60.0);
 
-/// Intenzita pri pine — stred pinu; ak je slabý, peak v okolí (legenda od 15 dBZ).
+/// Intenzita pri pine — stred pinu; pri blížiacom sa echo konzervatívne.
 double rainViewerIntensityDbz({
   required double? center,
   required double? peak,
   required bool atPoint,
 }) {
   final c = center ?? 0;
+  if (atPoint) return c;
   final p = peak ?? c;
   if (c >= kRainViewerLegendMinDbz) return c;
-  if (atPoint && p >= kRainViewerLegendMinDbz) return p;
   if (p >= kRainViewerLegendMinDbz) {
-    return math.max(c, math.min(p, c + 5));
+    return math.min(p, c + 4);
   }
   return math.max(c, p);
 }
 
-/// RainViewer neodlišuje dážď od snehu — sneh len pri mraze a silnejšom echo.
+/// RainViewer neodlišuje dážď od snehu — sneh len pri mraze a merateľnom echo.
 bool rainViewerSnowLikely({
   double? tempC,
   double snowfallCm = 0.0,
   double uiDbz = 0,
 }) {
   if (snowfallCm >= 0.1) return true;
-  return tempC != null && tempC <= -1.5 && uiDbz >= 20;
+  return tempC != null &&
+      tempC <= -2.0 &&
+      uiDbz >= kRainViewerLegendMinDbz;
 }
 
 int wmoFromRainViewerDbz(double dbz, {required bool snow}) {
@@ -94,12 +107,14 @@ int wmoFromRainViewerDbz(double dbz, {required bool snow}) {
     if (dbz >= kRainViewerLegendHeavySnowDbz) return 75;
     if (dbz >= kRainViewerLegendModerateSnowDbz) return 73;
     if (dbz >= kRainViewerLegendLightSnowDbz) return 71;
+    if (dbz >= kRainViewerLegendMinDbz) return 51;
     return 51;
   }
   if (dbz >= kRainViewerLegendHeavyRainDbz) return 65;
   if (dbz >= kRainViewerLegendModerateRainDbz) return 63;
   if (dbz >= kRainViewerLegendLightRainDbz) return 61;
-  if (dbz >= kRainViewerLegendMinDbz) return 53;
+  if (dbz >= kRainViewerLegendDrizzleDbz) return 53;
+  if (dbz >= kRainViewerLegendMinDbz) return 51;
   return 51;
 }
 
@@ -392,7 +407,7 @@ Future<RadarFrameSample?> _sampleRainViewerFrameFromBytes(
         px,
         py,
         kRainViewerPeakRadiusPx,
-        12,
+        kRainViewerLegendTraceDbz,
       );
       final coherentCorePx = _rainViewerCountDbzAboveInNeighborhood(
         rgba,
@@ -401,20 +416,22 @@ Future<RadarFrameSample?> _sampleRainViewerFrameFromBytes(
         px,
         py,
         kRainViewerCoreRadiusPx,
-        10,
+        kRainViewerLegendTraceDbz,
       );
 
-      // Len jadro / blízke okolie pinu — nie izolované bunky v 96px diali (šum na mape).
+      // Stred pinu — dážď od 15 dBZ, mrholenie od 8 dBZ so súvislým jadrom.
+      final centerVal = centerDbz ?? 0;
+      final atPoint = centerVal >= kRainViewerLegendMinDbz ||
+          (coherentCorePx >= 1 && centerVal >= kRainViewerLegendTraceDbz);
       final nearbyEcho = (peakInner ?? 0) >= kRainViewerLegendMinDbz;
-      // Len stred pinu (12 px) — nie peak v diali; inak falošný dážď pri suchom mieste.
-      final atPoint = (centerDbz ?? 0) >= kRainViewerLegendMinDbz;
 
       return RadarFrameSample(
         unix: frameUnix,
         precip: nearbyEcho,
         precipAtPoint: atPoint,
-        dbz: centerDbz ?? peakDbz,
+        dbz: centerDbz,
         peakDbz: peakDbz,
+        innerPeakDbz: peakInner,
         coherentPx14: coherentPx12,
         coherentCorePx: coherentCorePx,
         northDbz: sampleRing(0, -kRainViewerDirectionalOffsetPx),

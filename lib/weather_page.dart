@@ -195,17 +195,25 @@ int _dailyMainIconSkyTextCode(WeatherData data, int dayIndex, {bool lightningNea
     apiDailyPrecip,
     apiDailySnow,
     dailyApiProb,
+    dailyWeatherCode: fallbackDailyCode,
+    daysFromToday: dayIndex,
   );
 
-  final showableDayPrecip = dayShowablePrecipFromHourly(h, dateStr);
-  final double effectiveDailyPrecipMm = dailyPrecipMmForIconIntensity(
-    apiDailyPrecip: apiDailyPrecip,
-    hourlySumMm: showableDayPrecip.any ? showableDayPrecip.sumMm : 0.0,
+  final showableDayPrecip = dayShowablePrecipForDailyForecast(
+    h,
+    dateStr,
+    daysFromToday: dayIndex,
   );
   final int effectiveDailyProb = dailyPrecipProbForIconIntensity(
     dailyApiProb: dailyApiProb,
     hourlyStripMaxProb: showableDayPrecip.maxProb,
     hourlyDayMaxProb: hourlyDayMaxPrecipProb(h, dateStr),
+  );
+  final double effectiveDailyPrecipMm = dailyPrecipMmForIconDisplay(
+    apiDailyPrecip: apiDailyPrecip,
+    hourlySumMm: showableDayPrecip.any ? showableDayPrecip.sumMm : 0.0,
+    effectiveDailyProb: effectiveDailyProb,
+    daysFromToday: dayIndex,
   );
 
   final locTime = DateTime.now().toUtc().add(Duration(seconds: data.utcOffsetSeconds ?? 0));
@@ -216,28 +224,32 @@ int _dailyMainIconSkyTextCode(WeatherData data, int dayIndex, {bool lightningNea
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
       dailyTotalSnowCm: apiDailySnow,
       utcOffsetSeconds: utcOff,
-      lightningNearby: lightningNearby);
+      lightningNearby: lightningNearby,
+      daysFromToday: dayIndex);
   final afternoonWeather = _getDayPartWeather(
       dateStr, h, 'afternoon', daily, fallbackDailyCode, effectiveDailyProb, current, locTime,
       suppressWetDayIcons: suppressWetDayIcons,
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
       dailyTotalSnowCm: apiDailySnow,
       utcOffsetSeconds: utcOff,
-      lightningNearby: lightningNearby);
+      lightningNearby: lightningNearby,
+      daysFromToday: dayIndex);
   final eveningWeather = _getDayPartWeather(
       dateStr, h, 'evening', daily, fallbackDailyCode, effectiveDailyProb, current, locTime,
       suppressWetDayIcons: suppressWetDayIcons,
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
       dailyTotalSnowCm: apiDailySnow,
       utcOffsetSeconds: utcOff,
-      lightningNearby: lightningNearby);
+      lightningNearby: lightningNearby,
+      daysFromToday: dayIndex);
   final nightWeather = _getDayPartWeather(
       dateStr, h, 'night', daily, fallbackDailyCode, effectiveDailyProb, current, locTime,
       suppressWetDayIcons: suppressWetDayIcons,
       dailyTotalPrecipMm: effectiveDailyPrecipMm,
       dailyTotalSnowCm: apiDailySnow,
       utcOffsetSeconds: utcOff,
-      lightningNearby: lightningNearby);
+      lightningNearby: lightningNearby,
+      daysFromToday: dayIndex);
 
   return resolveDailyCardMainIconCode(
     displayedDayIcons: displayedDayIcons,
@@ -276,9 +288,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   bool _myLocationEnabled = true;
   /// Zvyšuje sa pri každom „plnom“ načítaní počasia; zastarané odpovede sa neaplikujú (preteky pri zmene modelu / pull refresh).
   int _weatherFetchSerial = 0;
+  int _radarFetchSerial = 0;
   bool _isOffline = false;
   bool _lightningNearby = false;
   RadarNowcastContext _radarNowcastContext = RadarNowcastContext.inactive;
+  String? _radarNowcastContextKey;
   DateTime? _lastRadarStripRefreshAt;
   DateTime? _lastRadarTrackerRefreshAt;
   DateTime? _lastRadarContextUiApplyAt;
@@ -345,6 +359,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
   static const double _kHomeInsightLeadingSize = 36;
   static const double _kHomeInsightLeadingGap = 12;
+  static const double _kHomeQuickActionIconSize = 18;
 
   Widget _homeInsightLeadingSlot(Widget icon) {
     return SizedBox(
@@ -879,7 +894,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(Icons.wb_sunny_outlined, color: Color(0xFFF8D24A), size: 20),
+              const Icon(
+                Icons.wb_sunny_outlined,
+                color: Color(0xFFFFD600),
+                size: _kHomeQuickActionIconSize,
+              ),
               const SizedBox(height: 8),
               Text(
                 warning['title'] ?? '',
@@ -919,8 +938,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
             _homeInsightLeadingSlot(
               const Icon(
                 Icons.wb_sunny_outlined,
-                color: Color(0xFFF8D24A),
-                size: 22,
+                color: Color(0xFFFFD600),
+                size: _kHomeQuickActionIconSize,
               ),
             ),
             const SizedBox(width: _kHomeInsightLeadingGap),
@@ -946,9 +965,22 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     );
   }
 
+  String _radarContextKeyFor(GeoCity city) =>
+      '${city.lat.toStringAsFixed(4)}:${city.lon.toStringAsFixed(4)}';
+
   RadarPrecipTrackerInfo? _radarPrecipTrackerInfoOrNull() {
     final city = currentCity;
     if (city == null || !radarNowcastActiveForCity(city)) return null;
+
+    final ctxKey = _radarContextKeyFor(city);
+    if (_radarNowcastContextKey != ctxKey) {
+      return const RadarPrecipTrackerInfo(
+        phase: RadarPrecipTrackerPhase.loading,
+        title: kRadarTrackerCardTitle,
+        detail: 'Načítavajú sa informácie…',
+        iconCode: 2,
+      );
+    }
 
     final ctx = _radarNowcastContext;
     final hourly = weatherData?.hourly;
@@ -975,8 +1007,15 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       locTime,
       tempC: tempC,
       cloudCoverPercent: cloudCover,
+      ecmwfHourly: hourly,
+      utcOffsetSeconds: weatherData?.utcOffsetSeconds,
     );
-    return stabilizeRadarTrackerInfo(raw, locTime);
+    return stabilizeRadarTrackerInfo(
+      raw,
+      locTime,
+      cityLat: city.lat,
+      cityLon: city.lon,
+    );
   }
 
   Widget _radarGlassBadge(IconData icon, String label) {
@@ -1060,6 +1099,119 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     return _buildUvWarningCard(uvWarning, compact: false);
   }
 
+  Widget _buildHomeQuickActions() {
+    final showVystrahy = _supportsVystrahyForCity(currentCity);
+    final chartLabel = weatherData?.daily != null && weatherData!.daily!.time.isNotEmpty
+        ? 'Graf 16 dní'
+        : 'Graf';
+
+    Widget item({
+      required IconData icon,
+      required String label,
+      required VoidCallback onTap,
+    }) {
+      return Expanded(
+        child: InkWell(
+          borderRadius: BorderRadius.circular(999),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, color: Colors.white, size: _kHomeQuickActionIconSize),
+                const SizedBox(height: 4),
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    final children = <Widget>[];
+
+    if (showVystrahy) {
+      children.add(
+        item(
+          icon: Icons.warning_amber_rounded,
+          label: 'Výstrahy',
+          onTap: () {
+            final city = currentCity;
+            if (city == null) return;
+            VystrahyWebViewPreloader.instance
+                .updateUserLocation(city.lat, city.lon);
+            VystrahyWebViewPreloader.instance.markAttached();
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!context.mounted) return;
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => MeteoVystrahyPage(city: city),
+                ),
+              );
+            });
+          },
+        ),
+      );
+    }
+
+    children.addAll([
+      item(
+        icon: Icons.grass_rounded,
+        label: 'Peľ',
+        onTap: () {
+          final city = currentCity;
+          if (city == null) return;
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => PollenForecastPage(
+                city: city,
+                aqiData: airQualityData ?? AirQualityData(),
+              ),
+            ),
+          );
+        },
+      ),
+      item(
+        icon: Icons.bar_chart_rounded,
+        label: chartLabel,
+        onTap: _openWeatherChart,
+      ),
+    ]);
+
+    return _heroGlassCard(
+      withShadow: false,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Row(
+          children: [
+            for (int i = 0; i < children.length; i++) ...[
+              if (i > 0)
+                Container(
+                  width: 1,
+                  height: 28,
+                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                  color: Colors.white.withValues(alpha: 0.14),
+                ),
+              children[i],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _refreshLightningForCity(GeoCity city) async {
     try {
       final near = await lightningDetectedNear(city.lat, city.lon);
@@ -1112,16 +1264,28 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     if (!radarNowcastActiveForCity(city)) {
       if (!mounted) return;
       if (_radarNowcastContext.eligible) {
-        setState(() => _radarNowcastContext = RadarNowcastContext.inactive);
+        setState(() {
+          _radarNowcastContext = RadarNowcastContext.inactive;
+          _radarNowcastContextKey = null;
+        });
       }
       return;
     }
+    final int fetchSerial = ++_radarFetchSerial;
+    final String ctxKey = _radarContextKeyFor(city);
     try {
       final ctx = await _fetchRadarNowcastForCity(city);
-      if (!mounted) return;
+      if (!mounted || fetchSerial != _radarFetchSerial) return;
+      final liveCity = currentCity;
+      if (liveCity == null ||
+          (liveCity.lat - city.lat).abs() > 0.0002 ||
+          (liveCity.lon - city.lon).abs() > 0.0002) {
+        return;
+      }
       if (!_radarContextUiNeedsUpdate(ctx)) return;
       setState(() {
         _radarNowcastContext = ctx;
+        _radarNowcastContextKey = ctxKey;
         _lastRadarContextUiApplyAt = DateTime.now();
       });
     } catch (e) {
@@ -1155,6 +1319,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       );
       final aqiFuture = _fetchAirQualityData(citySnap.lat, citySnap.lon, forceRefresh: false);
       final lightningFuture = lightningDetectedNear(citySnap.lat, citySnap.lon);
+      final int radarSerial = ++_radarFetchSerial;
+      final String radarCtxKey = _radarContextKeyFor(citySnap);
       final radarFuture = _fetchRadarNowcastForCity(citySnap);
 
       final data = await weatherFuture;
@@ -1179,6 +1345,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       }
 
       if (!mounted) return;
+      if (radarSerial != _radarFetchSerial) return;
       if (currentCity == null ||
           (currentCity!.lat - citySnap.lat).abs() > 0.0002 ||
           (currentCity!.lon - citySnap.lon).abs() > 0.0002) {
@@ -1190,6 +1357,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         airQualityData = aqiData;
         _lightningNearby = lightningNear;
         _radarNowcastContext = radarCtx;
+        _radarNowcastContextKey = radarCtx.eligible ? radarCtxKey : null;
       });
       await _syncDailySummaryWithLatestData(citySnap, data);
       await _syncEveningSummaryWithLatestData(citySnap, data);
@@ -2207,6 +2375,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         await _syncAllLeadAlerts(offlineStored.data);
         _scheduleWidgetUpdate();
         _setupRadarController(city, forceReload: wasOffline);
+        _syncVystrahyPreloaderForCity(city);
         return;
       }
     }
@@ -2232,6 +2401,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         _expandedStates = [];
         _lightningNearby = false;
         _radarNowcastContext = RadarNowcastContext.inactive;
+        _radarNowcastContextKey = null;
+        resetRadarTrackerStabilizer();
       }
       if (stored != null) {
         weatherData = stored.data;
@@ -2249,6 +2420,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     });
 
     _setupRadarController(city, forceReload: wasOffline);
+    _syncVystrahyPreloaderForCity(city);
 
     try {
       late WeatherData data;
@@ -2277,6 +2449,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         forceRefresh: false,
       );
       final lightningFuture = lightningDetectedNear(city.lat, city.lon);
+      final int radarSerial = ++_radarFetchSerial;
+      final String radarCtxKey = _radarContextKeyFor(city);
       final radarFuture = _fetchRadarNowcastForCity(city);
 
       AirQualityData? aqiData;
@@ -2299,12 +2473,14 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       }
 
       if (!mounted || mySerial != _weatherFetchSerial) return;
+      if (radarSerial != _radarFetchSerial) return;
       await _observeDailyPrecipLatchForCity(city, data);
       setState(() {
         weatherData = data;
         airQualityData = aqiData;
         _lightningNearby = lightningNear;
         _radarNowcastContext = radarCtx;
+        _radarNowcastContextKey = radarCtx.eligible ? radarCtxKey : null;
         isLoading = false;
         _isRefreshing = false;
         _isOffline = false;
@@ -2403,6 +2579,16 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
   bool _supportsRadarForCity(GeoCity? city) =>
       city != null && radarCoverageForCity(city);
+
+  bool _supportsVystrahyForCity(GeoCity? city) =>
+      city != null && cityEligibleForVystrahy(city);
+
+  void _syncVystrahyPreloaderForCity(GeoCity city) {
+    if (!_supportsVystrahyForCity(city)) return;
+    final preloader = VystrahyWebViewPreloader.instance;
+    preloader.warmup();
+    preloader.updateUserLocation(city.lat, city.lon);
+  }
 
   Future<void> _loadNearbyWebcams(GeoCity city) async {
     final cityKey = '${city.lat.toStringAsFixed(3)}:${city.lon.toStringAsFixed(3)}';
@@ -3086,7 +3272,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         final record = _getFirstHourWeatherInfo();
         final tempStr = record.$1;
         final displayCode = record.$4;
-        final descRaw = weatherDescriptionSk(displayCode);
+        final descRaw = weatherDescriptionPinnedSk(displayCode);
         final desc = descRaw.replaceFirstMapped(
           RegExp(r'^[a-záäčďéíĺľňóôŕšťúýž]'),
           (m) => m.group(0)!.toUpperCase(),
@@ -3413,7 +3599,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
             : '--');
     final description = _isOffline
         ? '--'
-        : (weatherDescriptionSk(displayCode))
+        : (weatherDescriptionPinnedSk(displayCode))
             .replaceFirstMapped(RegExp(r'^[a-záäčďéíĺľňóôŕšťúýž]'),
                 (m) => m.group(0)!.toUpperCase());
 
@@ -4232,81 +4418,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
           child: Container(
             color: Colors.transparent,
             padding: const EdgeInsets.fromLTRB(12, 0, 12, _kHomeForecastSectionGap),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () {
-                          if (currentCity != null) {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => PollenForecastPage(
-                                  city: currentCity!,
-                                  aqiData: airQualityData ?? AirQualityData(),
-                                ),
-                              ),
-                            );
-                          }
-                        },
-                        child: _heroGlassChip(
-                          height: 42,
-                          child: const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(
-                                Icons.grass_rounded,
-                                color: Colors.white,
-                                size: 18,
-                              ),
-                              SizedBox(width: 8),
-                              Text(
-                                'Peľ',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              SizedBox(width: 6),
-                              Icon(Icons.arrow_forward, color: Colors.white, size: 16),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                GestureDetector(
-                  onTap: _openWeatherChart,
-                  child: _heroGlassChip(
-                    height: 42,
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.bar_chart_rounded, color: Colors.white, size: 18),
-                        const SizedBox(width: 8),
-                        Text(
-                          weatherData?.daily != null && weatherData!.daily!.time.isNotEmpty
-                              ? 'Graf na $kChartForecastDays dní'
-                              : 'Graf predpovede',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        const Icon(Icons.arrow_forward, color: Colors.white, size: 16),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
+            child: _buildHomeQuickActions(),
           ),
         ),
 
@@ -5470,34 +5582,33 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       dateStr,
       apiDailyPrecip,
       apiDailySnow,
-      dailyApiProb,
+      rawDailyApiProb,
       stripState: stripForDay,
       latchedDailyPrecipMm: latchedDailyMm,
       latchedDailyProb: latchedDailyProb,
       dailyWeatherCode: fallbackDailyCode,
+      daysFromToday: dayIndex,
     );
 
-    final showableDayPrecip = dayShowablePrecipFromHourlyAligned(
+    final showableDayPrecip = dayShowablePrecipForDailyForecast(
       h,
       dateStr,
-      stripIcons: stripForDay?.icons,
-      stripPrecipMm: stripForDay?.precipMm,
-      stripProbs: stripForDay?.probs,
+      daysFromToday: dayIndex,
     );
     final ecmwfDayUiSumMm = ecmwfDayUiPrecipSumMm(h, dateStr);
-    final double effectiveDailyPrecipMm = dailyPrecipMmForIconIntensity(
+    final int effectiveDailyProb = dailyPrecipProbForIconIntensity(
+      dailyApiProb: rawDailyApiProb,
+      hourlyStripMaxProb: showableDayPrecip.maxProb,
+      hourlyDayMaxProb: hourlyDayMaxPrecipProb(h, dateStr),
+    );
+    final double effectiveDailyPrecipMm = dailyPrecipMmForIconDisplay(
       apiDailyPrecip: apiDailyPrecip,
       hourlySumMm: math.max(
         showableDayPrecip.any ? showableDayPrecip.sumMm : 0.0,
         ecmwfDayUiSumMm,
       ),
-    );
-    final int effectiveDailyProb = math.max(
-      dailyApiProb,
-      math.max(
-        showableDayPrecip.maxProb,
-        hourlyDayUiMaxPrecipProb(h, dateStr),
-      ),
+      effectiveDailyProb: effectiveDailyProb,
+      daysFromToday: dayIndex,
     );
 
     final morningWeather = _getDayPartWeather(
@@ -5509,7 +5620,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         stripState: stripForDay,
         utcOffsetSeconds: weatherData?.utcOffsetSeconds,
         radarNowcast: radarForDay,
-        lightningNearby: _lightningNearby);
+        lightningNearby: _lightningNearby,
+        daysFromToday: dayIndex);
     final afternoonWeather = _getDayPartWeather(
         dateStr, h, 'afternoon', d, fallbackDailyCode, effectiveDailyProb, current,
         locTime,
@@ -5519,7 +5631,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         stripState: stripForDay,
         utcOffsetSeconds: weatherData?.utcOffsetSeconds,
         radarNowcast: radarForDay,
-        lightningNearby: _lightningNearby);
+        lightningNearby: _lightningNearby,
+        daysFromToday: dayIndex);
     final eveningWeather = _getDayPartWeather(
         dateStr, h, 'evening', d, fallbackDailyCode, effectiveDailyProb, current,
         locTime,
@@ -5529,7 +5642,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         stripState: stripForDay,
         utcOffsetSeconds: weatherData?.utcOffsetSeconds,
         radarNowcast: radarForDay,
-        lightningNearby: _lightningNearby);
+        lightningNearby: _lightningNearby,
+        daysFromToday: dayIndex);
     final nightWeather = _getDayPartWeather(
         dateStr, h, 'night', d, fallbackDailyCode, effectiveDailyProb, current,
         locTime,
@@ -5539,9 +5653,10 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         stripState: stripForDay,
         utcOffsetSeconds: weatherData?.utcOffsetSeconds,
         radarNowcast: radarForDay,
-        lightningNearby: _lightningNearby);
+        lightningNearby: _lightningNearby,
+        daysFromToday: dayIndex);
 
-    final dailyMainIconCode = finalizeDailyCardIconCode(
+    var dailyMainIconCode = finalizeDailyCardIconCode(
       resolveDailyCardMainIconCode(
         displayedDayIcons: displayedDayIcons,
         fallbackCode: fallbackDailyCode,
@@ -5588,12 +5703,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         }
       }
     }
-
-    Widget mainIcon = getWeatherIcon(
-      dailyMainIconCode,
-      forceDay: true,
-      size: 48,
-    );
 
     final avgHum = count > 0 ? (sumHum / count).round() : null;
     final avgPress = count > 0 ? (sumPress / count).round() : null;
@@ -5688,6 +5797,51 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     );
     final displayMm = footerPrecip.mm;
     final footerProb = footerPrecip.prob;
+
+    if (!dailyCardShowsWetPrecip(
+      trustedMm: displayMm,
+      trustedProb: footerProb,
+      snowfallCm: apiDailySnow,
+    )) {
+      dailyMainIconCode = dailyCardIconDryUnlessTrusted(
+        dailyMainIconCode,
+        displayMm,
+        footerProb,
+        cloudCover: meanHourlyCloudForDay,
+        snowfallCm: apiDailySnow,
+      );
+      for (final entry in <(String, Map<String, dynamic>)>[
+        ('morning', morningWeather),
+        ('afternoon', afternoonWeather),
+        ('evening', eveningWeather),
+        ('night', nightWeather),
+      ]) {
+        final part = entry.$2;
+        final code = part['iconCode'] as int?;
+        if (code == null) continue;
+        final dried = dailyCardIconDryUnlessTrusted(
+          code,
+          displayMm,
+          footerProb,
+          cloudCover: meanHourlyCloudForDay,
+          snowfallCm: apiDailySnow,
+        );
+        if (dried == code) continue;
+        part['iconCode'] = dried;
+        part['icon'] = getWeatherIcon(
+          dried,
+          size: 38,
+          forceDay: entry.$1 == 'morning' || entry.$1 == 'afternoon',
+          forceNight: entry.$1 == 'night',
+        );
+      }
+    }
+
+    final mainIcon = getWeatherIcon(
+      dailyMainIconCode,
+      forceDay: true,
+      size: 48,
+    );
 
     String precipStr;
     if (partIconsAllDry &&
@@ -6058,23 +6212,36 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
     return Scaffold(
       backgroundColor: Colors.transparent,
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      body: Stack(
         children: [
-          _buildHero(firstHourTemp, firstHourIcon, displayCode),
-          Expanded(
-            child: NotificationListener<ScrollNotification>(
-              onNotification: (notification) => false,
-              child: RefreshIndicator(
-                onRefresh: _onRefresh,
-                backgroundColor: kAmbientBlendColor,
-                color: accentColor,
-                notificationPredicate: (notification) {
-                  return !_isRefreshing && !isLoading;
-                },
-                child: _buildContent(hasData, firstHourTemp, displayCode),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildHero(firstHourTemp, firstHourIcon, displayCode),
+              Expanded(
+                child: NotificationListener<ScrollNotification>(
+                  onNotification: (notification) => false,
+                  child: RefreshIndicator(
+                    onRefresh: _onRefresh,
+                    backgroundColor: kAmbientBlendColor,
+                    color: accentColor,
+                    notificationPredicate: (notification) {
+                      return !_isRefreshing && !isLoading;
+                    },
+                    child: _buildContent(hasData, firstHourTemp, displayCode),
+                  ),
+                ),
               ),
-            ),
+            ],
+          ),
+          ListenableBuilder(
+            listenable: VystrahyWebViewPreloader.instance,
+            builder: (context, _) {
+              if (!_supportsVystrahyForCity(currentCity)) {
+                return const SizedBox.shrink();
+              }
+              return VystrahyWebViewPreloader.instance.buildWarmupHost();
+            },
           ),
         ],
       ),

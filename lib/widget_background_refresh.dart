@@ -7,6 +7,7 @@ import 'package:workmanager/workmanager.dart';
 
 import 'package:pocasie/openmeteo_widget_fetch.dart';
 import 'package:pocasie/weather_home_widget.dart';
+import 'package:pocasie/weather_labels_sk.dart';
 
 const String _kLastLocationKey = 'last_location_v7';
 const String _kWindUnitKey = 'wind_unit_v1';
@@ -92,7 +93,9 @@ Future<void> _refreshHomeWidgetInBackground() async {
 
   final int displayCode = widgetEffectiveWeatherCodeFromForecast(forecast);
 
-  final desc = _capitalizeSk(_wmoDescriptionSk(displayCode));
+  final desc = _capitalizeSk(
+    simplifiedPrecipLabelSk(displayCode) ?? _wmoDescriptionSk(displayCode),
+  );
 
   DateTime locNow;
   try {

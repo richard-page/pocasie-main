@@ -520,6 +520,7 @@ class ForecastSubpageScaffold extends StatelessWidget {
   final String title;
   final Widget body;
   final bool wrapBodyInGlass;
+  final bool resizeToAvoidBottomInset;
   final Widget? leading;
   final List<Widget>? actions;
 
@@ -528,6 +529,7 @@ class ForecastSubpageScaffold extends StatelessWidget {
     required this.title,
     required this.body,
     this.wrapBodyInGlass = true,
+    this.resizeToAvoidBottomInset = true,
     this.leading,
     this.actions,
   });
@@ -538,6 +540,7 @@ class ForecastSubpageScaffold extends StatelessWidget {
       value: _kForecastSubpageSystemUi,
       child: Scaffold(
         backgroundColor: Colors.transparent,
+        resizeToAvoidBottomInset: resizeToAvoidBottomInset,
         appBar: _forecastSubpageAppBar(
           title: title,
           leading: leading ?? _forecastSubpageBackButton(context),
