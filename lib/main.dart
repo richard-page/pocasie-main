@@ -787,18 +787,23 @@ const double _kIconMeaningfulSnowCm = 0.1;
 bool _belowMeaningfulPrecipAmountForIcon(double liquidMm, double snowfallCm) =>
     liquidMm < _kIconMeaningfulLiquidMm && snowfallCm < _kIconMeaningfulSnowCm;
 
-/// Zrážková ikona: mm ≥ 0,1 **a** šanca ≥ 50 % (rovnaké pravidlo ako ostatné ECMWF appky).
+/// Zrážková ikona v 24 h — mm + %, alebo šanca ≥ 50 % s WMO zrážkou / odhadom z %.
 bool _precipIconShowsForHour(
   int precipProbabilityPercent,
   double liquidMm,
   double snowfallCm, {
   required bool wmoPrecipCode,
+  int? apiWeatherCode,
 }) {
   if (snowfallCm >= _kIconMeaningfulSnowCm &&
       precipProbabilityPercent >= kMinPrecipProbPercent) {
     return true;
   }
-  return ecmwfHourPrecipShowsInUi(mm: liquidMm, prob: precipProbabilityPercent);
+  return hourlyPrecipIconWarranted(
+    mm: liquidMm,
+    prob: precipProbabilityPercent,
+    weatherCode: apiWeatherCode,
+  );
 }
 
 /// Pri nízkom mm zobrazíme najľahší stupeň v rodine (slabý dážď / mrholenie).
@@ -835,17 +840,21 @@ int _weatherIconCodeWithPrecipThreshold(
   double? satelliteCloudCoverPercent,
   double? hourlyPrecipitationMm,
   double snowfallCm = 0.0,
+  int? apiWeatherCodeForPrecip,
 }) {
   final double mm = hourlyPrecipitationMm ?? 0.0;
   final double? effectiveCloudCover = satelliteCloudCoverPercent ?? cloudCoverPercent;
   final int code = normalizeDisplayWeatherCode(apiWeatherCode);
+  final int precipSourceCode =
+      normalizeDisplayWeatherCode(apiWeatherCodeForPrecip ?? apiWeatherCode);
   final bool thunderCode = code == 95 || code == 96 || code == 99;
-  final bool precipCode = kPrecipitationCodes.contains(code);
+  final bool precipCode = kPrecipitationCodes.contains(precipSourceCode);
   final bool precipConfirmed = _precipIconShowsForHour(
     precipProbabilityPercent,
     mm,
     snowfallCm,
     wmoPrecipCode: precipCode,
+    apiWeatherCode: precipSourceCode,
   );
   final bool onlyTrace = _belowMeaningfulPrecipAmountForIcon(mm, snowfallCm);
 
@@ -1109,7 +1118,10 @@ int _hourlySlotRawDisplayIconCode(
   int smoothedIndex,
 ) {
   if (smoothedIndex >= smoothed.weatherCodes.length) return 0;
-  final int displayCode = smoothed.weatherCodes[smoothedIndex] ?? 0;
+  final int smoothedCode = smoothed.weatherCodes[smoothedIndex] ?? 0;
+  final int apiCode = h.weatherCode != null && index < h.weatherCode!.length
+      ? (h.weatherCode![index] ?? smoothedCode)
+      : smoothedCode;
   final bool hasPrecipProbData = h.precipitationProbability != null &&
       index < h.precipitationProbability!.length;
   final int rawProbPercent =
@@ -1148,11 +1160,12 @@ int _hourlySlotRawDisplayIconCode(
       ? smoothed.precipitation[smoothedIndex]
       : null;
   final code = _weatherIconCodeWithPrecipThreshold(
-    displayCode,
+    apiCode,
     rawProbPercent,
     cloudCoverPercent: slotCloudMed,
     hourlyPrecipitationMm: slotMm,
     snowfallCm: 0.0,
+    apiWeatherCodeForPrecip: apiCode,
   );
   return _clampPrecipitationIconIntensity(
     code,
@@ -1407,6 +1420,7 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
       iconCode: iconCode,
       precipMm: rawMm,
       precipProb: storedProb,
+      ecmwfApiCode: h.weatherCode?[idx],
     );
     storedProbs[i] = storedProb;
     precipMmList[i] = rawMm;
@@ -1520,6 +1534,7 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
       iconCode: code,
       precipMm: mm,
       precipProb: prob,
+      ecmwfApiCode: apiCode,
     );
   }
 

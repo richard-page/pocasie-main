@@ -4688,6 +4688,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
             iconCode: iconCode,
             precipMm: displayMmRaw,
             precipProb: probForShow,
+            ecmwfApiCode: h.weatherCode?[idx],
           );
       final displayMm = _stabilizeStripPrecipMm(
         hourIdx: idx,
@@ -4701,6 +4702,12 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       var slotIcon = iconCode;
       var slotShowWet = showWetColumn;
       var slotMm = displayMm;
+      var probForPercent = 0;
+      if (hasProb) {
+        probForPercent = h.precipitationProbability![idx] ?? 0;
+      } else if (storedProb > 0) {
+        probForPercent = storedProb;
+      }
 
       if (slotHour != null &&
           !radarCtx.precipNow &&
@@ -4709,26 +4716,30 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         slotIcon = skyWmoFromCloudCover(h.cloudCover?[idx]);
         slotShowWet = false;
         slotMm = 0;
+      } else if (slotHour != null &&
+          radarCtx.eligible &&
+          radarCtx.authorizesPrecipAtLocalHour(slotHour, locTime)) {
+        final pipelineIcon = stripState.icons[idx];
+        final pipelineProb = stripState.probs[idx];
+        final pipelineMm = stripState.precipMm[idx];
+        if (pipelineIcon != null &&
+            kPrecipitationCodes.contains(
+              normalizeDisplayWeatherCode(pipelineIcon),
+            )) {
+          slotIcon = pipelineIcon;
+        }
+        if (pipelineProb != null && pipelineProb > 0) {
+          probForPercent = math.max(probForPercent, pipelineProb);
+        }
+        if (pipelineMm != null && pipelineMm > slotMm) {
+          slotMm = pipelineMm;
+        }
+        slotShowWet = true;
+        probForPercent = math.max(probForPercent, kMinPrecipProbPercent);
       }
 
       displayIcons[i] = slotIcon;
-      var probForPercent = 0;
-      if (slotShowWet || wetIcon) {
-        final radarAtHour = slotHour != null &&
-            radarCtx.authorizesPrecipAtLocalHour(slotHour, locTime);
-        if (radarAtHour && storedProb > 0) {
-          probForPercent = storedProb;
-        } else if (hasProb) {
-          probForPercent = h.precipitationProbability![idx] ?? 0;
-        } else if (storedProb > 0) {
-          probForPercent = storedProb;
-        }
-      }
-      stripStoredProbs.add(
-        probForPercent > 0
-            ? _roundPrecipProbabilityForDisplay(probForPercent)
-            : 0,
-      );
+      stripStoredProbs.add(probForPercent);
       stripPrecipMm.add(slotMm);
       stripShowRainPrecip.add(slotShowWet);
       stripApiWeatherCodes.add(h.weatherCode?[idx]);
@@ -4738,6 +4749,16 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       }
     }
 
+    final rainHoursBeforeStrip = stripSlotHours.isNotEmpty
+        ? rainHoursBeforeHourlyStrip(
+            locTime: locTime,
+            firstSlotHour: stripSlotHours.first,
+            radarCtx: radarCtx,
+            h: h,
+            firstStripDataIndex: stripIndices.first,
+            utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+          )
+        : 0;
     final stripPrecipPercents = hourlyStripPrecipPercentsForHours(
       storedProbs: stripStoredProbs,
       showRainPrecip: stripShowRainPrecip,
@@ -4749,16 +4770,47 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       radarCtx: radarCtx,
       locTime: locTime,
       slotHours: stripSlotHours.length == count ? stripSlotHours : null,
-      rainHoursBeforeStrip: stripSlotHours.isNotEmpty
-          ? rainHoursBeforeHourlyStrip(
-              locTime: locTime,
-              firstSlotHour: stripSlotHours.first,
-              radarCtx: radarCtx,
-              h: h,
-              firstStripDataIndex: stripIndices.first,
-              utcOffsetSeconds: weatherData?.utcOffsetSeconds,
-            )
-          : 0,
+      rainHoursBeforeStrip: rainHoursBeforeStrip,
+    );
+    final stripPastRainHour = List<bool>.generate(
+      count,
+      (i) =>
+          stripShowRainPrecip[i] ||
+          _hourShowsPrecipIcon(displayIcons[i]) ||
+          stripPrecipMm[i] >= kMeaningfulPrecipMmPerHour,
+    );
+
+    if (stripSlotHours.length == count) {
+      applyRadarAuthorizedHourlyStripDisplay(
+        displayIcons: displayIcons,
+        showRainPrecip: stripShowRainPrecip,
+        precipPercents: stripPrecipPercents,
+        precipMm: stripPrecipMm,
+        slotHours: stripSlotHours,
+        apiWeatherCodes: stripApiWeatherCodes,
+        cloudCoverPercents: stripCloudPcts,
+        radarCtx: radarCtx,
+        locTime: locTime,
+        tempC: h.temperature?[stripIndices.first],
+      );
+      applyPostRainDecayToHourlyStrip(
+        displayIcons: displayIcons,
+        showRainPrecip: stripShowRainPrecip,
+        precipPercents: stripPrecipPercents,
+        precipMm: stripPrecipMm,
+        cloudCoverPercents: stripCloudPcts,
+        pastRainHour: stripPastRainHour,
+        rainHoursBeforeStrip: rainHoursBeforeStrip,
+      );
+    }
+
+    alignHourlyStripIconsWithPrecipPercents(
+      displayIcons: displayIcons,
+      showRainPrecip: stripShowRainPrecip,
+      precipPercents: stripPrecipPercents,
+      precipMm: stripPrecipMm,
+      apiWeatherCodes: stripApiWeatherCodes,
+      cloudCoverPercents: stripCloudPcts,
     );
 
     return SliverPadding(

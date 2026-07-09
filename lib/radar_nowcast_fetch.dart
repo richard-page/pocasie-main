@@ -115,8 +115,12 @@ class RadarFrameSample {
 enum RadarPrecipTrackerPhase { idle, loading, watching, active, incoming }
 
 const String kRadarTrackerCardTitle = 'Sledovač radaru';
-const String kRadarTrackerDryNextHourDetail =
-    'Nasledujúcu hodinu sa neočakávajú žiadne zrážky.';
+/// Horizont textu sledovača — nie len 1 h, aby používateľ videl denný prehľad.
+const int kRadarTrackerHorizonHours = 4;
+const String kRadarTrackerDryHorizonDetail =
+    'V najbližších $kRadarTrackerHorizonHours hodinách sa neočakávajú žiadne zrážky.';
+/// Spätná kompatibilita stabilizátora (starý text v cache).
+const String kRadarTrackerDryNextHourDetail = kRadarTrackerDryHorizonDetail;
 
 String _radarTrackerCardDetail(String headline, String body) {
   final h = headline.trim();
@@ -349,7 +353,8 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
 
   if (prev.phase == RadarPrecipTrackerPhase.active &&
       next.phase == RadarPrecipTrackerPhase.watching &&
-      next.detail.contains(kRadarTrackerDryNextHourDetail)) {
+      next.detail.contains(kRadarTrackerDryHorizonDetail) ||
+      next.detail.contains('Nasledujúcu hodinu sa neočakávajú')) {
     _saveTrackerStable(cityKey, next);
     return next;
   }
@@ -493,6 +498,7 @@ class RadarNowcastContext {
     required this.history, 
     this.fromRainViewer = false,
     this.nowcastHistory = const [],
+    this.helkorHistory = const [],
   });
 
   final bool eligible;
@@ -501,6 +507,54 @@ class RadarNowcastContext {
   final bool fromRainViewer;
   /// RainViewer nowcast snímky (budúce časy).
   final List<RadarFrameSample> nowcastHistory;
+  /// Meteo Radar (SHMÚ CMAX cez Helkor) — poistka keď RainViewer nič neukáže.
+  final List<RadarFrameSample> helkorHistory;
+
+  /// Verejný prístup — Helkor echo pre hybrid pás.
+  bool get meteoRadarBackupPrecipSignal => _helkorTrackerPrecipSignal;
+
+  RadarFrameSample? get _helkorLatest =>
+      helkorHistory.isNotEmpty ? helkorHistory.last : null;
+
+  bool _helkorFrameWetAtPin(RadarFrameSample f) {
+    if (f.precipAtPoint || f.precip) return true;
+    final center = f.dbz ?? 0;
+    final peak = f.peakDbz ?? center;
+    if (center >= 14 && peak >= 18) return true;
+    if (peak >= 22 && f.coherentPx14 >= kRadarMinCoherentAreaPx - 2) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _helkorNearbyPrecipField(RadarFrameSample f) {
+    final center = f.dbz ?? 0;
+    final peak = f.peakDbz ?? center;
+    final strength = math.max(center, peak);
+    return strength >= 22 &&
+        (f.coherentPx14 >= 2 || peak >= 26 || f.precip);
+  }
+
+  /// Meteo Radar — echo pri pine alebo výrazné pole v okolí (poistka oproti RainViewer).
+  bool get _helkorTrackerPrecipSignal {
+    if (helkorHistory.isEmpty) return false;
+    for (final f in helkorHistory.reversed.take(4)) {
+      if (_helkorFrameWetAtPin(f) || _helkorNearbyPrecipField(f)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  double get _helkorIntensityDbz {
+    final f = _helkorLatest;
+    if (f == null) return kRadarMinDbzForUi;
+    final center = f.dbz ?? 0;
+    final peak = f.peakDbz ?? center;
+    return math.max(center, peak).clamp(12.0, 56.0);
+  }
+
+  static bool _authorizesPrecipDepthGuard = false;
 
   /// Bez filtrácie šumu — dôverujeme vzorkovaniu radaru (RainViewer aj CMAX).
   bool get _skipCmaxNoiseFilters => true;
@@ -1580,27 +1634,28 @@ class RadarNowcastContext {
     return false;
   }
 
-  /// Echo, ktoré mapa zobrazí pri pine — sledovač len podľa RainViewer (~64 px).
+  /// Echo, ktoré mapa zobrazí pri pine — RainViewer + Meteo Radar poistka.
   bool get _trackerMapEchoVisible {
     final frame = latest;
-    if (frame == null) return false;
-    if (fromRainViewer) {
-      return _rainViewerFrameWetAtPin(frame);
+    if (frame != null && fromRainViewer) {
+      if (_rainViewerFrameWetAtPin(frame)) return true;
+    } else if (frame != null) {
+      if (_skipCmaxNoiseFilters) {
+        if (frame.precipAtPoint || frame.precip) return true;
+      } else {
+        final center = frame.dbz ?? 0;
+        final peak = frame.peakDbz ?? center;
+        if (_rawPrecipAtPoint && center >= 10) return true;
+        if (center >= 14 && peak >= 18) return true;
+        if (peak >= 22 && frame.coherentPx14 >= kRadarMinCoherentAreaPx - 2) {
+          return true;
+        }
+        if (_coherentEchoNearPinRaw() || _realDirectionalFrontApproaching) {
+          return true;
+        }
+      }
     }
-    if (_skipCmaxNoiseFilters) {
-      return frame.precipAtPoint || frame.precip;
-    }
-    final center = frame.dbz ?? 0;
-    final peak = frame.peakDbz ?? center;
-    if (_rawPrecipAtPoint && center >= 10) return true;
-    if (center >= 14 && peak >= 18) return true;
-    if (peak >= 22 && frame.coherentPx14 >= kRadarMinCoherentAreaPx - 2) {
-      return true;
-    }
-    // Len súvislé echo smerujúce k pinu — nie izolované zelené bodky v dialke.
-    if (_coherentEchoNearPinRaw() || _realDirectionalFrontApproaching) {
-      return true;
-    }
+    if (_helkorTrackerPrecipSignal) return true;
     return false;
   }
 
@@ -1775,10 +1830,11 @@ class RadarNowcastContext {
     required bool stripShowsRain,
   }) {
     if (!eligible) return stripShowsRain;
+    // ECMWF už ukazuje dážď v pásme — prístupové % (20→30→40) nesmú zmiznúť kvôli radaru.
+    if (stripShowsRain) return true;
     if (fromRainViewer) {
       return authorizesPrecipAtLocalHour(slotHour, locNow);
     }
-    if (!stripShowsRain) return false;
     return authorizesPrecipAtLocalHour(slotHour, locNow);
   }
 
@@ -2666,7 +2722,7 @@ class RadarNowcastContext {
     if (frame == null) return false;
     if (fromRainViewer) {
       return _rainViewerFrameWetAtPin(frame) ||
-          _rainViewerTrajectoryIncoming ||
+          _rainViewerTrajectoryIncomingCore() ||
           _rainViewerNearbyPrecipField;
     }
     if (_skipCmaxNoiseFilters) {
@@ -4270,6 +4326,16 @@ class RadarNowcastContext {
 
   /// Radar-only / orez: môže slot ukazovať zrážky?
   bool authorizesPrecipAtLocalHour(DateTime slotHour, DateTime locNow) {
+    if (_authorizesPrecipDepthGuard) return false;
+    _authorizesPrecipDepthGuard = true;
+    try {
+      return _authorizesPrecipAtLocalHourImpl(slotHour, locNow);
+    } finally {
+      _authorizesPrecipDepthGuard = false;
+    }
+  }
+
+  bool _authorizesPrecipAtLocalHourImpl(DateTime slotHour, DateTime locNow) {
     if (!eligible) return false;
     if (_precipBandPassedPin && !precipNow) {
       if (!fromRainViewer ||
@@ -4683,14 +4749,14 @@ class RadarNowcastContext {
         locNow.hour,
       );
 
-  /// ECMWF hodina so zrážkami v najbližšej hodine (zarovnané s 24 h pásmom).
-  ({DateTime start, DateTime minuteEnd})? _ecmwfWetWindowWithinNextHour(
+  /// ECMWF hodina so zrážkami v horizonte sledovača (zarovnané s 24 h pásmom).
+  ({DateTime start, DateTime minuteEnd})? _ecmwfWetWindowWithinTrackerHorizon(
     DateTime locNow, {
     HourlyForecast? ecmwfHourly,
     int? utcOffsetSeconds,
   }) {
     if (ecmwfHourly == null || ecmwfHourly.time.isEmpty) return null;
-    final until = locNow.add(const Duration(hours: 1));
+    final until = locNow.add(Duration(hours: kRadarTrackerHorizonHours));
     ({DateTime start, DateTime minuteEnd})? best;
     for (var i = 0; i < ecmwfHourly.time.length; i++) {
       final parsed = DateTime.tryParse(ecmwfHourly.time[i]);
@@ -4721,29 +4787,35 @@ class RadarNowcastContext {
     return best;
   }
 
-  bool _wetExpectedInNextHour(
+  bool _wetExpectedInTrackerHorizon(
     DateTime locNow, {
     HourlyForecast? ecmwfHourly,
     int? utcOffsetSeconds,
   }) {
     if (precipNow || _trackerRainActiveAtPin) return true;
+    if (_helkorTrackerPrecipSignal) return true;
     if (fromRainViewer) {
       if (_rainViewerTrackerPrecipSignalAt(locNow)) return true;
       final nowHour = _localHourFloor(locNow);
-      for (var h = 0; h <= 1; h++) {
+      for (var h = 0; h <= kRadarTrackerHorizonHours; h++) {
         final slot = nowHour.add(Duration(hours: h));
         if (authorizesPrecipAtLocalHour(slot, locNow)) return true;
       }
-      return false;
+      return _ecmwfWetWindowWithinTrackerHorizon(
+            locNow,
+            ecmwfHourly: ecmwfHourly,
+            utcOffsetSeconds: utcOffsetSeconds,
+          ) !=
+          null;
     }
     if (_trackerMapEchoVisible) return true;
     if (incomingPrecip) return true;
     final nowHour = _localHourFloor(locNow);
-    for (var h = 0; h <= 1; h++) {
+    for (var h = 0; h <= kRadarTrackerHorizonHours; h++) {
       final slot = nowHour.add(Duration(hours: h));
       if (authorizesPrecipAtLocalHour(slot, locNow)) return true;
     }
-    return _ecmwfWetWindowWithinNextHour(
+    return _ecmwfWetWindowWithinTrackerHorizon(
           locNow,
           ecmwfHourly: ecmwfHourly,
           utcOffsetSeconds: utcOffsetSeconds,
@@ -4769,7 +4841,7 @@ class RadarNowcastContext {
 
     if (!fromRainViewer) {
       final nowHour = _localHourFloor(locNow);
-      for (var h = 0; h <= 1; h++) {
+      for (var h = 0; h <= kRadarTrackerHorizonHours; h++) {
         final slot = nowHour.add(Duration(hours: h));
         if (!authorizesPrecipAtLocalHour(slot, locNow)) continue;
         final start =
@@ -4784,7 +4856,7 @@ class RadarNowcastContext {
         );
       }
 
-      final ecmwfWindow = _ecmwfWetWindowWithinNextHour(
+      final ecmwfWindow = _ecmwfWetWindowWithinTrackerHorizon(
         locNow,
         ecmwfHourly: ecmwfHourly,
         utcOffsetSeconds: utcOffsetSeconds,
@@ -4813,16 +4885,23 @@ class RadarNowcastContext {
       }
     }
 
-    if (_rainViewerTrackerPrecipSignalAt(locNow)) {
-      final dbz = fromRainViewer
+    if (_rainViewerTrackerPrecipSignalAt(locNow) || _helkorTrackerPrecipSignal) {
+      var dbz = fromRainViewer
           ? rainViewerDbzForUi(
               math.max(intensityDbz, _maxNearbyDbz ?? intensityDbz),
             )
           : math.max(intensityDbz, kRadarMinDbzForUi);
+      if (_helkorTrackerPrecipSignal) {
+        dbz = math.max(dbz, _helkorIntensityDbz);
+      }
+      final detail = _helkorTrackerPrecipSignal &&
+              !(fromRainViewer && _rainViewerTrackerPrecipSignalAt(locNow))
+          ? 'Meteo radar zachytáva zrážky v okolí — sledujem vývoj.'
+          : 'Radar zachytáva zrážky v okolí — sledujem vývoj.';
       return RadarPrecipTrackerInfo(
         phase: RadarPrecipTrackerPhase.watching,
         title: kRadarTrackerCardTitle,
-        detail: 'Radar zachytáva zrážky v okolí — sledujem vývoj.',
+        detail: detail,
         iconCode: _wmoFromRadarIntensity(dbz, snow: snow),
       );
     }
@@ -4830,7 +4909,7 @@ class RadarNowcastContext {
     return RadarPrecipTrackerInfo(
       phase: RadarPrecipTrackerPhase.idle,
       title: kRadarTrackerCardTitle,
-      detail: kRadarTrackerDryNextHourDetail,
+      detail: kRadarTrackerDryHorizonDetail,
       iconCode: skyWmoFromCloudCover(cloudCoverPercent),
     );
   }
@@ -4860,7 +4939,7 @@ class RadarNowcastContext {
         !_trackerMapEchoVisible &&
         !_trackerRainActiveAtPin) {
       resetRadarTrackerStabilizer();
-      if (_wetExpectedInNextHour(
+      if (_wetExpectedInTrackerHorizon(
         locNow,
         ecmwfHourly: ecmwfHourly,
         utcOffsetSeconds: utcOffsetSeconds,
@@ -4877,7 +4956,7 @@ class RadarNowcastContext {
       return RadarPrecipTrackerInfo(
         phase: RadarPrecipTrackerPhase.idle,
         title: kRadarTrackerCardTitle,
-        detail: kRadarTrackerDryNextHourDetail,
+        detail: kRadarTrackerDryHorizonDetail,
         iconCode: skyWmoFromCloudCover(cloudCoverPercent),
       );
     }
@@ -4898,11 +4977,12 @@ class RadarNowcastContext {
     }
 
     if (fromRainViewer &&
-        _rainViewerEchoBypassesPinAt(locNow)) {
+        _rainViewerEchoBypassesPinAt(locNow) &&
+        !_helkorTrackerPrecipSignal) {
       return RadarPrecipTrackerInfo(
         phase: RadarPrecipTrackerPhase.idle,
         title: kRadarTrackerCardTitle,
-        detail: kRadarTrackerDryNextHourDetail,
+        detail: kRadarTrackerDryHorizonDetail,
         iconCode: skyWmoFromCloudCover(cloudCoverPercent),
       );
     }
@@ -4977,7 +5057,7 @@ class RadarNowcastContext {
     final icon = skyWmoFromCloudCover(cloudCoverPercent);
 
     if (_precipBandPassedPin && !_trackerMapEchoVisible) {
-      if (_wetExpectedInNextHour(
+      if (_wetExpectedInTrackerHorizon(
         locNow,
         ecmwfHourly: ecmwfHourly,
         utcOffsetSeconds: utcOffsetSeconds,
@@ -4994,27 +5074,31 @@ class RadarNowcastContext {
       return RadarPrecipTrackerInfo(
         phase: RadarPrecipTrackerPhase.watching,
         title: kRadarTrackerCardTitle,
-        detail: kRadarTrackerDryNextHourDetail,
+        detail: kRadarTrackerDryHorizonDetail,
         iconCode: icon,
       );
     }
 
     if (_echoClearlyOffPath ||
-        (fromRainViewer && _rainViewerEchoBypassesPinAt(locNow))) {
+        (fromRainViewer &&
+            _rainViewerEchoBypassesPinAt(locNow) &&
+            !_helkorTrackerPrecipSignal)) {
       return RadarPrecipTrackerInfo(
         phase: RadarPrecipTrackerPhase.idle,
         title: kRadarTrackerCardTitle,
-        detail: kRadarTrackerDryNextHourDetail,
+        detail: kRadarTrackerDryHorizonDetail,
         iconCode: icon,
       );
     }
 
     if (_hasActiveNearbyEcho && !_significantEchoNearPin && !_rainAtPinCore) {
-      if (fromRainViewer && _rainViewerEchoBypassesPinAt(locNow)) {
+      if (fromRainViewer &&
+          _rainViewerEchoBypassesPinAt(locNow) &&
+          !_helkorTrackerPrecipSignal) {
         return RadarPrecipTrackerInfo(
           phase: RadarPrecipTrackerPhase.idle,
           title: kRadarTrackerCardTitle,
-          detail: kRadarTrackerDryNextHourDetail,
+          detail: kRadarTrackerDryHorizonDetail,
           iconCode: icon,
         );
       }
@@ -5027,11 +5111,16 @@ class RadarNowcastContext {
     }
 
     final nearbyWatch = fromRainViewer
-        ? _rainViewerTrackerPrecipSignalAt(locNow)
-        : _trackerMapEchoVisible;
+        ? (_rainViewerTrackerPrecipSignalAt(locNow) ||
+            _helkorTrackerPrecipSignal)
+        : (_trackerMapEchoVisible || _helkorTrackerPrecipSignal);
 
     if (nearbyWatch) {
-      final rawDbz = math.max(intensityDbz, _maxNearbyDbz ?? intensityDbz);
+      var rawDbz = math.max(intensityDbz, _maxNearbyDbz ?? intensityDbz);
+      if (_helkorTrackerPrecipSignal &&
+          !(fromRainViewer && _rainViewerTrackerPrecipSignalAt(locNow))) {
+        rawDbz = math.max(rawDbz, _helkorIntensityDbz);
+      }
       final dbz = fromRainViewer ? rainViewerDbzForUi(rawDbz) : rawDbz;
       if (fromRainViewer &&
           _rainViewerIncomingLikelyAt(locNow)) {
@@ -5087,7 +5176,7 @@ class RadarNowcastContext {
       );
     }
 
-    if (_wetExpectedInNextHour(
+    if (_wetExpectedInTrackerHorizon(
       locNow,
       ecmwfHourly: ecmwfHourly,
       utcOffsetSeconds: utcOffsetSeconds,
@@ -5105,7 +5194,7 @@ class RadarNowcastContext {
     return RadarPrecipTrackerInfo(
       phase: RadarPrecipTrackerPhase.idle,
       title: kRadarTrackerCardTitle,
-      detail: kRadarTrackerDryNextHourDetail,
+      detail: kRadarTrackerDryHorizonDetail,
       iconCode: icon,
     );
   }
@@ -5146,14 +5235,27 @@ Future<RadarNowcastContext> fetchRadarNowcastContextForCity(GeoCity city) async 
     _radarPngBytesCache.clear();
     _rainViewerTileBytesCache.clear();
 
+    Future<List<RadarFrameSample>> helkorFuture =
+        Future.value(const <RadarFrameSample>[]);
+    if (radarCoverageForCity(city)) {
+      helkorFuture = _fetchRadarFrameHistory(city.lat, city.lon).catchError(
+        (Object e) {
+          debugPrint('fetchRadarNowcastContextForCity helkor parallel: $e');
+          return <RadarFrameSample>[];
+        },
+      );
+    }
+
     var history = await fetchRainViewerFrameHistory(city.lat, city.lon);
     var fromRainViewer = history.isNotEmpty;
     List<RadarFrameSample> nowcast = const [];
     if (fromRainViewer) {
       nowcast = await fetchRainViewerNowcastHistory(city.lat, city.lon);
     }
-    if (!fromRainViewer && radarCoverageForCity(city)) {
-      history = await _fetchRadarFrameHistory(city.lat, city.lon);
+
+    final helkor = await helkorFuture;
+    if (!fromRainViewer && helkor.isNotEmpty) {
+      history = helkor;
       fromRainViewer = false;
     }
 
@@ -5161,6 +5263,7 @@ Future<RadarNowcastContext> fetchRadarNowcastContextForCity(GeoCity city) async 
       history,
       fromRainViewer: fromRainViewer,
       nowcastHistory: nowcast,
+      helkorHistory: helkor,
     );
     _storeRadarNowcastCache(city, ctx);
     return ctx;
@@ -5169,7 +5272,7 @@ Future<RadarNowcastContext> fetchRadarNowcastContextForCity(GeoCity city) async 
     if (radarCoverageForCity(city)) {
       try {
         final history = await _fetchRadarFrameHistory(city.lat, city.lon);
-        final ctx = _contextFromHistory(history);
+        final ctx = _contextFromHistory(history, helkorHistory: history);
         _storeRadarNowcastCache(city, ctx);
         return ctx;
       } catch (fallbackError) {
@@ -5213,13 +5316,21 @@ RadarNowcastContext _contextFromHistory(
   List<RadarFrameSample> history, {
   bool fromRainViewer = false,
   List<RadarFrameSample> nowcastHistory = const [],
+  List<RadarFrameSample> helkorHistory = const [],
 }) {
-  if (history.isEmpty) return RadarNowcastContext.inactive;
+  if (history.isEmpty && helkorHistory.isEmpty) {
+    return RadarNowcastContext.inactive;
+  }
+  if (history.isEmpty) {
+    history = helkorHistory;
+    fromRainViewer = false;
+  }
   return RadarNowcastContext(
     eligible: true,
     history: history,
     fromRainViewer: fromRainViewer,
     nowcastHistory: nowcastHistory,
+    helkorHistory: helkorHistory,
   );
 }
 
