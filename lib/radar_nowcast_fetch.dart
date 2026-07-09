@@ -51,20 +51,46 @@ const List<_RadarCmaxStop> _kRadarCmaxLegendStops = [
   _RadarCmaxStop(56, 252, 176, 252),
 ];
 
-/// Počet snímok z [radar_history_cmax.json] — server ~5 min interval, typicky až ~24 (= cca 2 h).
+/// Počet snímok z [radar_history_cmax.json] — server ~5 min interval.
 const int kRadarHistoryFramesMin = 3;
 const int kRadarHistoryFramesMax = 24;
-const int kRadarHistoryFramesToSample = kRadarHistoryFramesMax;
+/// Počet snímok na prvý fetch — menej RAM / menej paralelných PNG dekódov.
+const int kRadarHistoryFramesToSample = 5;
 /// Trend / transient — len posledných N snímok, aby stará dažďová hodina neskresľovala stav.
 const int kRadarNowcastTrendFrames = 10;
-const Duration _kRadarNowcastCacheTtl = Duration(seconds: 50);
-const Duration kRadarTrackerPhaseHoldInterval = Duration(minutes: 4);
-const Duration kRadarTrackerIncomingToActiveHold = Duration(minutes: 4);
+const Duration _kRadarNowcastCacheTtl = Duration(seconds: 120);
+const Duration kRadarTrackerPhaseHoldInterval = Duration(minutes: 5);
+const Duration kRadarTrackerIncomingToActiveHold = Duration(minutes: 5);
 const int kRadarTrackerArrivalSmoothMinutes = 15;
-/// Koniec aktívneho dažďa — držíme odhad, kým radar výrazne nezmení výhľad.
-const Duration kRadarTrackerEndHoldInterval = Duration(minutes: 10);
-const int kRadarTrackerEndSmoothMinutes = 12;
-const int kRadarTrackerEndSoonerAdoptMinutes = 5;
+/// Koniec aktívneho dažďa — po zamknutí sa už nemení (len odpočet času).
+const Duration kRadarTrackerEndHoldInterval = Duration(minutes: 30);
+const int kRadarTrackerEndSmoothMinutes = 30;
+const int kRadarTrackerEndSoonerAdoptMinutes = 999;
+const int kRadarTrackerEndMaxStepMinutes = 0;
+const int kRadarTrackerEndEmergencyAdoptMinutes = 999;
+
+/// Obmedzená paralelizácia — inak desiatky PNG dekódov naraz = OOM na emulátore / slabších telefónoch.
+Future<List<T?>> _mapRadarSamplesWithConcurrency<T>(
+  int length,
+  Future<T?> Function(int index) mapper, {
+  int concurrency = 1,
+}) async {
+  if (length <= 0) return const [];
+  final results = List<T?>.filled(length, null);
+  var nextIndex = 0;
+  Future<void> worker() async {
+    while (true) {
+      final i = nextIndex;
+      nextIndex++;
+      if (i >= length) return;
+      results[i] = await mapper(i);
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
+  final workers = math.min(concurrency, length);
+  await Future.wait(List.generate(workers, (_) => worker()));
+  return results;
+}
 
 class RadarFrameSample {
   const RadarFrameSample({
@@ -222,21 +248,46 @@ DateTime _roundLocalTimeToMinutes(DateTime dt, {int step = 5}) {
 String _trackerClockLabel(DateTime dt) =>
     '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
 
+DateTime _stepTrackerEndToward(
+  DateTime prev,
+  DateTime next, {
+  required int maxStepMin,
+}) {
+  final delta = next.difference(prev).inMinutes;
+  if (delta.abs() <= maxStepMin) return next;
+  return prev.add(Duration(minutes: delta > 0 ? maxStepMin : -maxStepMin));
+}
+
+/// Zostávajúce minúty — plynulý odpočet od zamknutého času konca.
+int _trackerDisplayRemainingMinutes(DateTime endAt, DateTime locNow) {
+  final roundedNow = _roundLocalTimeToMinutes(locNow);
+  return endAt.difference(roundedNow).inMinutes.clamp(0, 180);
+}
+
+DateTime _trackerDisplayEndTime(DateTime endAt) =>
+    _roundLocalTimeToMinutes(endAt, step: 5);
+
 RadarPrecipTrackerInfo _activeTrackerWithEnd(
   RadarPrecipTrackerInfo base,
   DateTime endAt,
-  DateTime locNow,
-) {
+  DateTime locNow, {
+  bool locked = false,
+}) {
   final snow = kSnowWeatherCodes.contains(base.iconCode);
-  final remainingMin =
-      endAt.difference(_roundLocalTimeToMinutes(locNow)).inMinutes.clamp(5, 180);
-  final endLabel = _trackerClockLabel(endAt);
-  final body = _trackerLastsDetail(
-    snow: snow,
-    endLabel: endLabel,
-    approxMinutes: remainingMin < 55 ? remainingMin : null,
-    approxOneHour: remainingMin >= 52 && remainingMin <= 75,
-  );
+  final displayEnd = locked ? endAt : _trackerDisplayEndTime(endAt);
+  final rawRemaining = _trackerDisplayRemainingMinutes(displayEnd, locNow);
+  final remainingMin = rawRemaining <= 0
+      ? 0
+      : (rawRemaining < 55 ? rawRemaining.clamp(1, 180) : rawRemaining.clamp(5, 180));
+  final endLabel = _trackerClockLabel(displayEnd);
+  final body = remainingMin <= 0
+      ? '${_trackerPrecipSubject(snow: snow)} by mal ustúpiť do $endLabel.'
+      : _trackerLastsDetail(
+          snow: snow,
+          endLabel: endLabel,
+          approxMinutes: remainingMin < 55 ? remainingMin : null,
+          approxOneHour: remainingMin >= 52 && remainingMin <= 75,
+        );
   final headline = _trackerActiveHeadline(0, snow: snow);
   return RadarPrecipTrackerInfo(
     phase: base.phase,
@@ -244,36 +295,72 @@ RadarPrecipTrackerInfo _activeTrackerWithEnd(
     detail: _radarTrackerCardDetail(headline, body),
     iconCode: base.iconCode,
     startLocal: base.startLocal,
-    endLocal: endAt,
+    endLocal: displayEnd,
   );
 }
 
-/// Drží [endLocal] pri aktívnom daždi — mení sa len pri výraznej zmene alebo po hold okne.
+DateTime? _trackerHardLockedEnd(String cityKey) =>
+    _trackerHardLockedEndByCity[cityKey];
+
+void _lockTrackerEnd(String cityKey, DateTime endAt) {
+  final display = _trackerDisplayEndTime(endAt);
+  final existing = _trackerHardLockedEndByCity[cityKey];
+  if (existing == null) {
+    _trackerHardLockedEndByCity[cityKey] = display;
+    return;
+  }
+  if (display.isBefore(existing)) {
+    _trackerHardLockedEndByCity[cityKey] = display;
+  }
+}
+
+void _clearTrackerHardEnd(String cityKey) {
+  _trackerHardLockedEndByCity.remove(cityKey);
+}
+
+RadarPrecipTrackerInfo _applyHardLockedEnd(
+  RadarPrecipTrackerInfo info,
+  String cityKey,
+  DateTime locNow,
+) {
+  if (info.phase != RadarPrecipTrackerPhase.active) {
+    if (info.phase == RadarPrecipTrackerPhase.idle ||
+        info.detail.contains(kRadarTrackerDryHorizonDetail)) {
+      _clearTrackerHardEnd(cityKey);
+    }
+    return info;
+  }
+  final hard = _trackerHardLockedEnd(cityKey);
+  if (hard != null) {
+    return _activeTrackerWithEnd(info, hard, locNow, locked: true);
+  }
+  if (info.endLocal != null) {
+    _lockTrackerEnd(cityKey, info.endLocal!);
+    final locked = _trackerHardLockedEnd(cityKey)!;
+    return _activeTrackerWithEnd(info, locked, locNow, locked: true);
+  }
+  return info;
+}
+
+/// Drží [endLocal] — vždy použije hard-lock ak existuje.
 RadarPrecipTrackerInfo? _stabilizeActiveTrackerEnd(
   RadarPrecipTrackerInfo prev,
   RadarPrecipTrackerInfo next,
   DateTime locNow,
   DateTime now, {
+  required String cityKey,
   DateTime? stablePhaseAt,
 }) {
   if (prev.phase != RadarPrecipTrackerPhase.active ||
       next.phase != RadarPrecipTrackerPhase.active) {
     return null;
   }
+  final hard = _trackerHardLockedEnd(cityKey);
+  if (hard != null) {
+    return _activeTrackerWithEnd(next, hard, locNow, locked: true);
+  }
   final prevEnd = prev.endLocal;
-  final nextEnd = next.endLocal;
-  if (prevEnd == null || nextEnd == null) return null;
-
-  final remainingToPrev =
-      prevEnd.difference(_roundLocalTimeToMinutes(locNow)).inMinutes;
-  if (remainingToPrev <= 2) return next;
-
-  final deltaMin = nextEnd.difference(prevEnd).inMinutes;
-  if (deltaMin <= -kRadarTrackerEndSoonerAdoptMinutes) return next;
-
-  final holdElapsed = stablePhaseAt == null ||
-      now.difference(stablePhaseAt) >= kRadarTrackerEndHoldInterval;
-  if (!holdElapsed || deltaMin.abs() < kRadarTrackerEndSmoothMinutes) {
+  if (prevEnd != null) {
     return _activeTrackerWithEnd(next, prevEnd, locNow);
   }
   return next;
@@ -304,6 +391,8 @@ class RadarPrecipTrackerInfo {
 
 final Map<String, RadarPrecipTrackerInfo> _trackerStableByCity = {};
 final Map<String, DateTime> _trackerStablePhaseAtByCity = {};
+final Map<String, DateTime> _trackerStableEndAtByCity = {};
+final Map<String, DateTime> _trackerHardLockedEndByCity = {};
 
 String _trackerCityKey(double lat, double lon) =>
     '${lat.toStringAsFixed(4)}:${lon.toStringAsFixed(4)}';
@@ -317,10 +406,15 @@ void _saveTrackerStable(
   String cityKey,
   RadarPrecipTrackerInfo info, {
   bool touchPhase = true,
+  bool touchEnd = false,
 }) {
+  final prevInfo = _trackerStableByCity[cityKey];
   _trackerStableByCity[cityKey] = info;
   if (touchPhase) {
     _trackerStablePhaseAtByCity[cityKey] = DateTime.now();
+  }
+  if (touchEnd || prevInfo?.endLocal != info.endLocal) {
+    _trackerStableEndAtByCity[cityKey] = DateTime.now();
   }
 }
 
@@ -336,9 +430,20 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
   final stablePhaseAt = _trackerStablePhaseAtByCity[cityKey];
   final now = DateTime.now();
 
+  final hardEnd = _trackerHardLockedEnd(cityKey);
+  if (hardEnd != null && prev != null && prev.phase == RadarPrecipTrackerPhase.active) {
+    if (next.phase == RadarPrecipTrackerPhase.incoming ||
+        next.phase == RadarPrecipTrackerPhase.watching) {
+      final locked = _activeTrackerWithEnd(prev, hardEnd, locNow, locked: true);
+      _saveTrackerStable(cityKey, locked, touchPhase: false);
+      return locked;
+    }
+  }
+
   if (prev == null) {
-    _saveTrackerStable(cityKey, next);
-    return next;
+    final locked = _applyHardLockedEnd(next, cityKey, locNow);
+    _saveTrackerStable(cityKey, locked, touchEnd: locked.phase == RadarPrecipTrackerPhase.active);
+    return locked;
   }
 
   final upgraded = next.phase == RadarPrecipTrackerPhase.active ||
@@ -347,8 +452,9 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
       prev.phase == RadarPrecipTrackerPhase.incoming;
 
   if (upgraded && !prevWet) {
-    _saveTrackerStable(cityKey, next);
-    return next;
+    final locked = _applyHardLockedEnd(next, cityKey, locNow);
+    _saveTrackerStable(cityKey, locked, touchEnd: locked.phase == RadarPrecipTrackerPhase.active);
+    return locked;
   }
 
   if (prev.phase == RadarPrecipTrackerPhase.active &&
@@ -361,12 +467,22 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
 
   if (prev.phase == RadarPrecipTrackerPhase.active &&
       next.phase == RadarPrecipTrackerPhase.incoming) {
+    if (hardEnd != null) {
+      final locked = _activeTrackerWithEnd(prev, hardEnd, locNow, locked: true);
+      _saveTrackerStable(cityKey, locked, touchPhase: false);
+      return locked;
+    }
     _saveTrackerStable(cityKey, next);
     return next;
   }
 
   if (prev.phase == RadarPrecipTrackerPhase.active &&
       next.phase == RadarPrecipTrackerPhase.watching) {
+    if (hardEnd != null) {
+      final locked = _activeTrackerWithEnd(prev, hardEnd, locNow, locked: true);
+      _saveTrackerStable(cityKey, locked, touchPhase: false);
+      return locked;
+    }
     _saveTrackerStable(cityKey, next);
     return next;
   }
@@ -398,15 +514,23 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
     if (!etaOk || !heldIncoming) {
       return prev;
     }
-    _saveTrackerStable(cityKey, next);
-    return next;
+    final locked = prev.endLocal != null
+        ? _applyHardLockedEnd(
+            _activeTrackerWithEnd(next, prev.endLocal!, locNow),
+            cityKey,
+            locNow,
+          )
+        : _applyHardLockedEnd(next, cityKey, locNow);
+    _saveTrackerStable(cityKey, locked, touchEnd: true);
+    return locked;
   }
 
   if (next.phase == RadarPrecipTrackerPhase.active &&
       prev.phase != RadarPrecipTrackerPhase.incoming &&
       prev.phase != RadarPrecipTrackerPhase.active) {
-    _saveTrackerStable(cityKey, next);
-    return next;
+    final locked = _applyHardLockedEnd(next, cityKey, locNow);
+    _saveTrackerStable(cityKey, locked, touchEnd: true);
+    return locked;
   }
 
   final stabilizedEnd = _stabilizeActiveTrackerEnd(
@@ -414,16 +538,37 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
     next,
     locNow,
     now,
+    cityKey: cityKey,
     stablePhaseAt: stablePhaseAt,
   );
   if (stabilizedEnd != null) {
-    final adoptedNewEnd = stabilizedEnd.endLocal == next.endLocal;
-    _saveTrackerStable(cityKey, stabilizedEnd, touchPhase: adoptedNewEnd);
-    return stabilizedEnd;
+    final locked = _applyHardLockedEnd(stabilizedEnd, cityKey, locNow);
+    final adoptedNewEnd = locked.endLocal != prev.endLocal;
+    _saveTrackerStable(
+      cityKey,
+      locked,
+      touchPhase: adoptedNewEnd,
+      touchEnd: adoptedNewEnd,
+    );
+    return locked;
   }
 
   if (next.phase == RadarPrecipTrackerPhase.active &&
       prev.phase == RadarPrecipTrackerPhase.active) {
+    if (hardEnd != null) {
+      final locked = _activeTrackerWithEnd(next, hardEnd, locNow, locked: true);
+      _saveTrackerStable(cityKey, locked, touchPhase: false);
+      return locked;
+    }
+    if (prev.endLocal != null) {
+      final held = _applyHardLockedEnd(
+        _activeTrackerWithEnd(next, prev.endLocal!, locNow),
+        cityKey,
+        locNow,
+      );
+      _saveTrackerStable(cityKey, held, touchPhase: false);
+      return held;
+    }
     _saveTrackerStable(cityKey, next, touchPhase: false);
     return next;
   }
@@ -483,12 +628,16 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
   }
 
   _saveTrackerStable(cityKey, next, touchPhase: prev.phase != next.phase);
-  return next;
+  return _applyHardLockedEnd(next, cityKey, locNow);
 }
 
-void resetRadarTrackerStabilizer() {
+void resetRadarTrackerStabilizer({bool clearHardEndLock = true}) {
   _trackerStableByCity.clear();
   _trackerStablePhaseAtByCity.clear();
+  _trackerStableEndAtByCity.clear();
+  if (clearHardEndLock) {
+    _trackerHardLockedEndByCity.clear();
+  }
 }
 
 /// Radarový kontext — trend z posledných ~2 h histórie (podľa servera). Cieľ: odhad **kedy zrážky skončia**.
@@ -612,6 +761,28 @@ class RadarNowcastContext {
   bool _rainViewerFrameWetAtPin(RadarFrameSample f) =>
       _rainViewerCellEngulfsPin(f);
 
+  /// Prší priamo na pine (stred ≥ 15 dBZ) — pre odhad konca, nie široké echo v diali.
+  bool _rainViewerFrameRainAtPinCore(RadarFrameSample f) {
+    if (f.precipAtPoint) return true;
+    return (f.dbz ?? 0) >= kRainViewerLegendMinDbz;
+  }
+
+  /// Budúce nowcast snímky s dažďom priamo na pine (prísnejšie než [_rainViewerFrameWetAtPin]).
+  int _rainViewerRainCoreFramesAhead(DateTime locNow) {
+    if (!fromRainViewer || nowcastHistory.isEmpty) return 0;
+    final nowSec = locNow.millisecondsSinceEpoch ~/ 1000;
+    var count = 0;
+    for (final f in nowcastHistory) {
+      if (f.unix <= nowSec) continue;
+      if (_rainViewerFrameRainAtPinCore(f)) {
+        count++;
+      } else {
+        break;
+      }
+    }
+    return count;
+  }
+
   int _rainViewerNowcastFrameIntervalMinutes(DateTime locNow) {
     if (nowcastHistory.length < 2) return 10;
     final nowSec = locNow.millisecondsSinceEpoch ~/ 1000;
@@ -713,7 +884,7 @@ class RadarNowcastContext {
     return nowHour.add(const Duration(hours: 1));
   }
 
-  /// Minútový koniec dažďa pre pás 24 h — rovnaká logika ako karta sledovača (clamp 35 min).
+  /// Minútový koniec dažďa pre pás 24 h — rovnaká logika ako karta sledovača.
   DateTime? stripRainMinuteEndAt(DateTime locNow) =>
       _rainViewerStripRainMinuteEndAt(locNow);
 
@@ -725,7 +896,7 @@ class RadarNowcastContext {
 
     DateTime? end;
     if (precipNow || rainAtPinNow) {
-      final mins = _rainViewerIntensityFallbackMinutes();
+      final mins = _rainViewerIntensityFallbackMinutes(locNow);
       end = _roundLocalTimeToMinutes(
         locNow.add(Duration(minutes: mins)),
       );
@@ -734,57 +905,236 @@ class RadarNowcastContext {
     return end;
   }
 
-  /// Koniec zrážok z nowcastu — čas poslednej mokrej snímky pri pine (ako RainViewer „ústup“).
-  DateTime? _rainViewerDryAtFromNowcast(DateTime locNow) {
-    if (!fromRainViewer || nowcastHistory.isEmpty) return null;
+  /// Významné echo pri pine — pre časovú os ústupu (menej štedré než [_rainViewerFrameWetAtPin]).
+  bool _rainViewerFrameSignificantAtPin(RadarFrameSample f) {
+    if (f.precipAtPoint) return true;
+    final center = f.dbz ?? 0;
+    final peak = f.peakDbz ?? f.innerPeakDbz ?? center;
+    if (center >= kRainViewerLegendMinDbz) return true;
+    if (peak >= 18 && center >= 8) return true;
+    return false;
+  }
+
+  /// Budúce nowcast snímky (lokálny čas).
+  List<RadarFrameSample> _rainViewerFutureNowcastFrames(DateTime locNow) {
+    if (!fromRainViewer || nowcastHistory.isEmpty) return const [];
     final nowSec = locNow.millisecondsSinceEpoch ~/ 1000;
-    DateTime? lastWet;
-    for (final f in nowcastHistory) {
-      if (f.unix <= nowSec) continue;
-      final frameLocal = DateTime.fromMillisecondsSinceEpoch(
+    return nowcastHistory.where((f) => f.unix > nowSec).toList(growable: false);
+  }
+
+  /// Kedy dBZ pri pine klesne pod prah — extrapolácia z nowcast trendu.
+  int? _rainViewerDbzFadeMinutesFromNowcast(DateTime locNow) {
+    final future = _rainViewerFutureNowcastFrames(locNow);
+    if (future.isEmpty) return null;
+
+    final interval = _rainViewerNowcastFrameIntervalMinutes(locNow).toDouble();
+
+    for (var i = 0; i < future.length; i++) {
+      final center = future[i].dbz ?? 0;
+      if (center < kRainViewerLegendMinDbz) {
+        return math.max(2, (i * interval).round());
+      }
+    }
+
+    if (future.length >= 2) {
+      final centers = future.map((f) => f.dbz ?? 0.0).toList();
+      final last = centers.last;
+      final prev = centers[centers.length - 2];
+      final slope = (last - prev) / interval;
+      if (slope < -0.12 && last > kRainViewerLegendTraceDbz) {
+        final mins =
+            ((last - kRainViewerLegendTraceDbz) / (-slope)).ceil();
+        return mins.clamp(3, 60);
+      }
+    }
+    return null;
+  }
+
+  /// Minúty do konca podľa vizuálneho ústupu bunky (kardinálne smery na mape).
+  int _rainViewerSpatialDepartMinutes(DateTime locNow) {
+    if (_trailingEdgeAtPin) return _trailingEdgeMinutesRemaining();
+    if (_echoDepartingFromPin) return _departingRainMinutesLeft();
+
+    final frame = latest;
+    if (frame == null) return -1;
+    final center = frame.dbz ?? 0;
+    if (center < 6 && !frame.precipAtPoint) return -1;
+
+    bool exitTail(double upwind, double downwind) {
+      if (upwind < 18) return false;
+      if (upwind < center - 2) return false;
+      if (upwind >= downwind + 7) return true;
+      return downwind < 12 && upwind >= 20;
+    }
+
+    if (exitTail(frame.westDbz ?? 0, frame.eastDbz ?? 0) ||
+        exitTail(frame.eastDbz ?? 0, frame.westDbz ?? 0) ||
+        exitTail(frame.northDbz ?? 0, frame.southDbz ?? 0) ||
+        exitTail(frame.southDbz ?? 0, frame.northDbz ?? 0)) {
+      return _trailingEdgeMinutesRemaining();
+    }
+    return -1;
+  }
+
+  /// Ešte silnejšie echo smerom k pine — predĺži koniec oproti fixnému fallbacku.
+  int _rainViewerUpwindFeedMinutes(DateTime locNow) {
+    if (_echoDepartingFromPin || _trailingEdgeAtPin) return 0;
+    final frame = latest;
+    if (frame == null) return 0;
+
+    final approach = _incomingApproach ?? _dominantEchoDirection();
+    final dir = approach?.dir;
+    if (dir == null) return 0;
+
+    final upDbz = frame.dbzInDirection(dir);
+    if (upDbz == null || upDbz < 22) return 0;
+
+    final center = frame.dbz ?? 0;
+    if (upDbz < center + 5) return 0;
+
+    final interval = _rainViewerNowcastFrameIntervalMinutes(locNow);
+    final wetFrames = _rainViewerWetNowcastFramesAhead(locNow);
+    return (wetFrames * interval + (upDbz - center) * 0.55).round().clamp(0, 75);
+  }
+
+  /// Koniec zrážok z nowcast časovej osi — posledný dážď pri pine + krátky dobeh.
+  int? _rainViewerEndMinutesFromNowcastTimeline(DateTime locNow) {
+    final future = _rainViewerFutureNowcastFrames(locNow);
+    if (future.isEmpty) return null;
+
+    DateTime? lastRainAtPin;
+    RadarFrameSample? lastRainFrame;
+    for (final f in future) {
+      if (!_rainViewerFrameRainAtPinCore(f)) continue;
+      lastRainAtPin = DateTime.fromMillisecondsSinceEpoch(
         f.unix * 1000,
         isUtc: true,
       ).add(locNow.timeZoneOffset);
-      if (_rainViewerFrameWetAtPin(f)) {
-        lastWet = frameLocal;
-        continue;
+      lastRainFrame = f;
+    }
+
+    if (lastRainAtPin == null) {
+      if (!precipNow && !rainAtPinNow) return 0;
+      if (_echoDepartingFromPin || _trailingEdgeAtPin) {
+        final spatial = _rainViewerSpatialDepartMinutes(locNow);
+        if (spatial >= 0) return spatial.clamp(3, 45);
       }
-      if (lastWet != null) {
-        return _roundLocalTimeToMinutes(lastWet);
+      final slope = _centerDbzSlopePerMin;
+      if (slope != null && slope < -0.05) {
+        return _departingRainMinutesLeft().clamp(3, 25);
+      }
+      return 8;
+    }
+
+    final tailMins =
+        lastRainAtPin.difference(locNow).inMinutes.clamp(0, 180);
+    final lastCenter = lastRainFrame?.dbz ?? kRainViewerLegendMinDbz;
+    final drizzleTail = lastCenter < 18
+        ? 1
+        : (lastCenter < 26 ? 2 : (lastCenter < 34 ? 3 : 5));
+    var withTail = tailMins + drizzleTail;
+
+    final fadeMins = _rainViewerDbzFadeMinutesFromNowcast(locNow);
+    if (fadeMins != null) {
+      withTail = math.min(withTail, fadeMins + drizzleTail);
+    }
+
+    if (_echoDepartingFromPin || _trailingEdgeAtPin) {
+      final spatial = _rainViewerSpatialDepartMinutes(locNow);
+      if (spatial >= 0) {
+        withTail = math.min(withTail, spatial);
       }
     }
-    if (lastWet != null) {
-      return _roundLocalTimeToMinutes(lastWet);
-    }
-    return null;
+
+    return withTail.clamp(3, 180);
   }
 
-  /// Zostávajúce minúty do sucha pri pine — nowcast má prioritu.
+  /// Koniec zrážok z nowcastu — čas poslednej mokrej snímky pri pine (ako RainViewer „ústup“).
+  DateTime? _rainViewerDryAtFromNowcast(DateTime locNow) {
+    final mins = _rainViewerEndMinutesFromNowcastTimeline(locNow);
+    if (mins == null) return null;
+    if (mins <= 0) {
+      return _roundLocalTimeToMinutes(locNow.add(const Duration(minutes: 5)));
+    }
+    return _roundLocalTimeToMinutes(locNow.add(Duration(minutes: mins)));
+  }
+
+  /// Zostávajúce minúty do sucha — fúzia nowcast + ústup bunky + trend dBZ.
   int? _rainViewerMinutesUntilDryAtPin(DateTime locNow) {
     if (!fromRainViewer) return null;
-    final dryAt = _rainViewerDryAtFromNowcast(locNow);
-    if (dryAt != null) {
-      final mins = dryAt.difference(locNow).inMinutes;
-      return mins <= 0 ? 0 : mins;
-    }
-    if (!precipNow && !rainAtPinNow) return 0;
-    if (precipNow || rainAtPinNow) {
-      final slope = _centerDbzSlopePerMin;
-      if (slope != null && slope < -0.08) {
-        return _departingRainMinutesLeft();
-      }
-      return _rainViewerIntensityFallbackMinutes();
-    }
-    return null;
+    if (!precipNow && !rainAtPinNow && !_trackerRainActiveAtPin) return 0;
+    return _trackerEndMinutesFusion(locNow);
   }
 
-  int _rainViewerIntensityFallbackMinutes() {
+  /// Najlepší odhad konca — pri ústupe minimum signálov, inak medián (nie maximum).
+  int _trackerEndMinutesFusion(DateTime locNow) {
+    final estimates = <int>[];
+
+    final timeline = _rainViewerEndMinutesFromNowcastTimeline(locNow);
+    if (timeline != null && timeline > 0) estimates.add(timeline);
+
+    final fade = _rainViewerDbzFadeMinutesFromNowcast(locNow);
+    if (fade != null && fade > 0) estimates.add(fade);
+
+    final spatial = _rainViewerSpatialDepartMinutes(locNow);
+    if (spatial >= 0) estimates.add(spatial);
+
+    final coreFrames = _rainViewerRainCoreFramesAhead(locNow);
+    final interval = _rainViewerNowcastFrameIntervalMinutes(locNow);
+    if (coreFrames == 0 && (precipNow || rainAtPinNow)) {
+      estimates.add(_departingRainMinutesLeft(locNow));
+    } else if (coreFrames > 0) {
+      estimates.add(coreFrames * interval + 2);
+    }
+
+    final slope = _centerDbzSlopePerMin;
+    final center = latest?.dbz;
+    if (slope != null && slope < -0.03 && center != null && center > 10) {
+      estimates.add(((center - 8) / (-slope)).ceil());
+    }
+
+    if (_localizedShowerAtPin && !_steadyWideFront) {
+      estimates.add(_passingCellMinutesRemaining());
+    }
+
+    if (estimates.isEmpty) {
+      return _rainViewerIntensityFallbackMinutes(locNow).clamp(3, 90);
+    }
+
+    estimates.sort();
+    final departing = _echoDepartingFromPin ||
+        _trailingEdgeAtPin ||
+        coreFrames == 0 ||
+        (slope != null && slope < -0.05);
+
+    if (departing) {
+      return estimates.first.clamp(3, 120);
+    }
+    if (estimates.length == 1) {
+      return estimates.first.clamp(5, 120);
+    }
+    if (estimates.length == 2) {
+      return ((estimates[0] + estimates[1]) / 2).round().clamp(5, 120);
+    }
+    return estimates[estimates.length ~/ 2].clamp(5, 120);
+  }
+
+  int _rainViewerIntensityFallbackMinutes([DateTime? locNow]) {
+    final at = locNow ?? DateTime.now();
+    final wetFrames = _rainViewerRainCoreFramesAhead(at);
+    if (wetFrames > 0) {
+      final interval = _rainViewerNowcastFrameIntervalMinutes(at);
+      return (wetFrames * interval + 2).clamp(5, 60);
+    }
+    if (_echoDepartingFromPin || _trailingEdgeAtPin) {
+      return _departingRainMinutesLeft(at).clamp(3, 20);
+    }
     final dbz = precipIntensityDbz;
-    if (dbz >= kRainViewerLegendHeavyRainDbz) return 45;
-    if (dbz >= kRainViewerLegendModerateRainDbz) return 35;
-    if (dbz >= kRainViewerLegendLightRainDbz) return 25;
-    if (dbz >= kRainViewerLegendMinDbz) return 18;
-    return 12;
+    if (dbz >= kRainViewerLegendHeavyRainDbz) return 32;
+    if (dbz >= kRainViewerLegendModerateRainDbz) return 24;
+    if (dbz >= kRainViewerLegendLightRainDbz) return 18;
+    if (dbz >= kRainViewerLegendMinDbz) return 12;
+    return 8;
   }
 
   double _rainViewerIntensityFromFrame(RadarFrameSample f) =>
@@ -2093,30 +2443,35 @@ class RadarNowcastContext {
   }
 
   /// Zostávajúce minúty keď bunka odchádza — pin už na okraji/chvoste.
-  int _trailingEdgeMinutesRemaining() {
+  int _trailingEdgeMinutesRemaining([DateTime? locNow]) {
+    final at = locNow ?? DateTime.now();
     final frame = latest;
     final center = frame?.dbz ?? 0;
     final wet = _wetFramesAtPinTail();
 
-    var mins = center < 16 ? 8 : (center < 22 ? 12 : 15);
-    if (wet >= 5) mins = math.min(mins, 12);
-    if (wet >= 7) mins = math.min(mins, 9);
+    var mins = center < 16 ? 6 : (center < 22 ? 10 : 13);
+    if (wet >= 5) mins = math.min(mins, 10);
+    if (wet >= 7) mins = math.min(mins, 7);
 
     final slope = _centerDbzSlopePerMin;
     if (slope != null && slope < -0.02) {
-      mins = math.min(mins, ((center - 8) / (-slope)).ceil());
+      mins = math.min(mins, ((center - 6) / (-slope)).ceil());
     }
-    if (_echoWeakening) mins = math.min(mins, 10);
+    if (_echoWeakening) mins = math.min(mins, 8);
 
     final peaks = history.map((f) => f.peakDbz ?? f.dbz ?? 0).toList();
     if (peaks.length >= 3) {
       final maxP = peaks.reduce(math.max);
       if (maxP >= 24 && peaks.last <= maxP - 4) {
-        mins = math.min(mins, 8);
+        mins = math.min(mins, 6);
       }
     }
 
-    return mins.clamp(5, 18);
+    if (fromRainViewer && _rainViewerRainCoreFramesAhead(at) == 0) {
+      mins = math.min(mins, 7);
+    }
+
+    return mins.clamp(4, 16);
   }
 
   /// Surový stav pri pine — bez [precipNow] (predchádza stack overflow v reťazci getterov).
@@ -2287,14 +2642,15 @@ class RadarNowcastContext {
     return _passingCellMinutesRemaining().clamp(10, 28);
   }
 
-  /// Zostávajúce minúty zrážok pri pine — nowcast RainViewer, potom trend bunky.
+  /// Zostávajúce minúty zrážok pri pine — fúzia nowcastu, ústupu bunky a trendu.
   int _trackerRemainingMinutesAtPin(DateTime locNow) {
+    if (fromRainViewer && (precipNow || rainAtPinNow || _trackerRainActiveAtPin)) {
+      return _trackerEndMinutesFusion(locNow).clamp(3, 180);
+    }
+
     if (fromRainViewer) {
-      final fromNowcast = _rainViewerMinutesUntilDryAtPin(locNow);
-      if (fromNowcast != null) {
-        if (fromNowcast <= 0) return 0;
-        return fromNowcast.clamp(5, 180);
-      }
+      final dry = _rainViewerMinutesUntilDryAtPin(locNow);
+      if (dry != null) return dry.clamp(0, 180);
     }
 
     if (_precipBandPassedPin || _cellTailPassedPin()) return 0;
@@ -2335,20 +2691,35 @@ class RadarNowcastContext {
     return 35;
   }
 
-  int _departingRainMinutesLeft() {
+  int _departingRainMinutesLeft([DateTime? locNow]) {
+    final at = locNow ?? DateTime.now();
+    if (fromRainViewer) {
+      final coreAhead = _rainViewerRainCoreFramesAhead(at);
+      if (coreAhead == 0) {
+        final center = latest?.dbz ?? 0;
+        final slope = _centerDbzSlopePerMin;
+        if (slope != null && slope < -0.05 && center > 10) {
+          return ((center - 8) / (-slope)).ceil().clamp(3, 15);
+        }
+        if (center < 14) return 4;
+        if (center < 20) return 7;
+        return 9;
+      }
+    }
+
     final center = latest?.dbz ?? 0;
     final slope = _centerDbzSlopePerMin;
 
     if (slope != null && slope < -0.04) {
       final mins = ((center - 8) / (-slope)).ceil();
-      return mins.clamp(5, 22);
+      return mins.clamp(3, 18);
     }
 
-    if (center < 14) return 6;
-    if (center < 20) return 10;
-    if (center < 28) return 14;
-    if (center < 36) return 18;
-    return 20;
+    if (center < 14) return 4;
+    if (center < 20) return 7;
+    if (center < 28) return 10;
+    if (center < 36) return 13;
+    return 16;
   }
 
   /// Prší pri pine — mapa a karta sledovača (miernejšie než strict [precipNow]).
@@ -4661,11 +5032,12 @@ class RadarNowcastContext {
   }) {
     final headline = _trackerActiveHeadline(intensityDbz, snow: snow);
     final iconCode = _wmoFromRadarIntensity(intensityDbz, snow: snow);
-    final remainingMin =
-        _trackerRemainingMinutesAtPin(locNow).clamp(5, 180);
-    final endAt = _roundLocalTimeToMinutes(
-      locNow.add(Duration(minutes: remainingMin)),
+    final rawRemaining = _trackerRemainingMinutesAtPin(locNow).clamp(3, 180);
+    final endAt = _trackerDisplayEndTime(
+      locNow.add(Duration(minutes: rawRemaining)),
     );
+    final remainingMin =
+        _trackerDisplayRemainingMinutes(endAt, locNow).clamp(1, 180);
     final endLabel = _trackerClockLabel(endAt);
     final detail = _trackerLastsDetail(
       snow: snow,
@@ -4938,7 +5310,7 @@ class RadarNowcastContext {
             _isDisorganizedMapNoise) &&
         !_trackerMapEchoVisible &&
         !_trackerRainActiveAtPin) {
-      resetRadarTrackerStabilizer();
+      resetRadarTrackerStabilizer(clearHardEndLock: false);
       if (_wetExpectedInTrackerHorizon(
         locNow,
         ecmwfHourly: ecmwfHourly,
@@ -5232,25 +5604,21 @@ Future<RadarNowcastContext> fetchRadarNowcastContextForCity(GeoCity city) async 
   }
 
   try {
-    _radarPngBytesCache.clear();
-    _rainViewerTileBytesCache.clear();
-
     Future<List<RadarFrameSample>> helkorFuture =
         Future.value(const <RadarFrameSample>[]);
-    if (radarCoverageForCity(city)) {
-      helkorFuture = _fetchRadarFrameHistory(city.lat, city.lon).catchError(
-        (Object e) {
-          debugPrint('fetchRadarNowcastContextForCity helkor parallel: $e');
-          return <RadarFrameSample>[];
-        },
-      );
-    }
 
     var history = await fetchRainViewerFrameHistory(city.lat, city.lon);
     var fromRainViewer = history.isNotEmpty;
     List<RadarFrameSample> nowcast = const [];
     if (fromRainViewer) {
       nowcast = await fetchRainViewerNowcastHistory(city.lat, city.lon);
+    } else if (radarCoverageForCity(city)) {
+      helkorFuture = _fetchRadarFrameHistory(city.lat, city.lon).catchError(
+        (Object e) {
+          debugPrint('fetchRadarNowcastContextForCity helkor: $e');
+          return <RadarFrameSample>[];
+        },
+      );
     }
 
     final helkor = await helkorFuture;
@@ -5520,15 +5888,17 @@ Future<List<RadarFrameSample>> _fetchRadarFrameHistory(
       ? entries.sublist(entries.length - kRadarHistoryFramesToSample)
       : entries;
 
-  final samples = await Future.wait(
-    tail.map((entry) async {
+  final samples = await _mapRadarSamplesWithConcurrency<RadarFrameSample>(
+    tail.length,
+    (i) async {
+      final entry = tail[i];
       final url = entry['url']?.toString();
       final unix = entry['unix_time'] is int
           ? entry['unix_time'] as int
           : int.tryParse('${entry['unix_time']}') ?? 0;
       if (url == null || url.isEmpty || unix <= 0) return null;
       return _sampleRadarFrameFromUrl(url, lat, lon, unix);
-    }),
+    },
   );
   return samples.whereType<RadarFrameSample>().toList();
 }
@@ -5552,7 +5922,7 @@ Future<RadarFrameSample?> _sampleRadarFrameFromUrl(
             Uri.parse(url),
             headers: const {'User-Agent': 'pocasie-app/1.0 (flutter)'},
           )
-          .timeout(const Duration(seconds: 12));
+          .timeout(const Duration(seconds: 6));
       if (response.statusCode != 200) return null;
       bytes = response.bodyBytes;
       if (_radarPngBytesCache.length > 24) _radarPngBytesCache.clear();

@@ -611,7 +611,7 @@ class WeatherChartPage extends StatelessWidget {
               child: Text(
                 _radarAugmentsChart
                     ? 'Denné maximum, minimum a pravdepodobnosť zrážok z Open-Meteo (ECMWF). '
-                        'Ak radar detekuje dážď alebo sneh, dnes sa zobrazí zrážková ikona.'
+                        'Ak radarové snímky detekujú dážď alebo sneženie, zobrazí sa zrážková ikona.'
                     : 'Denné maximum, minimum, pravdepodobnosť zrážok a typ počasia z aktuálnej predpovede Open-Meteo.',
                 textAlign: TextAlign.center,
                 style: TextStyle(

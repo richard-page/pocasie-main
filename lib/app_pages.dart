@@ -3314,7 +3314,7 @@ class FullscreenRadarPage extends StatelessWidget {
                                 ),
                                 const SizedBox(height: 12),
                                 const Text(
-                                  'Radarové snímky sú spracovávané z voľno dostupných dát siete Slovenského hydrometeorologického ústavu (SHMÚ).',
+                                  'Radarové dáta sú spracované z otvorených dát SHMÚ (SK), ČHMÚ (CZ), IMGW (PL), DWD (DE) a ANM (RO).',
                                   textAlign: TextAlign.center,
                                   style: TextStyle(
                                     fontSize: 14,
@@ -3457,13 +3457,13 @@ class _LaunchSplashScreenState extends State<LaunchSplashScreen> {
   }
 
   Future<void> _startMinDelay() async {
-    await Future<void>.delayed(const Duration(milliseconds: 1400));
+    await Future<void>.delayed(const Duration(milliseconds: 700));
     _minTimeElapsed = true;
     _tryHideSplash();
   }
 
   Future<void> _startMaxDelay() async {
-    await Future<void>.delayed(const Duration(seconds: 8));
+    await Future<void>.delayed(const Duration(seconds: 5));
     _maxTimeElapsed = true;
     _tryHideSplash();
   }

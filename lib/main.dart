@@ -178,6 +178,20 @@ void main() async {
 }
 
 Future<void> _initServicesInBackground() async {
+  // Splash a hlavná obrazovka čo najskôr — ťažké služby až potom na pozadí.
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final showOnboarding = !(prefs.getBool(kOnboardingDoneKey) ?? false);
+    _showOnboardingNotifier.value = showOnboarding;
+    _startupReadyNotifier.value = true;
+  } catch (e) {
+    _startupReadyNotifier.value = true;
+  }
+
+  unawaited(_initDeferredServices());
+}
+
+Future<void> _initDeferredServices() async {
   try {
     await SettingsManager.applyAlertDefaultsOffMigrationIfNeeded();
     OneSignal.Debug.setLogLevel(OSLogLevel.none);
@@ -198,15 +212,6 @@ Future<void> _initServicesInBackground() async {
     }
   } catch (e, st) {
     debugPrint('Workmanager init: $e\n$st');
-  }
-
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    final showOnboarding = !(prefs.getBool(kOnboardingDoneKey) ?? false);
-    _showOnboardingNotifier.value = showOnboarding;
-    _startupReadyNotifier.value = showOnboarding;
-  } catch (e) {
-    _startupReadyNotifier.value = true;
   }
 }
 

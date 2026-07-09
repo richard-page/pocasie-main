@@ -296,14 +296,135 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   DateTime? _lastRadarStripRefreshAt;
   DateTime? _lastRadarTrackerRefreshAt;
   DateTime? _lastRadarContextUiApplyAt;
-  static const Duration _kRadarUiRefreshMinInterval = Duration(seconds: 50);
-  static const Duration _kRadarForecastStableInterval = Duration(minutes: 2);
+  static const Duration _kRadarUiRefreshMinInterval = Duration(minutes: 3);
+  static const Duration _kRadarForecastStableInterval = Duration(minutes: 5);
   static const Duration _kStripPrecipMmStableInterval = Duration(minutes: 2);
   static const double _kStripPrecipMmStableDelta = 0.35;
   final Map<int, double> _stableStripPrecipMm = {};
   final Map<int, DateTime> _stableStripPrecipMmAt = {};
   String? _stableStripPrecipCityKey;
   List<bool> _expandedStates = [];
+  (String, Widget, String, int)? _cachedFirstHourInfo;
+  Object? _cachedFirstHourInfoKey;
+  HourlyStripDisplayState? _cachedHourlyStripState;
+  Object? _cachedHourlyStripStateKey;
+
+  void _invalidateDisplayCaches() {
+    _cachedFirstHourInfo = null;
+    _cachedFirstHourInfoKey = null;
+    _cachedHourlyStripState = null;
+    _cachedHourlyStripStateKey = null;
+  }
+
+  Object _firstHourDisplayCacheKey() => (
+        weatherData,
+        _lightningNearby,
+        _radarNowcastContext,
+        currentCity?.lat,
+        currentCity?.lon,
+      );
+
+  Object _hourlyStripDisplayCacheKey() => (
+        weatherData,
+        _radarNowcastContext,
+        _lightningNearby,
+        currentCity?.lat,
+        currentCity?.lon,
+        activeTab,
+      );
+
+  Future<void> _applySecondaryWeatherSignals({
+    required GeoCity city,
+    required int mySerial,
+    required int radarSerial,
+    required String radarCtxKey,
+  }) async {
+    bool lightningNear = false;
+    RadarNowcastContext radarCtx = RadarNowcastContext.inactive;
+    try {
+      lightningNear = await lightningDetectedNear(city.lat, city.lon);
+    } catch (e) {
+      debugPrint('Lightning fetch failed: $e');
+    }
+    try {
+      radarCtx = await _fetchRadarNowcastForCity(city);
+    } catch (e) {
+      debugPrint('Radar nowcast fetch failed: $e');
+    }
+    if (!mounted || mySerial != _weatherFetchSerial) return;
+    if (radarSerial != _radarFetchSerial) return;
+    if (!_radarContextUiNeedsUpdate(radarCtx) &&
+        lightningNear == _lightningNearby) {
+      return;
+    }
+    setState(() {
+      _lightningNearby = lightningNear;
+      _radarNowcastContext = radarCtx;
+      _radarNowcastContextKey = radarCtx.eligible ? radarCtxKey : null;
+      _lastRadarContextUiApplyAt = DateTime.now();
+    });
+    _invalidateDisplayCaches();
+  }
+
+  void _scheduleSecondaryWeatherSignals({
+    required GeoCity city,
+    required int mySerial,
+    required int radarSerial,
+    required String radarCtxKey,
+  }) {
+    // Počkaj, kým sa UI ustáli — PNG radar + WebView naraz robili OOM na emulátore.
+    Future<void>.delayed(const Duration(seconds: 4), () {
+      if (!mounted || mySerial != _weatherFetchSerial) return;
+      unawaited(_applySecondaryWeatherSignals(
+        city: city,
+        mySerial: mySerial,
+        radarSerial: radarSerial,
+        radarCtxKey: radarCtxKey,
+      ));
+    });
+  }
+
+  void _deferRadarSetup(GeoCity city, {bool forceReload = false}) {
+    _pendingRadarCity = city;
+    _pendingRadarForceReload = forceReload;
+  }
+
+  void _scheduleRadarMapUiIfNeeded(GeoCity city) {
+    if (_radarMapUiReady) {
+      if (_radarController == null) {
+        _setupRadarController(
+          city,
+          forceReload: _pendingRadarForceReload,
+        );
+      }
+      return;
+    }
+    if (_radarMapUiTimer != null) return;
+    _radarMapUiTimer = Timer(const Duration(seconds: 10), () {
+      _radarMapUiTimer = null;
+      if (!mounted || currentCity == null) return;
+      if ((currentCity!.lat - city.lat).abs() > 0.0002 ||
+          (currentCity!.lon - city.lon).abs() > 0.0002) {
+        return;
+      }
+      _radarMapUiReady = true;
+      _setupRadarController(city, forceReload: _pendingRadarForceReload);
+      if (mounted) setState(() {});
+    });
+  }
+
+  void _ensureRadarMapUiNow(GeoCity city, {bool forceReload = false}) {
+    _radarMapUiTimer?.cancel();
+    _radarMapUiTimer = null;
+    _radarMapUiReady = true;
+    _pendingRadarCity = city;
+    _pendingRadarForceReload = forceReload;
+    _setupRadarController(city, forceReload: forceReload);
+  }
+
+  void _deferVystrahyWarmup(GeoCity city) {
+    // Výstrahy WebView len pri otvorení stránky — druhý WebView pri štarte robil OOM.
+  }
 
   bool _isLoadingWebcams = false;
   String? _webcamsError;
@@ -318,6 +439,10 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
   WebViewController? _radarController;
   GeoCity? _lastRadarCity;
+  GeoCity? _pendingRadarCity;
+  bool _pendingRadarForceReload = false;
+  bool _radarMapUiReady = false;
+  Timer? _radarMapUiTimer;
   bool _isRadarFullscreen = false; 
   bool _isRadarReturning = false;
   bool _isRadarLoading = false;
@@ -430,7 +555,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     if (widget.initialCity != null) {
       currentCity = widget.initialCity;
       if (_supportsRadarForCity(currentCity)) {
-        _setupRadarController(currentCity!);
+        _deferRadarSetup(currentCity!);
       }
       await fetchWeatherByCity(widget.initialCity!, forceRefresh: false);
       _updateOneSignalTags(widget.initialCity!);
@@ -446,6 +571,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     _weatherPollTimer?.cancel();
     _radarLoadTimeoutTimer?.cancel();
     _radarConnectivityTimer?.cancel();
+    _radarMapUiTimer?.cancel();
     super.dispose();
   }
 
@@ -457,7 +583,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       if (currentCity != null && _supportsRadarForCity(currentCity)) {
         // Pri návrate do appky radar nereštartujeme vždy, inak zbytočne bliká.
         final shouldReloadRadar = _radarController == null || _radarLoadFailed;
-        _setupRadarController(currentCity!, forceReload: shouldReloadRadar);
+        if (shouldReloadRadar && currentCity != null) {
+          _scheduleRadarMapUiIfNeeded(currentCity!);
+        }
       }
       if (_radarController != null && _supportsRadarForCity(currentCity)) {
         _ensureRadarConnectivityWatcher();
@@ -481,7 +609,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     if (currentCity == null || !_supportsRadarForCity(currentCity)) {
       return;
     }
-    _setupRadarController(currentCity!);
+    _ensureRadarMapUiNow(currentCity!);
     if (_radarController == null) return;
 
     setState(() => _isRadarFullscreen = true);
@@ -524,7 +652,13 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       final url = _buildRadarUrl(city);
 
       if (_radarController == null) {
-        _radarController = WebViewController()
+        late final PlatformWebViewControllerCreationParams params;
+        if (WebViewPlatform.instance is AndroidWebViewController) {
+          params = AndroidWebViewControllerCreationParams();
+        } else {
+          params = const PlatformWebViewControllerCreationParams();
+        }
+        _radarController = WebViewController.fromPlatformCreationParams(params)
           ..setJavaScriptMode(JavaScriptMode.unrestricted)
           ..setBackgroundColor(const Color(0xFF2A3848))
           ..setNavigationDelegate(
@@ -572,10 +706,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                     if (window.skryLoader) window.skryLoader = function(){};
                   })();
                 '''));
-                final radarCity = _lastRadarCity;
-                if (radarCity != null) {
-                  unawaited(_refreshRadarNowcastForCity(radarCity));
-                }
                 if (mounted && _isRadarFullscreen) {
                   _radarController!.runJavaScript(
                       'if(window.setFullscreen) window.setFullscreen(true); else window.dispatchEvent(new Event("resize"));');
@@ -1218,6 +1348,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       if (!mounted) return;
       if (near != _lightningNearby) {
         setState(() => _lightningNearby = near);
+        _invalidateDisplayCaches();
       }
     } catch (e) {
       debugPrint('_refreshLightningForCity: $e');
@@ -1244,8 +1375,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     if (prev.incomingPrecip != next.incomingPrecip) return true;
     if (prev.dryAtPin != next.dryAtPin) return true;
     if (_lastRadarContextUiApplyAt == null) return true;
-    return DateTime.now().difference(_lastRadarContextUiApplyAt!) >=
-        _kRadarForecastStableInterval;
+    final elapsed = DateTime.now().difference(_lastRadarContextUiApplyAt!);
+    if (prev.precipNow && next.precipNow) {
+      return elapsed >= const Duration(minutes: 15);
+    }
+    return elapsed >= _kRadarForecastStableInterval;
   }
 
   void _maybeRefreshRadarTracker(GeoCity city) {
@@ -1268,6 +1402,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
           _radarNowcastContext = RadarNowcastContext.inactive;
           _radarNowcastContextKey = null;
         });
+        _invalidateDisplayCaches();
       }
       return;
     }
@@ -1288,6 +1423,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         _radarNowcastContextKey = ctxKey;
         _lastRadarContextUiApplyAt = DateTime.now();
       });
+      _invalidateDisplayCaches();
     } catch (e) {
       debugPrint('_refreshRadarNowcastForCity: $e');
     }
@@ -1311,6 +1447,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   Future<void> _refreshData() async {
     if (currentCity == null) return;
     final GeoCity citySnap = currentCity!;
+    final int mySerial = ++_weatherFetchSerial;
     try {
       final weatherFuture = _fetchEcmwfWeatherData(
         citySnap.lat,
@@ -1318,51 +1455,37 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         apiTimezone: citySnap.timezone,
       );
       final aqiFuture = _fetchAirQualityData(citySnap.lat, citySnap.lon, forceRefresh: false);
-      final lightningFuture = lightningDetectedNear(citySnap.lat, citySnap.lon);
       final int radarSerial = ++_radarFetchSerial;
       final String radarCtxKey = _radarContextKeyFor(citySnap);
-      final radarFuture = _fetchRadarNowcastForCity(citySnap);
 
       final data = await weatherFuture;
 
       AirQualityData? aqiData;
-      bool lightningNear = _lightningNearby;
-      RadarNowcastContext radarCtx = RadarNowcastContext.inactive;
       try {
         aqiData = await aqiFuture;
       } catch (e) {
         debugPrint('AQI fetch failed: $e');
       }
-      try {
-        lightningNear = await lightningFuture;
-      } catch (e) {
-        debugPrint('Lightning fetch failed: $e');
-      }
-      try {
-        radarCtx = await radarFuture;
-      } catch (e) {
-        debugPrint('Radar nowcast fetch failed: $e');
-      }
 
-      if (!mounted) return;
-      if (radarSerial != _radarFetchSerial) return;
+      if (!mounted || mySerial != _weatherFetchSerial) return;
       if (currentCity == null ||
           (currentCity!.lat - citySnap.lat).abs() > 0.0002 ||
           (currentCity!.lon - citySnap.lon).abs() > 0.0002) {
         return;
       }
-      await _observeDailyPrecipLatchForCity(citySnap, data);
+      unawaited(_observeDailyPrecipLatchForCity(citySnap, data));
       setState(() {
         weatherData = data;
         airQualityData = aqiData;
-        _lightningNearby = lightningNear;
-        _radarNowcastContext = radarCtx;
-        _radarNowcastContextKey = radarCtx.eligible ? radarCtxKey : null;
       });
-      await _syncDailySummaryWithLatestData(citySnap, data);
-      await _syncEveningSummaryWithLatestData(citySnap, data);
-      await _syncAllLeadAlerts(data);
-      _scheduleWidgetUpdate();
+      _invalidateDisplayCaches();
+      _scheduleSecondaryWeatherSignals(
+        city: citySnap,
+        mySerial: mySerial,
+        radarSerial: radarSerial,
+        radarCtxKey: radarCtxKey,
+      );
+      unawaited(_syncWeatherFetchFollowUps(citySnap, data));
     // ignore: empty_catches
     } catch (e) {}
   }
@@ -1868,47 +1991,76 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       } catch (_) {
         data = cachedData;
       }
-      // Aktualizácia satelitného cloud cover aj pre cache dáta
-      if (data.current != null) {
-        try {
-          final satCloud = await fetchSatelliteCloudCover(city.lat, city.lon);
-          if (satCloud != null) {
-            final current = data.current!;
-            data = data.copyWith(
-              current: CurrentWeather(
-                temperature: current.temperature,
-                isDay: current.isDay,
-                weatherCode: current.weatherCode,
-                relativeHumidity: current.relativeHumidity,
-                surfacePressure: current.surfacePressure,
-                windSpeed: current.windSpeed,
-                windDirection: current.windDirection,
-                precipitation: current.precipitation,
-                time: current.time,
-                uvIndex: current.uvIndex,
-                cloudCover: current.cloudCover,
-                apparentTemperature: current.apparentTemperature,
-                satelliteCloudCover: satCloud,
-              ),
-            );
-          }
-        } catch (_) {}
-      }
       if (!mounted) return;
-      await _observeDailyPrecipLatchForCity(city, data);
-      setState(() => weatherData = data);
+      unawaited(_observeDailyPrecipLatchForCity(city, data));
+      setState(() {
+        weatherData = data;
+        isLoading = false;
+        hasError = false;
+      });
+      _invalidateDisplayCaches();
       unawaited(_refreshLightningForCity(city));
       unawaited(_refreshRadarNowcastForCity(city));
+      unawaited(_primeWeatherFromCacheFollowUps(city, data));
+    } catch (e) {
+      debugPrint('_primeWeatherFromCacheIfAny: $e');
+    }
+  }
+
+  Future<void> _syncWeatherFetchFollowUps(GeoCity city, WeatherData data) async {
+    try {
+      await _syncDailySummaryWithLatestData(city, data);
+      await _syncEveningSummaryWithLatestData(city, data);
+      await _syncAllLeadAlerts(data);
+    } catch (e, st) {
+      debugPrint('Post-weather sync failed: $e\n$st');
+    }
+    _scheduleWidgetUpdate();
+    SettingsManager.saveLastLocation(city);
+    _updateOneSignalTags(city);
+    _fetchHistorical(city);
+  }
+
+  Future<void> _primeWeatherFromCacheFollowUps(GeoCity city, WeatherData data) async {
+    if (data.current != null) {
+      try {
+        final satCloud = await fetchSatelliteCloudCover(city.lat, city.lon);
+        if (satCloud != null && mounted) {
+          final current = data.current!;
+          final enriched = data.copyWith(
+            current: CurrentWeather(
+              temperature: current.temperature,
+              isDay: current.isDay,
+              weatherCode: current.weatherCode,
+              relativeHumidity: current.relativeHumidity,
+              surfacePressure: current.surfacePressure,
+              windSpeed: current.windSpeed,
+              windDirection: current.windDirection,
+              precipitation: current.precipitation,
+              time: current.time,
+              uvIndex: current.uvIndex,
+              cloudCover: current.cloudCover,
+              apparentTemperature: current.apparentTemperature,
+              satelliteCloudCover: satCloud,
+            ),
+          );
+          setState(() => weatherData = enriched);
+          _invalidateDisplayCaches();
+        }
+      } catch (_) {}
+    }
+    try {
       await _syncDailySummaryWithLatestData(city, data);
       await _syncEveningSummaryWithLatestData(city, data);
       await _syncAllLeadAlerts(data);
       _scheduleWidgetUpdate();
-      final cachedAqi = await CacheManager.getAirQuality(city.lat, city.lon, ignoreExpiry: true);
+      final cachedAqi =
+          await CacheManager.getAirQuality(city.lat, city.lon, ignoreExpiry: true);
       if (cachedAqi != null && mounted) {
         setState(() => airQualityData = AirQualityData.fromJson(json.decode(cachedAqi)));
       }
     } catch (e) {
-      debugPrint('_primeWeatherFromCacheIfAny: $e');
+      debugPrint('_primeWeatherFromCacheFollowUps: $e');
     }
   }
 
@@ -1926,7 +2078,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       final GeoCity seedCity = _cityOrDefault(lastLocation);
 
       currentCity = seedCity;
-      _setupRadarController(seedCity);
+      _deferRadarSetup(seedCity);
       await _primeWeatherFromCacheIfAny(seedCity);
 
       if (await _canUseDeviceLocation()) {
@@ -2370,11 +2522,12 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
           _isOffline = true;
           hasError = false;
         });
+        _invalidateDisplayCaches();
         await _syncDailySummaryWithLatestData(city, offlineStored.data);
         await _syncEveningSummaryWithLatestData(city, offlineStored.data);
         await _syncAllLeadAlerts(offlineStored.data);
         _scheduleWidgetUpdate();
-        _setupRadarController(city, forceReload: wasOffline);
+        _deferRadarSetup(city, forceReload: wasOffline);
         _syncVystrahyPreloaderForCity(city);
         return;
       }
@@ -2390,7 +2543,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final bool effectiveForceRefresh = forceRefresh || horizonTooShort;
 
     if (stored != null) {
-      await _observeDailyPrecipLatchForCity(city, stored.data);
+      unawaited(_observeDailyPrecipLatchForCity(city, stored.data));
     }
 
     setState(() {
@@ -2403,23 +2556,28 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         _radarNowcastContext = RadarNowcastContext.inactive;
         _radarNowcastContextKey = null;
         resetRadarTrackerStabilizer();
+        _invalidateDisplayCaches();
+        _radarMapUiReady = false;
+        _radarMapUiTimer?.cancel();
+        _radarMapUiTimer = null;
       }
       if (stored != null) {
         weatherData = stored.data;
         airQualityData = stored.aqi;
-        isLoading = true;
-        _isRefreshing = false;
+        isLoading = false;
+        _isRefreshing = true;
       } else {
         if (locationChanged && showLoading) {
           weatherData = null;
           airQualityData = null;
+          _invalidateDisplayCaches();
         }
-        isLoading = true;
+        isLoading = showLoading;
         _isRefreshing = false;
       }
     });
 
-    _setupRadarController(city, forceReload: wasOffline);
+    _deferRadarSetup(city, forceReload: wasOffline);
     _syncVystrahyPreloaderForCity(city);
 
     try {
@@ -2448,55 +2606,33 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         city.lon,
         forceRefresh: false,
       );
-      final lightningFuture = lightningDetectedNear(city.lat, city.lon);
       final int radarSerial = ++_radarFetchSerial;
       final String radarCtxKey = _radarContextKeyFor(city);
-      final radarFuture = _fetchRadarNowcastForCity(city);
 
       AirQualityData? aqiData;
-      bool lightningNear = false;
-      RadarNowcastContext radarCtx = RadarNowcastContext.inactive;
       try {
         aqiData = await aqiFuture;
       } catch (e) {
         debugPrint('AQI fetch failed: $e');
       }
-      try {
-        lightningNear = await lightningFuture;
-      } catch (e) {
-        debugPrint('Lightning fetch failed: $e');
-      }
-      try {
-        radarCtx = await radarFuture;
-      } catch (e) {
-        debugPrint('Radar nowcast fetch failed: $e');
-      }
 
       if (!mounted || mySerial != _weatherFetchSerial) return;
-      if (radarSerial != _radarFetchSerial) return;
-      await _observeDailyPrecipLatchForCity(city, data);
+      unawaited(_observeDailyPrecipLatchForCity(city, data));
       setState(() {
         weatherData = data;
         airQualityData = aqiData;
-        _lightningNearby = lightningNear;
-        _radarNowcastContext = radarCtx;
-        _radarNowcastContextKey = radarCtx.eligible ? radarCtxKey : null;
         isLoading = false;
         _isRefreshing = false;
         _isOffline = false;
       });
-      try {
-        await _syncDailySummaryWithLatestData(city, data);
-        await _syncEveningSummaryWithLatestData(city, data);
-        await _syncAllLeadAlerts(data);
-      } catch (e, st) {
-        debugPrint('Post-weather sync failed: $e\n$st');
-      }
-      _scheduleWidgetUpdate();
-
-      SettingsManager.saveLastLocation(city);
-      _updateOneSignalTags(city);
-      _fetchHistorical(city);
+      _invalidateDisplayCaches();
+      _scheduleSecondaryWeatherSignals(
+        city: city,
+        mySerial: mySerial,
+        radarSerial: radarSerial,
+        radarCtxKey: radarCtxKey,
+      );
+      unawaited(_syncWeatherFetchFollowUps(city, data));
     } catch (e) {
       debugPrint('fetchWeatherByCity failed for ${city.name}: $e');
       final cachedWeather = await _cachedWeatherJsonForCity(city.lat, city.lon);
@@ -2584,10 +2720,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       city != null && cityEligibleForVystrahy(city);
 
   void _syncVystrahyPreloaderForCity(GeoCity city) {
-    if (!_supportsVystrahyForCity(city)) return;
-    final preloader = VystrahyWebViewPreloader.instance;
-    preloader.warmup();
-    preloader.updateUserLocation(city.lat, city.lon);
+    _deferVystrahyWarmup(city);
   }
 
   Future<void> _loadNearbyWebcams(GeoCity city) async {
@@ -3053,7 +3186,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
           await _syncEveningSummaryWithLatestData(pickedCity, weather);
           await _syncAllLeadAlerts(weather);
           _scheduleWidgetUpdate();
-          _setupRadarController(pickedCity);
+          _ensureRadarMapUiNow(pickedCity);
           _fetchHistorical(pickedCity);
         } catch (e) {
           await _refreshCurrentDataOnly();
@@ -3410,6 +3543,17 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   }
 
   (String, Widget, String, int) _getFirstHourWeatherInfo() {
+    final cacheKey = _firstHourDisplayCacheKey();
+    if (_cachedFirstHourInfo != null && _cachedFirstHourInfoKey == cacheKey) {
+      return _cachedFirstHourInfo!;
+    }
+    final result = _computeFirstHourWeatherInfo();
+    _cachedFirstHourInfo = result;
+    _cachedFirstHourInfoKey = cacheKey;
+    return result;
+  }
+
+  (String, Widget, String, int) _computeFirstHourWeatherInfo() {
     final h = weatherData?.hourly;
     final current = weatherData?.current;
     final daily = weatherData?.daily;
@@ -4093,7 +4237,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                   ),
                 ],
               ),
-            if (!_isRadarFullscreen && _radarWebViewWidget != null)
+            if (!_isRadarFullscreen &&
+                _radarWebViewWidget != null &&
+                _radarMapUiReady)
               AnimatedOpacity(
                 opacity: _isRadarReturning ? 0.0 : 1.0,
                 duration: const Duration(milliseconds: 200),
@@ -4128,7 +4274,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     }
 
     final city = currentCity!;
-    _setupRadarController(city);
+    _scheduleRadarMapUiIfNeeded(city);
     _maybeRefreshRadarTracker(city);
 
     final trackerInfo = _radarPrecipTrackerInfoOrNull();
@@ -4599,25 +4745,32 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       }
     }
 
-    final stripState = _hourlyStripFinalDisplayState(
-      h,
-      locTime,
-      current,
-      daily,
-      weatherData?.utcOffsetSeconds,
-      radarNowcast: radarCtx,
-      radarCoverageActive: city != null && radarNowcastActiveForCity(city),
-      lightningNearby: _lightningNearby,
-    );
+    final stripCacheKey = _hourlyStripDisplayCacheKey();
+    HourlyStripDisplayState? stripState = _cachedHourlyStripState;
+    if (stripState == null || _cachedHourlyStripStateKey != stripCacheKey) {
+      stripState = _hourlyStripFinalDisplayState(
+        h,
+        locTime,
+        current,
+        daily,
+        weatherData?.utcOffsetSeconds,
+        radarNowcast: radarCtx,
+        radarCoverageActive: city != null && radarNowcastActiveForCity(city),
+        lightningNearby: _lightningNearby,
+      );
+      _cachedHourlyStripState = stripState;
+      _cachedHourlyStripStateKey = stripCacheKey;
+    }
     if (stripState == null || stripState.icons.isEmpty) {
       return const SliverToBoxAdapter(child: SizedBox.shrink());
     }
+    final resolvedStrip = stripState;
 
-    final stripIndices = stripState.icons.keys.toList()..sort();
+    final stripIndices = resolvedStrip.icons.keys.toList()..sort();
     final start = stripIndices.first;
     final count = stripIndices.length;
     final displayIcons =
-        stripIndices.map((idx) => stripState.icons[idx]!).toList();
+        stripIndices.map((idx) => resolvedStrip.icons[idx]!).toList();
 
     if (_expandedStates.length != count) {
       _expandedStates = List.filled(count, false);
@@ -4650,7 +4803,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       final iconCode = displayIcons[i];
       final hasProb = h.precipitationProbability != null &&
           idx < h.precipitationProbability!.length;
-      final storedProb = stripState.probs[idx] ??
+      final storedProb = resolvedStrip.probs[idx] ??
           (hasProb ? (h.precipitationProbability![idx] ?? 0) : 0);
 
       final parsed = DateTime.tryParse(h.time[idx]);
@@ -4669,7 +4822,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       final wetIcon = kPrecipitationCodes.contains(
         normalizeDisplayWeatherCode(iconCode),
       );
-      final pipelineMm = stripState.precipMm[idx] ?? 0.0;
+      final pipelineMm = resolvedStrip.precipMm[idx] ?? 0.0;
       final displayMmRaw = pipelineMm >= kMeaningfulPrecipMmPerHour
           ? pipelineMm
           : resolveHourlyStripPrecipMm(
@@ -4683,7 +4836,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       final probForShow = wetIcon
           ? math.max(storedProb, kMinPrecipProbPercent)
           : storedProb;
-      final showWetColumn = stripState.showRainPrecip[idx] ??
+      final showWetColumn = resolvedStrip.showRainPrecip[idx] ??
           hourlyStripShowRainPrecip(
             iconCode: iconCode,
             precipMm: displayMmRaw,
@@ -4719,9 +4872,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       } else if (slotHour != null &&
           radarCtx.eligible &&
           radarCtx.authorizesPrecipAtLocalHour(slotHour, locTime)) {
-        final pipelineIcon = stripState.icons[idx];
-        final pipelineProb = stripState.probs[idx];
-        final pipelineMm = stripState.precipMm[idx];
+        final pipelineIcon = resolvedStrip.icons[idx];
+        final pipelineProb = resolvedStrip.probs[idx];
+        final pipelineMm = resolvedStrip.precipMm[idx];
         if (pipelineIcon != null &&
             kPrecipitationCodes.contains(
               normalizeDisplayWeatherCode(pipelineIcon),
@@ -6285,15 +6438,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                 ),
               ),
             ],
-          ),
-          ListenableBuilder(
-            listenable: VystrahyWebViewPreloader.instance,
-            builder: (context, _) {
-              if (!_supportsVystrahyForCity(currentCity)) {
-                return const SizedBox.shrink();
-              }
-              return VystrahyWebViewPreloader.instance.buildWarmupHost();
-            },
           ),
         ],
       ),

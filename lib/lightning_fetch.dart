@@ -3,14 +3,15 @@ part of 'main.dart';
 const String kLightningGeoJsonUrl =
     'https://meteopocasie.sk/data/eumet/blesky.json';
 
-/// Okruh okolo lokality (km) — EUMET blesky; búrková ikona len pri skutočne blízkom výboji.
-const double kLightningNearbyRadiusKm = 25;
+/// Okruh okolo lokality (km) — EUMET blesky z JSON; búrková ikona len pri výboji
+/// v priamom okolí (~10 km ≈ počuteľný hrom / bunka nad mestom, nie vzdialená fronta).
+const double kLightningNearbyRadiusKm = 10;
 
 /// V JSON berieme len výboje mladšie ako N minút — staršie už nie sú „aktuálna búrka“.
-const int kLightningFreshStrikeMaxAgeMinutes = 12;
+const int kLightningFreshStrikeMaxAgeMinutes = 10;
 
 /// Pri výpadku siete krátka rezerva od posledného výboja (nie hodina).
-const int kLightningOfflineGraceMinutes = 10;
+const int kLightningOfflineGraceMinutes = 8;
 
 const Duration _kLightningCacheTtl = Duration(minutes: 2);
 

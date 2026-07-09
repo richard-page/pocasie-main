@@ -6,7 +6,7 @@ const String kRainViewerMapsApiUrl =
 const int kRainViewerColorScheme = 2; // Universal Blue
 const int kRainViewerTileZoom = 7;
 const int kRainViewerTileSize = 512;
-const int kRainViewerMaxPastFrames = 13; // ~2 h histórie po 10 min
+const int kRainViewerMaxPastFrames = 5;
 const Duration _kRainViewerMapsCacheTtl = Duration(seconds: 90);
 
 /// Vzorkovacie okná na 512 px tile (RainViewer lat/lon tile).
@@ -259,8 +259,10 @@ Future<List<RadarFrameSample>> fetchRainViewerFrameHistory(
       ? frames.sublist(frames.length - maxFrames)
       : frames;
 
-  final samples = await Future.wait(
-    tail.map((entry) async {
+  final samples = await _mapRadarSamplesWithConcurrency<RadarFrameSample>(
+    tail.length,
+    (i) async {
+      final entry = tail[i];
       final path = entry['path']?.toString();
       final time = entry['time'] is int
           ? entry['time'] as int
@@ -268,7 +270,7 @@ Future<List<RadarFrameSample>> fetchRainViewerFrameHistory(
       if (path == null || path.isEmpty || time <= 0) return null;
       final url = _rainViewerLatLonTileUrl(meta.host, path, lat, lon);
       return _sampleRainViewerFrameFromUrl(url, lat, lon, time);
-    }),
+    },
   );
   return samples.whereType<RadarFrameSample>().toList();
 }
@@ -281,13 +283,15 @@ Future<List<RadarFrameSample>> fetchRainViewerNowcastHistory(
   final meta = await _fetchRainViewerApiMeta();
   if (meta == null || meta.nowcastFrames.isEmpty) return const [];
 
-  const maxFrames = 12;
+  const maxFrames = 5;
   final tail = meta.nowcastFrames.length > maxFrames
       ? meta.nowcastFrames.sublist(meta.nowcastFrames.length - maxFrames)
       : meta.nowcastFrames;
 
-  final samples = await Future.wait(
-    tail.map((entry) async {
+  final samples = await _mapRadarSamplesWithConcurrency<RadarFrameSample>(
+    tail.length,
+    (i) async {
+      final entry = tail[i];
       final path = entry['path']?.toString();
       final time = entry['time'] is int
           ? entry['time'] as int
@@ -295,7 +299,7 @@ Future<List<RadarFrameSample>> fetchRainViewerNowcastHistory(
       if (path == null || path.isEmpty || time <= 0) return null;
       final url = _rainViewerLatLonTileUrl(meta.host, path, lat, lon);
       return _sampleRainViewerFrameFromUrl(url, lat, lon, time);
-    }),
+    },
   );
   return samples.whereType<RadarFrameSample>().toList();
 }
@@ -317,7 +321,7 @@ Future<RadarFrameSample?> _sampleRainViewerFrameFromUrl(
             Uri.parse(url),
             headers: const {'User-Agent': 'pocasie-app/1.0 (flutter)'},
           )
-          .timeout(const Duration(seconds: 12));
+          .timeout(const Duration(seconds: 6));
       if (response.statusCode != 200) return null;
       bytes = response.bodyBytes;
       if (_rainViewerTileBytesCache.length > 32) {
