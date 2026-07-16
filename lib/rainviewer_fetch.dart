@@ -96,6 +96,8 @@ bool rainViewerSnowLikely({
   double snowfallCm = 0.0,
   double uiDbz = 0,
 }) {
+  // Nad bodom mrazu (napr. 4 °C) — vždy dážď, nie sneženie.
+  if (tempC != null && tempC > 0.0) return false;
   if (snowfallCm >= 0.1) return true;
   return tempC != null &&
       tempC <= -2.0 &&

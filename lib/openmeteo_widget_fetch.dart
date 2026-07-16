@@ -2,8 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-
-const String _kOpenMeteoEcmwfApi = 'https://api.open-meteo.com/v1/ecmwf';
+import 'package:pocasie/forecast_model.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const String _kWidgetHourlyVars =
     'temperature_2m,cloud_cover,precipitation,precipitation_probability,weather_code,wind_speed_10m';
@@ -14,23 +14,31 @@ const String _kWidgetDailyVars =
 const String _kWidgetCurrentVars =
     'temperature_2m,is_day,weather_code,cloud_cover,precipitation,wind_speed_10m,wind_direction_10m,relative_humidity_2m,apparent_temperature,pressure_msl';
 
-/// Minimálny Open-Meteo fetch pre Android widget.
+Future<WeatherForecastModel> _widgetForecastModel() async {
+  final prefs = await SharedPreferences.getInstance();
+  return WeatherForecastModel.fromStorage(prefs.getString(kForecastModelKey));
+}
+
+/// Minimálny Open-Meteo fetch pre Android widget (rovnaký model ako v appke).
 Future<Map<String, dynamic>?> widgetFetchOpenMeteoForecast(
   double lat,
   double lon,
 ) async {
   try {
-    final uri = Uri.parse(_kOpenMeteoEcmwfApi).replace(
-      queryParameters: {
-        'latitude': lat.toStringAsFixed(4),
-        'longitude': lon.toStringAsFixed(4),
-        'hourly': _kWidgetHourlyVars,
-        'daily': _kWidgetDailyVars,
-        'current': _kWidgetCurrentVars,
-        'forecast_days': '16',
-        'timezone': 'auto',
-      },
-    );
+    final model = await _widgetForecastModel();
+    final params = <String, String>{
+      'latitude': lat.toStringAsFixed(4),
+      'longitude': lon.toStringAsFixed(4),
+      'hourly': _kWidgetHourlyVars,
+      'daily': _kWidgetDailyVars,
+      'current': _kWidgetCurrentVars,
+      'forecast_days': '16',
+      'timezone': 'auto',
+    };
+    if (model.apiModels != null && model.apiModels!.isNotEmpty) {
+      params['models'] = model.apiModels!;
+    }
+    final uri = Uri.parse(model.apiBase).replace(queryParameters: params);
     final r = await http.get(
       uri,
       headers: const {
@@ -44,6 +52,7 @@ Future<Map<String, dynamic>?> widgetFetchOpenMeteoForecast(
     return {
       ...map,
       'precipitation_probability_available': true,
+      'model': model.cacheKey,
     };
   } catch (e) {
     debugPrint('Widget Open-Meteo fetch: $e');

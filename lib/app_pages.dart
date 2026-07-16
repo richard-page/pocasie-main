@@ -80,6 +80,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
 
   late WindUnit _selectedWindUnit;
   late bool _myLocationEnabled;
+  WeatherForecastModel _selectedForecastModel = WeatherForecastModel.bestMatch;
   TimeOfDay _dailySummaryTime = LocalTestPushService.fixedDailySummaryTime;
   TimeOfDay _eveningSummaryTime = LocalTestPushService.fixedEveningSummaryTime;
   Map<String, bool> _alertTypeStates = <String, bool>{};
@@ -116,6 +117,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
   Future<void> _loadSettingsBootstrap() async {
     try {
       final b = await SettingsManager.getSettingsScreenBootstrap();
+      final forecastModel = await SettingsManager.getForecastModel();
       final liveSystemPermission = await LocalTestPushService.areSystemNotificationsEnabled();
       final systemPermission = liveSystemPermission;
       await SettingsManager.setSystemNotificationsEnabled(systemPermission);
@@ -127,6 +129,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
         _dailySummaryTime = b.dailySummary;
         _eveningSummaryTime = b.eveningSummary;
         _widgetUpdateMinutes = b.widgetIntervalMinutes;
+        _selectedForecastModel = forecastModel;
       });
     } catch (_) {
       final storedSystemPermission = await SettingsManager.getSystemNotificationsEnabled();
@@ -276,6 +279,13 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
       setState(() {
         _selectedWindUnit = unit;
       });
+    }
+  }
+
+  Future<void> _saveForecastModel(WeatherForecastModel model) async {
+    await SettingsManager.setForecastModel(model);
+    if (mounted) {
+      setState(() => _selectedForecastModel = model);
     }
   }
 
@@ -516,6 +526,89 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                         ],
                       ),
                     ),
+                  ],
+                ),
+              ),
+
+              _chartSectionDivider(),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.public, color: _kChartLineBlue, size: 22),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              'Globálny predpovedný model',
+                              style: _chartLabelStyle(size: 16).copyWith(
+                                color: _kChartTextPrimary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      child: Text(
+                        'Predvolené Open-Meteo API — bez ručného miešania modelov. Server zvolí najlepší mix pre tvoju polohu.',
+                        style: _chartCaptionStyle(size: 13).copyWith(
+                          color: _kChartTextSecondary,
+                          height: 1.35,
+                        ),
+                      ),
+                    ),
+                    ...WeatherForecastModel.values.asMap().entries.map((e) {
+                      final model = e.value;
+                      final isFirst = e.key == 0;
+                      final isSelected = _selectedForecastModel == model;
+                      return ListTile(
+                        visualDensity: VisualDensity.compact,
+                        contentPadding: EdgeInsets.fromLTRB(12, isFirst ? 0 : 2, 12, 2),
+                        horizontalTitleGap: 8,
+                        minVerticalPadding: 0,
+                        leading: Radio<WeatherForecastModel>(
+                          value: model,
+                          // ignore: deprecated_member_use
+                          groupValue: _selectedForecastModel,
+                          // ignore: deprecated_member_use
+                          onChanged: (value) async {
+                            if (value != null) {
+                              await _saveForecastModel(value);
+                            }
+                          },
+                          fillColor: WidgetStateProperty.resolveWith<Color>(
+                            (Set<WidgetState> states) => Colors.white,
+                          ),
+                        ),
+                        title: Text(
+                          model.uiTitle,
+                          style: _chartLabelStyle(size: 16).copyWith(
+                            color: _kChartTextPrimary,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        subtitle: Text(
+                          model.uiSubtitle,
+                          style: _chartCaptionStyle(size: 13).copyWith(
+                            color: _kChartTextSecondary,
+                            height: 1.3,
+                          ),
+                        ),
+                        trailing: isSelected
+                            ? const Icon(Icons.check, color: _kChartLineBlue, size: 20)
+                            : null,
+                        onTap: () async {
+                          await _saveForecastModel(model);
+                        },
+                      );
+                    }),
                   ],
                 ),
               ),

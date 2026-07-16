@@ -19,6 +19,46 @@ class CacheManager {
     await prefs.setString(key, json.encode(data));
   }
 
+  /// Uloží [WeatherData] so schémou — staré cache bez verzie sa pri načítaní zahodia.
+  static String encodeForecastWeatherBody(WeatherData data) {
+    final body = Map<String, dynamic>.from(data.toJson());
+    body['schema_version'] = kForecastCacheSchemaVersion;
+    return json.encode(body);
+  }
+
+  static WeatherData? decodeForecastWeatherBody(String? jsonBody) {
+    if (jsonBody == null) return null;
+    try {
+      final decoded = json.decode(jsonBody);
+      if (decoded is! Map<String, dynamic>) return null;
+      if (decoded['schema_version'] != kForecastCacheSchemaVersion) {
+        return null;
+      }
+      return WeatherData.fromJson(decoded);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Po zmene schémy cache — zmaže všetky uložené predpovede (staré vymyslené mm/%).
+  /// Vráti `true`, ak sa cache práve vymazala (treba `forceRefresh`).
+  static Future<bool> ensureForecastCacheGeneration() async {
+    final prefs = await SharedPreferences.getInstance();
+    final flag = 'forecast_cache_gen_v$kForecastCacheSchemaVersion';
+    if (prefs.getBool(flag) == true) return false;
+
+    final toRemove =
+        prefs.getKeys().where((k) => k.startsWith(kWeatherCachePrefix)).toList();
+    for (final k in toRemove) {
+      await prefs.remove(k);
+    }
+    await prefs.setBool(flag, true);
+    debugPrint(
+      'Forecast cache: v$kForecastCacheSchemaVersion — zmazaných ${toRemove.length} záznamov',
+    );
+    return true;
+  }
+
   static Future<String?> getWeather(double lat, double lon, String modelParam, {bool ignoreExpiry = false}) async {
     final prefs = await SharedPreferences.getInstance();
     final key = _weatherCacheKey(modelParam, lat, lon);
@@ -168,6 +208,7 @@ class SettingsManager {
             WindUnit windUnit,
             bool myLocationEnabled,
             int widgetIntervalMinutes,
+            WeatherForecastModel forecastModel,
           })>
       getWeatherPageSettingsSnapshot() async {
     final prefs = await SharedPreferences.getInstance();
@@ -186,10 +227,13 @@ class SettingsManager {
       kHomeWidgetUpdateIntervalMinutesMin,
       kHomeWidgetUpdateIntervalMinutesMax,
     );
+    final forecastModel =
+        WeatherForecastModel.fromStorage(prefs.getString(kForecastModelKey));
     return (
       windUnit: windUnit,
       myLocationEnabled: myLocationEnabled,
       widgetIntervalMinutes: widgetIntervalMinutes,
+      forecastModel: forecastModel,
     );
   }
 

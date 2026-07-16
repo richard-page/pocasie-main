@@ -58,7 +58,7 @@ const int kRadarHistoryFramesMax = 24;
 const int kRadarHistoryFramesToSample = 5;
 /// Trend / transient — len posledných N snímok, aby stará dažďová hodina neskresľovala stav.
 const int kRadarNowcastTrendFrames = 10;
-const Duration _kRadarNowcastCacheTtl = Duration(seconds: 120);
+const Duration _kRadarNowcastCacheTtl = Duration(seconds: 45);
 const Duration kRadarTrackerPhaseHoldInterval = Duration(minutes: 5);
 const Duration kRadarTrackerIncomingToActiveHold = Duration(minutes: 5);
 const int kRadarTrackerArrivalSmoothMinutes = 15;
@@ -640,6 +640,570 @@ void resetRadarTrackerStabilizer({bool clearHardEndLock = true}) {
   }
 }
 
+/// Pločný matematický nowcast — vypočítaný **raz** pri každom radar fetchi
+/// (centroidová trajektória, nowcast ETA/koniec, šanca doraziť). Žiadne gettery.
+class RadarPinForecastSnapshot {
+  const RadarPinForecastSnapshot({
+    required this.wetAtPinNow,
+    required this.approaching,
+    required this.uiDbz,
+    required this.rainViewer,
+    required this.wetHourStartsMs,
+    required this.nearTermEndExclusiveMs,
+    required this.clearEcmwfNearTerm,
+    this.etaMinutes,
+    this.endMinutes,
+    this.approachChancePercent = 0,
+    this.distanceKmEstimate,
+    this.motionSpeedKmH,
+    this.towardPin = false,
+  });
+
+  static const empty = RadarPinForecastSnapshot(
+    wetAtPinNow: false,
+    approaching: false,
+    uiDbz: 0,
+    rainViewer: false,
+    wetHourStartsMs: <int>[],
+    nearTermEndExclusiveMs: 0,
+    clearEcmwfNearTerm: false,
+  );
+
+  final bool wetAtPinNow;
+  final bool approaching;
+  final double uiDbz;
+  final bool rainViewer;
+  /// Lokálne začiatky hodín (ms since epoch, wall-clock floor).
+  final List<int> wetHourStartsMs;
+  final int nearTermEndExclusiveMs;
+  final bool clearEcmwfNearTerm;
+
+  /// Minúty do príchodu zrážok na pin (0 = prší teraz). Null = neznáme.
+  final int? etaMinutes;
+  /// Minúty do konca zrážok na pine. Null = neznáme / neprší.
+  final int? endMinutes;
+  /// Šanca, že zrážky dorazia (0–100) — z trajektórie + nowcast + intenzity.
+  final int approachChancePercent;
+  /// Odhad vzdialenosti jadra bunky od pinu (km).
+  final double? distanceKmEstimate;
+  /// Rýchlosť priblíženia jadra k pinu (km/h); záporné = odchádza.
+  final double? motionSpeedKmH;
+  /// Centroid sa pohybuje smerom k pinu.
+  final bool towardPin;
+
+  bool authorizesLocalHour(DateTime slotHour) {
+    final key = DateTime(
+      slotHour.year,
+      slotHour.month,
+      slotHour.day,
+      slotHour.hour,
+    ).millisecondsSinceEpoch;
+    return wetHourStartsMs.contains(key);
+  }
+
+  bool isNearTermHour(DateTime slotHour, DateTime locNow) {
+    final nowHour = DateTime(locNow.year, locNow.month, locNow.day, locNow.hour);
+    final slot = DateTime(slotHour.year, slotHour.month, slotHour.day, slotHour.hour);
+    if (slot.isBefore(nowHour)) return false;
+    if (nearTermEndExclusiveMs <= 0) return false;
+    return slot.millisecondsSinceEpoch < nearTermEndExclusiveMs;
+  }
+}
+
+/// ~km na jednotku kardinalného centroidu (offset ~110 px RainViewer).
+const double _kRadarCardinalUnitKm = 18.0;
+
+bool _flatFrameWetAtPin(RadarFrameSample f, {required bool rainViewer}) {
+  final center = f.dbz ?? 0.0;
+  final peak = f.innerPeakDbz ?? f.peakDbz ?? center;
+  if (rainViewer) {
+    return f.precipAtPoint ||
+        center >= kRainViewerLegendMinDbz ||
+        (peak >= kRainViewerLegendMinDbz && center >= kRainViewerLegendTraceDbz) ||
+        // Slabé zelené echo na pine (mapa už ukazuje dážď).
+        (f.precipAtPoint == false &&
+            center >= 10 &&
+            peak >= kRainViewerLegendMinDbz &&
+            f.coherentPx14 >= 1);
+  }
+  // Helkor / CMAX — zelená bunka na mape = dážď pri pine.
+  return f.precipAtPoint ||
+      f.precip ||
+      center >= 12 ||
+      (peak >= 16 && center >= 8) ||
+      (peak >= 18 && f.coherentPx14 >= 1);
+}
+
+bool _flatFrameNearbyApproach(RadarFrameSample f, {required bool rainViewer}) {
+  if (_flatFrameWetAtPin(f, rainViewer: rainViewer)) return false;
+  final center = f.dbz ?? 0.0;
+  final peak = f.innerPeakDbz ?? f.peakDbz ?? center;
+  if (rainViewer) {
+    return peak >= 18 &&
+        center < kRainViewerLegendMinDbz &&
+        (f.coherentPx14 >= 2 || f.coherentCorePx >= 1);
+  }
+  return peak >= 22 &&
+      center < 14 &&
+      (f.coherentPx14 >= 2 || f.precip || peak >= 28);
+}
+
+double _flatFrameUiDbz(RadarFrameSample f, {required bool rainViewer}) {
+  final center = f.dbz ?? 0.0;
+  final peak = f.innerPeakDbz ?? f.peakDbz ?? center;
+  final raw = math.max(center, math.min(peak, center + 12));
+  return rainViewer ? rainViewerDbzForUi(raw) : raw;
+}
+
+DateTime _flatLocalFromUnix(int unix, Duration tzOffset) =>
+    DateTime.fromMillisecondsSinceEpoch(unix * 1000, isUtc: true).add(tzOffset);
+
+DateTime _flatHourFloor(DateTime t) =>
+    DateTime(t.year, t.month, t.day, t.hour);
+
+/// Ťažisko echo z N/S/E/W dBZ — vážené dbz² (čistá matematika, bez getterov).
+(double x, double y, double weight) _flatEchoCentroid(RadarFrameSample f) {
+  double x = 0, y = 0, w = 0;
+  void add(double sx, double sy, double? dbz) {
+    if (dbz == null || dbz < 14) return;
+    final wt = dbz * dbz;
+    x += sx * wt;
+    y += sy * wt;
+    w += wt;
+  }
+
+  add(0, -1, f.northDbz);
+  add(0, 1, f.southDbz);
+  add(1, 0, f.eastDbz);
+  add(-1, 0, f.westDbz);
+  if (w <= 0) return (0.0, 0.0, 0.0);
+  return (x / w, y / w, w);
+}
+
+/// Lineárna regresia dBZ stredu vs. čas (dBZ / min).
+double? _flatCenterDbzSlopePerMin(List<RadarFrameSample> history) {
+  if (history.length < 3) return null;
+  var sumT = 0.0, sumD = 0.0, sumTT = 0.0, sumTD = 0.0;
+  final t0 = history.first.unix.toDouble();
+  var usable = 0;
+  for (final f in history) {
+    final d = f.dbz;
+    if (d == null) continue;
+    final t = (f.unix - t0) / 60.0;
+    sumT += t;
+    sumD += d;
+    sumTT += t * t;
+    sumTD += t * d;
+    usable++;
+  }
+  if (usable < 3) return null;
+  final denom = usable * sumTT - sumT * sumT;
+  if (denom.abs() < 1e-6) return null;
+  return (usable * sumTD - sumT * sumD) / denom;
+}
+
+/// Trajektória + nowcast → ETA / koniec / šanca / vzdialenosť / rýchlosť.
+///
+/// Okno zrážok je v **minútach od teraz** a pri každom fetchi sa prepočíta
+/// (ústup, nowcast sucho, slope dBZ) — nie natvrdo +1/+2 h.
+({
+  int? etaMinutes,
+  int? endMinutes,
+  int approachChancePercent,
+  double? distanceKm,
+  double? speedKmH,
+  bool towardPin,
+  bool approaching,
+  bool departing,
+}) _flatRadarMotionMath({
+  required List<RadarFrameSample> history,
+  required List<RadarFrameSample> nowcastHistory,
+  required List<RadarFrameSample> helkorHistory,
+  required bool fromRainViewer,
+  required bool wetAtPinNow,
+  required DateTime locNow,
+}) {
+  final nowSec = locNow.millisecondsSinceEpoch ~/ 1000;
+  final frames = history.isNotEmpty ? history : helkorHistory;
+  final rv = fromRainViewer && history.isNotEmpty;
+  final latest = frames.isNotEmpty ? frames.last : null;
+  final slope = _flatCenterDbzSlopePerMin(frames);
+
+  double? distanceKm;
+  double? speedKmH;
+  var toward = false;
+  var departingMotion = false;
+
+  if (frames.length >= 3) {
+    final first = frames.first;
+    final last = frames.last;
+    final c0 = _flatEchoCentroid(first);
+    final c1 = _flatEchoCentroid(last);
+    if (c1.$3 >= 100) {
+      final distUnits = math.sqrt(c1.$1 * c1.$1 + c1.$2 * c1.$2);
+      distanceKm = distUnits * _kRadarCardinalUnitKm;
+      final spanMin = math.max(1.0, (last.unix - first.unix) / 60.0);
+      final vx = (c1.$1 - c0.$1) / spanMin;
+      final vy = (c1.$2 - c0.$2) / spanMin;
+      final towardSpeed = (-c1.$1 * vx + -c1.$2 * vy);
+      speedKmH = towardSpeed * _kRadarCardinalUnitKm * 60.0;
+      toward = towardSpeed >= 0.012;
+      departingMotion = towardSpeed <= -0.012;
+    }
+  }
+
+  // Nowcast timeline: prvá mokrá / prvá suchá / posledná mokrá (minúty od teraz).
+  int? firstWetNowcastMins;
+  int? firstDryAfterWetMins;
+  int? lastWetNowcastMins;
+  var sawWetInNowcast = false;
+  double lastWetDbz = kRainViewerLegendMinDbz;
+  for (final f in nowcastHistory) {
+    if (f.unix <= nowSec) continue;
+    final mins = math.max(
+      1,
+      _flatLocalFromUnix(f.unix, locNow.timeZoneOffset)
+          .difference(locNow)
+          .inMinutes,
+    );
+    final wet = _flatFrameWetAtPin(f, rainViewer: true);
+    if (wet) {
+      sawWetInNowcast = true;
+      firstWetNowcastMins ??= mins;
+      lastWetNowcastMins = mins;
+      lastWetDbz = f.dbz ?? lastWetDbz;
+    } else if (sawWetInNowcast && firstDryAfterWetMins == null) {
+      firstDryAfterWetMins = mins;
+    } else if (wetAtPinNow && !sawWetInNowcast && firstDryAfterWetMins == null) {
+      // Prší teraz, hneď najbližší nowcast je suchý → skorý koniec.
+      firstDryAfterWetMins = mins;
+    }
+  }
+
+  int? etaFromTrajectory;
+  if (!wetAtPinNow && toward && distanceKm != null && speedKmH != null) {
+    final distUnits = distanceKm / _kRadarCardinalUnitKm;
+    final towardSpeed = speedKmH / (_kRadarCardinalUnitKm * 60.0);
+    if (distUnits >= 0.06 && towardSpeed >= 0.01) {
+      etaFromTrajectory = (distUnits / towardSpeed).ceil().clamp(5, 120);
+    }
+  }
+  if (!wetAtPinNow &&
+      slope != null &&
+      slope > 0.03 &&
+      latest != null &&
+      (latest.dbz ?? 0) > 0 &&
+      (latest.dbz ?? 0) < kRainViewerLegendMinDbz) {
+    final slopeMins =
+        ((kRainViewerLegendMinDbz - (latest.dbz ?? 0)) / slope).ceil().clamp(5, 90);
+    etaFromTrajectory = etaFromTrajectory == null
+        ? slopeMins
+        : ((etaFromTrajectory + slopeMins) / 2).round();
+  }
+
+  int? etaFromGap;
+  if (!wetAtPinNow &&
+      latest != null &&
+      !_flatFrameWetAtPin(latest, rainViewer: rv)) {
+    final center = latest.dbz ?? 0;
+    final peak = latest.innerPeakDbz ?? latest.peakDbz ?? center;
+    final gap = peak - center;
+    if (peak >= (rv ? 18.0 : 22.0) &&
+        center < (rv ? kRainViewerLegendMinDbz : 14)) {
+      etaFromGap = gap >= 22
+          ? 12
+          : (gap >= 14 ? 22 : (gap >= 8 ? 32 : 42));
+    }
+  }
+
+  // ——— PRŠÍ TERAZ: koniec podľa nowcastu; buffer primeraný, nie prehnaný ———
+  if (wetAtPinNow) {
+    int endMins;
+    if (firstDryAfterWetMins != null && lastWetNowcastMins != null) {
+      endMins = (firstDryAfterWetMins + 5).clamp(15, 75);
+    } else if (firstDryAfterWetMins != null && !sawWetInNowcast) {
+      endMins = math.max(firstDryAfterWetMins + 8, 20).clamp(18, 45);
+    } else if (lastWetNowcastMins != null) {
+      final drizzleTail = lastWetDbz < 18
+          ? 5
+          : (lastWetDbz < 26 ? 8 : (lastWetDbz < 34 ? 10 : 12));
+      endMins = (lastWetNowcastMins + drizzleTail).clamp(18, 90);
+    } else {
+      final ui = latest == null
+          ? kRainViewerLegendMinDbz
+          : _flatFrameUiDbz(latest, rainViewer: rv);
+      var guess = ui >= 35
+          ? 40
+          : (ui >= 26 ? 32 : (ui >= 18 ? 25 : 18));
+      if (departingMotion && slope != null && slope < -0.08) {
+        guess = math.min(guess, 20);
+      }
+      endMins = guess.clamp(18, 50);
+    }
+    if (departingMotion && firstDryAfterWetMins != null) {
+      endMins = math.min(endMins, math.max(firstDryAfterWetMins + 8, 18));
+    }
+    return (
+      etaMinutes: 0,
+      endMinutes: endMins,
+      approachChancePercent: 100,
+      distanceKm: 0.0,
+      speedKmH: speedKmH,
+      towardPin: toward,
+      approaching: false,
+      departing: departingMotion &&
+          slope != null &&
+          slope < -0.06 &&
+          firstDryAfterWetMins != null,
+    );
+  }
+
+  // ——— PRÍCHOD: preferuj nowcast ETA, trajektória ako korekcia ———
+  int? eta;
+  if (firstWetNowcastMins != null && etaFromTrajectory != null) {
+    final diff = (firstWetNowcastMins - etaFromTrajectory).abs();
+    eta = diff <= 20
+        ? ((firstWetNowcastMins * 2 + etaFromTrajectory) / 3).round()
+        : firstWetNowcastMins;
+  } else {
+    eta = firstWetNowcastMins ?? etaFromTrajectory ?? etaFromGap;
+  }
+
+  if (departingMotion && firstWetNowcastMins == null) {
+    eta = null;
+  }
+
+  int? endMins;
+  if (firstDryAfterWetMins != null) {
+    endMins = firstDryAfterWetMins.clamp(eta != null ? eta + 5 : 8, 120);
+  } else if (lastWetNowcastMins != null) {
+    endMins = (lastWetNowcastMins + 4).clamp(eta != null ? eta + 8 : 10, 120);
+  } else if (eta != null) {
+    final ui = latest == null
+        ? 18.0
+        : _flatFrameUiDbz(latest, rainViewer: rv);
+    // Dostatočné trvanie prechodu — radšej dlhšie než predčasný koniec.
+    final duration = ui >= 30 ? 40 : (ui >= 22 ? 30 : 22);
+    endMins = (eta + duration).clamp(eta + 15, 100);
+  }
+
+  final nearby =
+      latest != null && _flatFrameNearbyApproach(latest, rainViewer: rv);
+  var approaching = (eta != null && !departingMotion) ||
+      (nearby && !departingMotion) ||
+      (toward && !departingMotion && eta != null);
+
+  var chance = 0;
+  if (firstWetNowcastMins != null) chance += 50;
+  if (etaFromTrajectory != null && toward) chance += 30;
+  if (nearby && !departingMotion) chance += 15;
+  if (slope != null && slope > 0.04) chance += 12;
+  if (speedKmH != null && speedKmH > 12) chance += 8;
+  if (distanceKm != null && distanceKm < 30) chance += 8;
+  if (distanceKm != null && distanceKm > 70) chance -= 20;
+  if (departingMotion) chance -= 50;
+  if (slope != null && slope < -0.04) chance -= 20;
+  chance = chance.clamp(0, 95);
+  if (!approaching || eta == null) {
+    if (nearby && !departingMotion && etaFromGap != null) {
+      approaching = true;
+      eta ??= etaFromGap;
+      chance = math.max(chance, 35);
+      endMins ??= (eta! + 15).clamp(eta! + 8, 50);
+    } else {
+      chance = 0;
+      approaching = false;
+      eta = null;
+      endMins = null;
+    }
+  }
+  if (chance > 0 && chance < 30) chance = 30;
+
+  return (
+    etaMinutes: eta,
+    endMinutes: endMins,
+    approachChancePercent: chance,
+    distanceKm: distanceKm,
+    speedKmH: speedKmH,
+    towardPin: toward,
+    approaching: approaching && chance >= 30,
+    departing: departingMotion,
+  );
+}
+
+/// Hodina sa prekrýva s minútovým oknom zrážok aspoň [minOverlap] minút.
+bool _flatHourOverlapsWetWindow({
+  required DateTime hourFloor,
+  required DateTime locNow,
+  required int wetStartMins,
+  required int wetEndMins,
+  int minOverlap = 10,
+}) {
+  if (wetEndMins <= wetStartMins) return false;
+  final hourStart = hourFloor.difference(locNow).inMinutes;
+  final hourEnd = hourStart + 60;
+  final a = math.max(hourStart, wetStartMins);
+  final b = math.min(hourEnd, wetEndMins);
+  return (b - a) >= minOverlap;
+}
+
+/// Profesionálny nowcast snapshot — matematika pri každom fetchi.
+RadarPinForecastSnapshot buildRadarPinForecastSnapshot({
+  required List<RadarFrameSample> history,
+  required List<RadarFrameSample> nowcastHistory,
+  required List<RadarFrameSample> helkorHistory,
+  required bool fromRainViewer,
+  DateTime? at,
+}) {
+  final locNow = at ?? DateTime.now();
+  final nowHour = _flatHourFloor(locNow);
+
+  var wetAtPin = false;
+  var uiDbz = 0.0;
+  var rainViewer = fromRainViewer;
+
+  if (history.isNotEmpty) {
+    final f = history.last;
+    if (_flatFrameWetAtPin(f, rainViewer: fromRainViewer)) {
+      wetAtPin = true;
+      uiDbz = _flatFrameUiDbz(f, rainViewer: fromRainViewer);
+      rainViewer = fromRainViewer;
+    } else {
+      uiDbz = math.max(uiDbz, _flatFrameUiDbz(f, rainViewer: fromRainViewer));
+    }
+  }
+
+  // Helkor / Meteo Radar = len zobrazenie mapy. Detekcia pinu len cez RainViewer,
+  // Helkor iba keď RV históriu nemáme (fallback mimo/bez RV dát).
+  if (!fromRainViewer && helkorHistory.isNotEmpty) {
+    final f = helkorHistory.last;
+    if (_flatFrameWetAtPin(f, rainViewer: false)) {
+      wetAtPin = true;
+      uiDbz = math.max(uiDbz, _flatFrameUiDbz(f, rainViewer: false));
+      rainViewer = false;
+    } else {
+      uiDbz = math.max(uiDbz, _flatFrameUiDbz(f, rainViewer: false));
+    }
+  }
+
+  final motion = _flatRadarMotionMath(
+    history: history,
+    nowcastHistory: nowcastHistory,
+    helkorHistory: helkorHistory,
+    fromRainViewer: fromRainViewer,
+    wetAtPinNow: wetAtPin,
+    locNow: locNow,
+  );
+
+  final approaching = motion.approaching;
+  final eta = motion.etaMinutes;
+  final endMins = motion.endMinutes;
+  final chance = motion.approachChancePercent;
+  final departing = motion.departing;
+
+  final nowSec = locNow.millisecondsSinceEpoch ~/ 1000;
+  for (final f in nowcastHistory) {
+    if (f.unix <= nowSec) continue;
+    if (!_flatFrameWetAtPin(f, rainViewer: true)) continue;
+    uiDbz = math.max(uiDbz, _flatFrameUiDbz(f, rainViewer: true));
+    rainViewer = true;
+  }
+
+  final wetHours = <int>{};
+  void authorizeHour(DateTime hour) {
+    wetHours.add(_flatHourFloor(hour).millisecondsSinceEpoch);
+  }
+
+  final int? windowStart = wetAtPin
+      ? 0
+      : (approaching && eta != null && chance >= 30 ? eta : null);
+  // Pri daždi na pine — okno podľa endMins (min. ~30 min), nie slepé +2 h.
+  final int? windowEnd = windowStart == null
+      ? null
+      : math.max(
+          endMins ?? (windowStart + (wetAtPin ? 40 : 25)),
+          wetAtPin ? 30 : (windowStart + 20),
+        );
+
+  if (windowStart != null && windowEnd != null && windowEnd > windowStart) {
+    for (var h = 0; h <= 3; h++) {
+      final hour = nowHour.add(Duration(hours: h));
+      if (wetAtPin && h == 0) {
+        authorizeHour(hour);
+        continue;
+      }
+      if (_flatHourOverlapsWetWindow(
+        hourFloor: hour,
+        locNow: locNow,
+        wetStartMins: windowStart,
+        wetEndMins: windowEnd,
+        minOverlap: wetAtPin ? 12 : 10,
+      )) {
+        authorizeHour(hour);
+      }
+    }
+  }
+
+  // Ďalšia hodina LEN ak dážď ešte reálne pretiahne cez začiatok tej hodiny.
+  if (wetAtPin) {
+    authorizeHour(nowHour);
+    final hold = math.max(endMins ?? 35, 30);
+    final minsToNextHour = 60 - locNow.minute;
+    if (hold > minsToNextHour + 8) {
+      authorizeHour(nowHour.add(const Duration(hours: 1)));
+    }
+    if (hold > minsToNextHour + 60 + 12) {
+      authorizeHour(nowHour.add(const Duration(hours: 2)));
+    }
+  }
+
+  if (departing && !wetAtPin && !approaching) {
+    wetHours.clear();
+  }
+
+  if (uiDbz < kRainViewerLegendMinDbz &&
+      (wetAtPin || (approaching && chance >= 40))) {
+    uiDbz = kRainViewerLegendMinDbz;
+  }
+
+  final nearTermEnd = windowEnd != null
+      ? _flatHourFloor(locNow.add(Duration(minutes: windowEnd)))
+          .add(const Duration(hours: 1))
+      : nowHour.add(const Duration(hours: 2));
+  final hardCap = nowHour.add(const Duration(hours: 3));
+  final cappedEnd = nearTermEnd.isAfter(hardCap) ? hardCap : nearTermEnd;
+  final nearEndMs = cappedEnd.millisecondsSinceEpoch;
+
+  final filtered = wetHours
+      .where((ms) => ms >= nowHour.millisecondsSinceEpoch && ms < nearEndMs)
+      .toList()
+    ..sort();
+
+  // Čisti ECMWF fantómy LEN keď radar na pine naozaj suchý a nič neprichádza.
+  // Nikdy pri wetAtPin / approaching — inak zmizne dážď, ktorý ešte bude.
+  final clearEcmwf = !wetAtPin &&
+      !approaching &&
+      chance < 25 &&
+      !departing &&
+      (history.isNotEmpty || helkorHistory.isNotEmpty);
+
+  return RadarPinForecastSnapshot(
+    wetAtPinNow: wetAtPin,
+    approaching: approaching,
+    uiDbz: uiDbz,
+    rainViewer: rainViewer,
+    wetHourStartsMs: filtered,
+    nearTermEndExclusiveMs: nearEndMs,
+    clearEcmwfNearTerm: clearEcmwf,
+    etaMinutes: wetAtPin ? 0 : eta,
+    endMinutes: wetAtPin ? math.max(endMins ?? 35, 30) : endMins,
+    approachChancePercent: wetAtPin ? 100 : chance,
+    distanceKmEstimate: motion.distanceKm,
+    motionSpeedKmH: motion.speedKmH,
+    towardPin: motion.towardPin,
+  );
+}
+
 /// Radarový kontext — trend z posledných ~2 h histórie (podľa servera). Cieľ: odhad **kedy zrážky skončia**.
 class RadarNowcastContext {
   const RadarNowcastContext({
@@ -648,6 +1212,7 @@ class RadarNowcastContext {
     this.fromRainViewer = false,
     this.nowcastHistory = const [],
     this.helkorHistory = const [],
+    this.pinForecast = RadarPinForecastSnapshot.empty,
   });
 
   final bool eligible;
@@ -658,9 +1223,12 @@ class RadarNowcastContext {
   final List<RadarFrameSample> nowcastHistory;
   /// Meteo Radar (SHMÚ CMAX cez Helkor) — poistka keď RainViewer nič neukáže.
   final List<RadarFrameSample> helkorHistory;
+  /// Profesionálny flat snapshot + matematika pre UI (hero / 24 h).
+  final RadarPinForecastSnapshot pinForecast;
 
-  /// Verejný prístup — Helkor echo pre hybrid pás.
-  bool get meteoRadarBackupPrecipSignal => _helkorTrackerPrecipSignal;
+  /// Helkor backup — len keď nie je RainViewer (mapa Meteo nie je detekcia).
+  bool get meteoRadarBackupPrecipSignal =>
+      !fromRainViewer && _helkorTrackerPrecipSignal;
 
   RadarFrameSample? get _helkorLatest =>
       helkorHistory.isNotEmpty ? helkorHistory.last : null;
@@ -684,9 +1252,9 @@ class RadarNowcastContext {
         (f.coherentPx14 >= 2 || peak >= 26 || f.precip);
   }
 
-  /// Meteo Radar — echo pri pine alebo výrazné pole v okolí (poistka oproti RainViewer).
+  /// Helkor CMAX — len fallback bez RainViewer; pri RV sa nepočíta do detekcie.
   bool get _helkorTrackerPrecipSignal {
-    if (helkorHistory.isEmpty) return false;
+    if (fromRainViewer || helkorHistory.isEmpty) return false;
     for (final f in helkorHistory.reversed.take(4)) {
       if (_helkorFrameWetAtPin(f) || _helkorNearbyPrecipField(f)) {
         return true;
@@ -869,9 +1437,15 @@ class RadarNowcastContext {
     return last;
   }
 
-  /// RainViewer nowcast — zrážky v [slotHour] pri pine.
+  /// RainViewer nowcast — zrážky v [slotHour] pri pine (jadro, nie fringe).
   bool _rainViewerNowcastWetAtHour(DateTime slotHour, DateTime locNow) =>
-      _rainViewerMaxDbzInHourSlot(slotHour, locNow, nowcastHistory) != null;
+      _rainViewerMaxDbzInHourSlot(
+            slotHour,
+            locNow,
+            nowcastHistory,
+            frameWetAtPin: _rainViewerFrameRainAtPinCore,
+          ) !=
+          null;
 
   /// Koniec okna zrážok — výhradne RainViewer nowcast pri pine (bez umelého minima podľa dBZ).
   DateTime rainViewerNearTermWetEndExclusive(DateTime locNow) {
@@ -884,12 +1458,45 @@ class RadarNowcastContext {
     return nowHour.add(const Duration(hours: 1));
   }
 
+  /// Posledná hodina pokrytá RainViewer nowcast snímkami (exkluzívne).
+  DateTime? rainViewerNowcastCoverageEndExclusive(DateTime locNow) {
+    if (!fromRainViewer || nowcastHistory.isEmpty) return null;
+    final nowSec = locNow.millisecondsSinceEpoch ~/ 1000;
+    DateTime? lastFrameLocal;
+    for (final f in nowcastHistory) {
+      if (f.unix <= nowSec) continue;
+      lastFrameLocal = DateTime.fromMillisecondsSinceEpoch(
+        f.unix * 1000,
+        isUtc: true,
+      ).add(locNow.timeZoneOffset);
+    }
+    if (lastFrameLocal == null) return null;
+    return _localHourFloor(lastFrameLocal).add(const Duration(hours: 1));
+  }
+
   /// Minútový koniec dažďa pre pás 24 h — rovnaká logika ako karta sledovača.
   DateTime? stripRainMinuteEndAt(DateTime locNow) =>
       _rainViewerStripRainMinuteEndAt(locNow);
 
   DateTime? _rainViewerStripRainMinuteEndAt(DateTime locNow) {
     if (!fromRainViewer) return null;
+
+    if (_echoDepartingFromPin ||
+        _trailingEdgeAtPin ||
+        _precipBandPassedPin ||
+        _rainViewerNearbyFieldRecedingRaw()) {
+      final spatial = _rainViewerSpatialDepartMinutes(locNow);
+      if (spatial >= 0) {
+        return _roundLocalTimeToMinutes(
+          locNow.add(Duration(minutes: spatial.clamp(3, 35))),
+        );
+      }
+      if (!precipNow && !rainAtPinNow) {
+        return _roundLocalTimeToMinutes(
+          locNow.add(const Duration(minutes: 5)),
+        );
+      }
+    }
 
     final nowcastEnd = _rainViewerDryAtFromNowcast(locNow);
     if (nowcastEnd != null) return nowcastEnd;
@@ -999,6 +1606,15 @@ class RadarNowcastContext {
 
   /// Koniec zrážok z nowcast časovej osi — posledný dážď pri pine + krátky dobeh.
   int? _rainViewerEndMinutesFromNowcastTimeline(DateTime locNow) {
+    if (_echoDepartingFromPin ||
+        _trailingEdgeAtPin ||
+        _precipBandPassedPin ||
+        _rainViewerNearbyFieldRecedingRaw()) {
+      final spatial = _rainViewerSpatialDepartMinutes(locNow);
+      if (spatial >= 0) return spatial.clamp(3, 35);
+      if (!precipNow && !rainAtPinNow) return 5;
+    }
+
     final future = _rainViewerFutureNowcastFrames(locNow);
     if (future.isEmpty) return null;
 
@@ -1046,7 +1662,7 @@ class RadarNowcastContext {
       }
     }
 
-    return withTail.clamp(3, 180);
+    return withTail.clamp(3, 90);
   }
 
   /// Koniec zrážok z nowcastu — čas poslednej mokrej snímky pri pine (ako RainViewer „ústup“).
@@ -1148,12 +1764,14 @@ class RadarNowcastContext {
   double? _rainViewerMaxDbzInHourSlot(
     DateTime slotHour,
     DateTime locNow,
-    Iterable<RadarFrameSample> frames,
-  ) {
+    Iterable<RadarFrameSample> frames, {
+    bool Function(RadarFrameSample f)? frameWetAtPin,
+  }) {
+    final isWet = frameWetAtPin ?? _rainViewerFrameWetAtPin;
     final slotEnd = slotHour.add(const Duration(hours: 1));
     double? maxDbz;
     for (final f in frames) {
-      if (!_rainViewerFrameWetAtPin(f)) continue;
+      if (!isWet(f)) continue;
       final frameLocal = DateTime.fromMillisecondsSinceEpoch(
         f.unix * 1000,
         isUtc: true,
@@ -1661,7 +2279,7 @@ class RadarNowcastContext {
     var consecutive = 0;
     for (final f in nowcastHistory) {
       if (f.unix <= nowSec) continue;
-      if (!_rainViewerFrameWetAtPin(f)) {
+      if (!_rainViewerFrameRainAtPinCore(f)) {
         consecutive = 0;
         continue;
       }
@@ -1704,13 +2322,6 @@ class RadarNowcastContext {
 
     if (slotHour == nowHour && precipNow) {
       return precipIntensityDbz;
-    }
-
-    final nearest = _rainViewerNearestNowcastDbz(slotHour, locNow);
-    if (nearest != null) {
-      final hoursAhead = slotHour.difference(nowHour).inHours.clamp(0, 8);
-      final fade = math.pow(0.94, hoursAhead).toDouble();
-      return nearest * fade;
     }
 
     return 0;
@@ -2325,7 +2936,8 @@ class RadarNowcastContext {
     final peak = frame.peakDbz ?? center;
     if (center < 8 && peak < 16 && !_rawPrecipAtPoint) return false;
 
-    if (_echoPassingBy) return true;
+    // Bez [_echoPassingBy] — môže ťahať iné gettery späť sem (Stack Overflow).
+    if (_rawEchoPassingByPin()) return true;
 
     final slope = _centerDbzSlopePerMin;
     if (slope != null && slope < -0.05) {
@@ -3544,7 +4156,8 @@ class RadarNowcastContext {
 
     final center = frame.dbz ?? 0;
 
-    if (_echoPassingBy && !_echoMovingTowardPinOrClosing) return false;
+    // Bez [_echoPassingBy] — hlboký getter chain (Stack Overflow).
+    if (_rawEchoPassingByPin() && !_echoMovingTowardPinOrClosing) return false;
 
     final approach = _incomingApproach;
     if (approach != null && approach.dbz >= 16 && center < 14) {
@@ -4788,6 +5401,16 @@ class RadarNowcastContext {
     final nowHour = _localHourFloor(locNow);
     if (slotHour.isBefore(nowHour)) return false;
 
+    final trimStop = radarEcmwfTrimHardStopLocal(locNow, this);
+    if (slotHour.isAfter(trimStop)) return false;
+
+    final dryFrom = hourlyStripEcmwfTrimDryFromHour(locNow);
+    if (dryFrom != null && !slotHour.isBefore(dryFrom)) return true;
+
+    if (!precipNow && !incomingPrecip && !_trackerUiAuthorizesStripPrecip(locNow)) {
+      return true;
+    }
+
     final hoursAhead = slotHour.difference(nowHour).inHours;
     return hoursAhead <= _kRadarEcmwfTrimMaxHoursWhenDry;
   }
@@ -5596,35 +6219,32 @@ Future<RadarNowcastContext> fetchRadarNowcastContextForCity(GeoCity city) async 
       cachedAt != null &&
       DateTime.now().difference(cachedAt) < _kRadarNowcastCacheTtl;
   if (cacheFresh) {
-    final cached = _radarNowcastCache!;
-    // Pri aktívnom daždi stačí cache; príchod / sledovanie vždy obnov.
-    if (cached.precipNow) {
-      return cached;
-    }
+    // Krátky TTL pre všetky stavy — pri daždi aj príchode musíme ťahať nové snímky.
+    return _radarNowcastCache!;
   }
 
   try {
-    Future<List<RadarFrameSample>> helkorFuture =
-        Future.value(const <RadarFrameSample>[]);
-
     var history = await fetchRainViewerFrameHistory(city.lat, city.lon);
     var fromRainViewer = history.isNotEmpty;
     List<RadarFrameSample> nowcast = const [];
     if (fromRainViewer) {
       nowcast = await fetchRainViewerNowcastHistory(city.lat, city.lon);
-    } else if (radarCoverageForCity(city)) {
-      helkorFuture = _fetchRadarFrameHistory(city.lat, city.lon).catchError(
+    }
+
+    // Helkor len ako fallback keď RainViewer nemá snímky.
+    // Meteo Radar WebView ostáva na zobrazenie — nie na detekciu pinu.
+    List<RadarFrameSample> helkor = const [];
+    if (!fromRainViewer && radarCoverageForCity(city)) {
+      helkor = await _fetchRadarFrameHistory(city.lat, city.lon).catchError(
         (Object e) {
           debugPrint('fetchRadarNowcastContextForCity helkor: $e');
           return <RadarFrameSample>[];
         },
       );
-    }
-
-    final helkor = await helkorFuture;
-    if (!fromRainViewer && helkor.isNotEmpty) {
-      history = helkor;
-      fromRainViewer = false;
+      if (helkor.isNotEmpty) {
+        history = helkor;
+        fromRainViewer = false;
+      }
     }
 
     final ctx = _contextFromHistory(
@@ -5693,12 +6313,19 @@ RadarNowcastContext _contextFromHistory(
     history = helkorHistory;
     fromRainViewer = false;
   }
+  final pinForecast = buildRadarPinForecastSnapshot(
+    history: history,
+    nowcastHistory: nowcastHistory,
+    helkorHistory: helkorHistory,
+    fromRainViewer: fromRainViewer,
+  );
   return RadarNowcastContext(
     eligible: true,
     history: history,
     fromRainViewer: fromRainViewer,
     nowcastHistory: nowcastHistory,
     helkorHistory: helkorHistory,
+    pinForecast: pinForecast,
   );
 }
 

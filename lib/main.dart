@@ -29,6 +29,8 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
+import 'forecast_model.dart';
+
 part 'main_shared.dart';
 part 'app_models.dart';
 part 'app_services.dart';
@@ -158,27 +160,22 @@ Future<bool> showLocationAccuracyDialog(BuildContext context) async {
 }
 
 void main() async {
-  // 1. Najprv inicializujeme iba základné Flutter bindings
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // 2. Nastavíme orientáciu a edge-to-edge čo najskôr
+
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
   ]);
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-  
-  // 3. Spustíme appku okamžite - služby inicializujeme na pozadí
+
   runApp(const WeatherApp());
-  
-  // 4. Odložená inicializácia služieb po prvom frame
+
   scheduler.SchedulerBinding.instance.addPostFrameCallback((_) async {
     await _initServicesInBackground();
   });
 }
 
 Future<void> _initServicesInBackground() async {
-  // Splash a hlavná obrazovka čo najskôr — ťažké služby až potom na pozadí.
   try {
     final prefs = await SharedPreferences.getInstance();
     final showOnboarding = !(prefs.getBool(kOnboardingDoneKey) ?? false);
@@ -913,7 +910,7 @@ int _weatherIconCodeWithPrecipThreshold(
 }
 
 /// Ikona a popis hornej pinned hlavičky — rovnaký slot ako aktuálny riadok v 24 h
-/// (WMO + prahy zrážok + [_clampPrecipitationIconIntensity]). Bez „najhoršieho“ dažďa z budúcich hodín.
+/// (Open-Meteo API: mm ≥ 0,1 a zaokrúhlené % ≥ 50).
 ({int code, String? hourIso}) pinnedHeaderDisplayFromHourly({
   required HourlyForecast h,
   required DateTime locTime,
@@ -925,110 +922,101 @@ int _weatherIconCodeWithPrecipThreshold(
 }) {
   final idx = _hourlyIndexContainingLocalTime(h, locTime);
   if (idx != null && idx < h.time.length) {
+    final slot = openMeteoHourSlotUiFromApi(h: h, idx: idx);
+    var code = slot.displayIconCode;
     final rawProb = h.precipitationProbability?[idx] ?? 0;
-    final mm = h.precipitation?[idx] ?? current?.precipitation ?? 0.0;
-    final tempC = h.temperature != null && idx < h.temperature!.length
-        ? h.temperature![idx]
-        : current?.temperature;
-    final cloudCover = h.cloudCover?[idx];
+    final mm = h.precipitation?[idx] ?? 0.0;
+    final cloud = h.cloudCover?[idx];
+    final apiCode = h.weatherCode?[idx];
 
-    // Ak máme satelitné dáta, použi ich pre aktuálnu hodinu namiesto modelových
-    if (current?.satelliteCloudCover != null) {
-      final int displayCode = h.weatherCode?[idx] ?? current?.weatherCode ?? 0;
-      var code = _weatherIconCodeWithPrecipThreshold(
-        displayCode,
-        _precipProbabilityForThreshold(rawProb),
-        cloudCoverPercent: h.cloudCover?[idx],
-        satelliteCloudCoverPercent: current!.satelliteCloudCover,
-        hourlyPrecipitationMm: mm,
-        snowfallCm: 0.0,
-      );
-      code = _clampPrecipitationIconIntensity(
-        code,
-        _precipProbabilityForThreshold(rawProb),
-        mm,
-        isDailyContext: false,
-      );
-      code = applyRadarPrecipEndToHeroIcon(
-        code,
-        radarCtx: radarNowcast,
-        locTime: locTime,
-        tempC: tempC,
-        cloudCoverPercent: cloudCover,
-        precipMm: mm,
-        precipProb: rawProb,
-        radarCoverageActive: radarCoverageActive,
-      );
+    if (lightningNearby) {
       code = applyNearbyLightningIcon(
         code,
-        lightningNearby: lightningNearby,
+        lightningNearby: true,
         precipMm: mm,
         precipProb: rawProb,
       );
       code = suppressThunderWithoutLightning(
         code,
-        lightningNearby: lightningNearby,
+        lightningNearby: true,
         precipProb: rawProb,
         precipMm: mm,
-        cloudCoverPercent: cloudCover,
-        ecmwfApiCode: h.weatherCode?[idx],
+        cloudCoverPercent: cloud,
+        ecmwfApiCode: apiCode,
       );
-      return (code: code, hourIso: h.time[idx]);
+    } else {
+      code = applyEcmwfJsonThunderHourIcon(
+        code,
+        ecmwfApiCode: apiCode,
+        precipProb: slot.displayProbPercent,
+        precipMm: mm,
+        lightningNearby: false,
+      );
+      code = suppressThunderWithoutLightning(
+        code,
+        lightningNearby: false,
+        precipProb: slot.displayProbPercent,
+        precipMm: mm,
+        cloudCoverPercent: cloud,
+        ecmwfApiCode: apiCode,
+      );
     }
-    // Fallback na pôvodnú logiku bez satelitných dát
-    final end = math.min(idx + 1, h.time.length);
-    final smoothed = _smoothHourlyData(h, idx, end, current, daily, locTime);
-    var code = _hourlySlotRawDisplayIconCode(h, idx, smoothed, 0);
-    code = _clampPrecipitationIconIntensity(
-      code,
-      _precipProbabilityForThreshold(rawProb),
-      mm,
-      isDailyContext: false,
-    );
     code = applyRadarPrecipEndToHeroIcon(
       code,
       radarCtx: radarNowcast,
       locTime: locTime,
-      tempC: tempC,
-      cloudCoverPercent: cloudCover,
+      tempC: h.temperature?[idx],
+      cloudCoverPercent: cloud,
       precipMm: mm,
-      precipProb: rawProb,
+      precipProb: slot.displayProbPercent,
       radarCoverageActive: radarCoverageActive,
     );
-    code = applyNearbyLightningIcon(
-      code,
-      lightningNearby: lightningNearby,
+    // Rovnaká intenzita ako 24 h (≥5 mm = silný dážď / ≥5 cm sneh).
+    if (slot.showRainPrecip || kPrecipitationCodes.contains(code)) {
+      code = hourlyStripPrecipIntensityIcon(
+        baseCode: code,
+        precipMm: math.max(mm, slot.precipMm),
+        tempC: h.temperature?[idx] ?? current?.temperature,
+      );
+    }
+    return (code: code, hourIso: h.time[idx]);
+  }
+
+  if (current?.weatherCode != null) {
+    final rawProb = _precipProbabilityPercentForLocalHour(h, locTime) ?? 0;
+    final mm = current!.precipitation ?? 0.0;
+    final displayProb = roundPrecipProbPercent(rawProb);
+    var code = openMeteoHourlyDisplayIconCode(
+      storedWeatherCode: current.weatherCode,
       precipMm: mm,
-      precipProb: rawProb,
+      storedPrecipProbPercent: displayProb,
+      cloudCoverPercent: current.cloudCover,
     );
+    if (openMeteoHourlyWetShowsInUi(
+      prob: rawProb,
+      mm: mm,
+      weatherCode: current.weatherCode,
+    )) {
+      final normalized = normalizeDisplayWeatherCode(current.weatherCode!);
+      code = kPrecipitationCodes.contains(normalized)
+          ? normalized
+          : wmoFromPrecipitationMm(mm, cloudCoverPercent: current.cloudCover);
+    }
+    if (lightningNearby) {
+      code = applyNearbyLightningIcon(
+        code,
+        lightningNearby: true,
+        precipMm: mm,
+        precipProb: rawProb,
+      );
+    }
     code = suppressThunderWithoutLightning(
       code,
       lightningNearby: lightningNearby,
       precipProb: rawProb,
       precipMm: mm,
-      cloudCoverPercent: cloudCover,
-      ecmwfApiCode: h.weatherCode?[idx],
-    );
-    return (code: code, hourIso: h.time[idx]);
-  }
-
-  if (current?.weatherCode != null) {
-    final probHour = _precipProbabilityForThreshold(
-      _precipProbabilityPercentForLocalHour(h, locTime),
-    );
-    var code = _weatherIconCodeWithPrecipThreshold(
-      current!.weatherCode!,
-      probHour,
       cloudCoverPercent: current.cloudCover,
-      satelliteCloudCoverPercent: current.satelliteCloudCover,
-      hourlyPrecipitationMm: current.precipitation,
-      snowfallCm: 0.0,
-    );
-    code = _clampPrecipitationIconIntensity(
-      code,
-      probHour,
-      current.precipitation ?? 0.0,
-      isDailyContext: false,
+      ecmwfApiCode: current.weatherCode,
     );
     code = applyRadarPrecipEndToHeroIcon(
       code,
@@ -1036,24 +1024,22 @@ int _weatherIconCodeWithPrecipThreshold(
       locTime: locTime,
       tempC: current.temperature,
       cloudCoverPercent: current.cloudCover,
-      precipMm: current.precipitation ?? 0.0,
-      precipProb: probHour,
+      precipMm: mm,
+      precipProb: roundPrecipProbPercent(rawProb),
       radarCoverageActive: radarCoverageActive,
     );
-    code = applyNearbyLightningIcon(
-      code,
-      lightningNearby: lightningNearby,
-      precipMm: current.precipitation ?? 0.0,
-      precipProb: probHour,
-    );
-    code = suppressThunderWithoutLightning(
-      code,
-      lightningNearby: lightningNearby,
-      precipProb: probHour,
-      precipMm: current.precipitation ?? 0.0,
-      cloudCoverPercent: current.cloudCover,
-      ecmwfApiCode: current.weatherCode,
-    );
+    if (openMeteoHourlyWetShowsInUi(
+          prob: rawProb,
+          mm: mm,
+          weatherCode: current.weatherCode,
+        ) ||
+        kPrecipitationCodes.contains(code)) {
+      code = hourlyStripPrecipIntensityIcon(
+        baseCode: code,
+        precipMm: mm,
+        tempC: current.temperature,
+      );
+    }
     final hourIso = current.time?.toIso8601String();
     return (code: code, hourIso: hourIso);
   }
@@ -1115,70 +1101,14 @@ double? _cloudCoverMedianOddWindow(HourlyForecast h, _SmoothedValues smoothed, i
   return vals.length.isOdd ? vals[mid] : 0.5 * (vals[mid - 1] + vals[mid]);
 }
 
-/// Ikona pre jeden hodinový riadok pred časovým vyhladením (WMO + prahy).
+/// Ikona pre jeden hodinový riadok — priamo z Open-Meteo API.
 int _hourlySlotRawDisplayIconCode(
   HourlyForecast h,
   int index,
   _SmoothedValues smoothed,
   int smoothedIndex,
-) {
-  if (smoothedIndex >= smoothed.weatherCodes.length) return 0;
-  final int smoothedCode = smoothed.weatherCodes[smoothedIndex] ?? 0;
-  final int apiCode = h.weatherCode != null && index < h.weatherCode!.length
-      ? (h.weatherCode![index] ?? smoothedCode)
-      : smoothedCode;
-  final bool hasPrecipProbData = h.precipitationProbability != null &&
-      index < h.precipitationProbability!.length;
-  final int rawProbPercent =
-      hasPrecipProbData ? (h.precipitationProbability![index] ?? 0) : 0;
-  double? slotCloudMed = smoothed.cloudCover.length > smoothedIndex
-      ? smoothed.cloudCover[smoothedIndex]
-      : null;
-  // Ak pre hodinu chýba cloud_cover, použi najbližšiu susednú hodinovú hodnotu.
-  // Zabránime tak tomu, aby ikona padla naspäť na surový WMO kód (často 3 = zamračené).
-  if (slotCloudMed == null && smoothed.cloudCover.isNotEmpty) {
-    for (var d = 1; d < smoothed.cloudCover.length; d++) {
-      final left = smoothedIndex - d;
-      if (left >= 0) {
-        final v = smoothed.cloudCover[left];
-        if (v != null) {
-          slotCloudMed = v;
-          break;
-        }
-      }
-      final right = smoothedIndex + d;
-      if (right < smoothed.cloudCover.length) {
-        final v = smoothed.cloudCover[right];
-        if (v != null) {
-          slotCloudMed = v;
-          break;
-        }
-      }
-    }
-  }
-  slotCloudMed ??=
-      (h.cloudCover != null && index < h.cloudCover!.length) ? h.cloudCover![index] : null;
-  slotCloudMed = _cloudCoverMedianOddWindow(h, smoothed, index, smoothedIndex, 2) ??
-      _cloudCoverMedianOddWindow(h, smoothed, index, smoothedIndex, 1) ??
-      slotCloudMed;
-  final double? slotMm = smoothed.precipitation.length > smoothedIndex
-      ? smoothed.precipitation[smoothedIndex]
-      : null;
-  final code = _weatherIconCodeWithPrecipThreshold(
-    apiCode,
-    rawProbPercent,
-    cloudCoverPercent: slotCloudMed,
-    hourlyPrecipitationMm: slotMm,
-    snowfallCm: 0.0,
-    apiWeatherCodeForPrecip: apiCode,
-  );
-  return _clampPrecipitationIconIntensity(
-    code,
-    rawProbPercent,
-    slotMm ?? 0.0,
-    isDailyContext: false,
-  );
-}
+) =>
+    openMeteoHourSlotUiFromApi(h: h, idx: index).displayIconCode;
 
 /// Zarovná izolované výkyvy oblačnosti v hodinovke.
 /// Cieľ je znížiť "bliknutie" ikon medzi susednými hodinami.
@@ -1404,39 +1334,13 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
   if (end <= start) return null;
 
   final stripIndices = List.generate(end - start, (j) => start + j);
-  final smoothed = _smoothHourlyData(h, start, end, current, daily, locTime);
-  var displayIcons = List<int>.generate(
-    stripIndices.length,
-    (j) => _hourlySlotRawDisplayIconCode(h, stripIndices[j], smoothed, j),
-  );
-  displayIcons = _smoothFairWeatherHourlyIconCodes(displayIcons);
 
+  final displayIcons = List<int>.filled(stripIndices.length, 3);
   final showRainPrecip = List<bool>.filled(stripIndices.length, false);
   final storedProbs = List<int>.filled(stripIndices.length, 0);
   final precipMmList = List<double>.filled(stripIndices.length, 0.0);
 
-  for (var i = 0; i < stripIndices.length; i++) {
-    final idx = stripIndices[i];
-    final iconCode = displayIcons[i];
-    final rawMm =
-        smoothed.precipitation[i] ?? h.precipitation?[idx] ?? 0.0;
-    final storedProb = h.precipitationProbability?[idx] ?? 0;
-    showRainPrecip[i] = hourlyStripShowRainPrecip(
-      iconCode: iconCode,
-      precipMm: rawMm,
-      precipProb: storedProb,
-      ecmwfApiCode: h.weatherCode?[idx],
-    );
-    storedProbs[i] = storedProb;
-    precipMmList[i] = rawMm;
-  }
-
-  final preRadarIcons = List<int>.from(displayIcons);
-  final preRadarShowRain = List<bool>.from(showRainPrecip);
-  final preRadarProbs = List<int>.from(storedProbs);
-  final preRadarMm = List<double>.from(precipMmList);
-
-  applyRadarPrecipEndToHourlyStrip(
+  applyUnifiedHourlyStripPrecip(
     displayIcons: displayIcons,
     showRainPrecip: showRainPrecip,
     storedProbs: storedProbs,
@@ -1449,132 +1353,28 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
     radarCoverageActive: radarCoverageActive,
   );
 
-  if (radarNowcast.eligible && !useRadarOnlyNearTermPrecip(radarNowcast) &&
-      !radarNowcast.radarOverridesDryEcmwfNearTerm &&
-      !(radarNowcast.radarPrecipBandPassedPin &&
-          !radarNowcast.incomingPrecip)) {
-    final trimStop = radarEcmwfTrimHardStopLocal(locTime, radarNowcast);
-    for (var i = 0; i < stripIndices.length; i++) {
-      final idx = stripIndices[i];
-      final parsed = DateTime.tryParse(h.time[idx]);
-      if (parsed == null) continue;
-      final localT = utcOffsetSeconds != null
-          ? parsed.add(Duration(seconds: utcOffsetSeconds))
-          : parsed;
-      final slotHour = DateTime(
-        localT.year,
-        localT.month,
-        localT.day,
-        localT.hour,
-      );
-      if (!slotHour.isAfter(trimStop)) continue;
-      if (radarNowcast.authorizesPrecipAtLocalHour(slotHour, locTime)) continue;
-      if (radarNowcast.suppressEcmwfStripPrecipAtHour(slotHour, locTime)) {
-        continue;
-      }
-
-      displayIcons[i] = preRadarIcons[i];
-      showRainPrecip[i] = preRadarShowRain[i];
-      storedProbs[i] = preRadarProbs[i];
-      precipMmList[i] = preRadarMm[i];
-    }
-  }
-
-  _syncHourlyStripPrecipMmFromEcmwf(
-    precipMm: precipMmList,
-    storedProbs: storedProbs,
-    showRainPrecip: showRainPrecip,
+  final curIdx = _hourlyIndexContainingLocalTime(h, locTime);
+  alignHourlyStripThunderWithProbability(
     displayIcons: displayIcons,
+    showRainPrecip: showRainPrecip,
+    storedProbs: storedProbs,
+    precipMm: precipMmList,
     stripIndices: stripIndices,
     h: h,
-    radarCtx: radarNowcast,
+    lightningNearby: lightningNearby,
+    lightningHourIndex: curIdx,
+  );
+  applyHourlyStripPrecipPercentRamp(
+    displayIcons: displayIcons,
+    showRainPrecip: showRainPrecip,
+    storedProbs: storedProbs,
+    precipMm: precipMmList,
+    stripIndices: stripIndices,
+    h: h,
     locTime: locTime,
     utcOffsetSeconds: utcOffsetSeconds,
+    radarCtx: radarNowcast,
   );
-
-  final curIdx = _hourlyIndexContainingLocalTime(h, locTime);
-  for (var i = 0; i < stripIndices.length; i++) {
-    final idx = stripIndices[i];
-    final mm = precipMmList[i];
-    final prob = storedProbs[i];
-    final cloud = h.cloudCover?[idx];
-    final apiCode = h.weatherCode?[idx];
-    var code = displayIcons[i];
-
-    if (lightningNearby && curIdx != null && idx == curIdx) {
-      code = applyNearbyLightningIcon(
-        code,
-        lightningNearby: true,
-        precipMm: mm,
-        precipProb: prob,
-      );
-      code = suppressThunderWithoutLightning(
-        code,
-        lightningNearby: true,
-        precipProb: prob,
-        precipMm: mm,
-        cloudCoverPercent: cloud,
-        ecmwfApiCode: apiCode,
-      );
-    } else {
-      code = applyEcmwfJsonThunderHourIcon(
-        code,
-        ecmwfApiCode: apiCode,
-        precipProb: prob,
-        precipMm: mm,
-        lightningNearby: false,
-      );
-      code = suppressThunderWithoutLightning(
-        code,
-        lightningNearby: false,
-        precipProb: prob,
-        precipMm: mm,
-        cloudCoverPercent: cloud,
-        ecmwfApiCode: apiCode,
-      );
-    }
-
-    displayIcons[i] = code;
-    showRainPrecip[i] = hourlyStripShowRainPrecip(
-      iconCode: code,
-      precipMm: mm,
-      precipProb: prob,
-      ecmwfApiCode: apiCode,
-    );
-  }
-
-  if (radarNowcast.eligible) {
-    for (var i = 0; i < stripIndices.length; i++) {
-      final idx = stripIndices[i];
-      final parsed = DateTime.tryParse(h.time[idx]);
-      if (parsed == null) continue;
-      final localT = utcOffsetSeconds != null
-          ? parsed.add(Duration(seconds: utcOffsetSeconds))
-          : parsed;
-      final slotHour = DateTime(
-        localT.year,
-        localT.month,
-        localT.day,
-        localT.hour,
-      );
-      if (!radarNowcast.suppressEcmwfStripPrecipAtHour(slotHour, locTime)) {
-        continue;
-      }
-      displayIcons[i] = skyWmoFromCloudCover(h.cloudCover?[idx]);
-      showRainPrecip[i] = false;
-      storedProbs[i] = 0;
-      precipMmList[i] = 0;
-    }
-  }
-
-  for (var i = 0; i < stripIndices.length; i++) {
-    displayIcons[i] = _clampPrecipitationIconIntensity(
-      displayIcons[i],
-      storedProbs[i],
-      precipMmList[i],
-      isDailyContext: false,
-    );
-  }
 
   final icons = <int, int>{};
   final precipMm = <int, double>{};
@@ -1772,7 +1572,7 @@ int _dominantFromHourlyDisplayedCodes(List<int> codes) {
   return counts.entries.reduce((a, b) => a.value > b.value ? a : b).key;
 }
 
-/// Ikony ako v zozname „24 h“, ale dopočítané pre celý deň `[datePrefix]` (smooth + RAW prahy + fair-weather smoothing).
+/// Ikony pre celý kalendárny deň — priamo z Open-Meteo API (bez smooth / fair-weather).
 (int dayStartIdx, List<int> displayedIcons)? _hourlyFairDisplayIconsForCalendarDay(
   HourlyForecast h,
   String datePrefix,
@@ -1789,14 +1589,12 @@ int _dominantFromHourlyDisplayedCodes(List<int> codes) {
   }
   if (dayStartIdx < 0 || dayEndExclusive <= dayStartIdx) return null;
 
-  final smoothed = _smoothHourlyData(h, dayStartIdx, dayEndExclusive, current, daily, locationTime);
   final span = dayEndExclusive - dayStartIdx;
-  final raw = List<int>.generate(
+  final icons = List<int>.generate(
     span,
-    (j) => _hourlySlotRawDisplayIconCode(h, dayStartIdx + j, smoothed, j),
+    (j) => openMeteoHourSlotUiFromApi(h: h, idx: dayStartIdx + j).displayIconCode,
   );
-  final fair = _smoothFairWeatherHourlyIconCodes(raw);
-  return (dayStartIdx, fair);
+  return (dayStartIdx, icons);
 }
 
 /// Najsilnejší WMO búrkový kód v zozname hodín bloku (poradie 95, 96, 99 podľa čísla).
@@ -1844,8 +1642,6 @@ _SmoothedValues _smoothHourlyData(HourlyForecast h, int start, int end,
   final smoothedApparentTemperature = <double?>[];
   final smoothedIsDaytime = <bool>[];
 
-  final precipTailTrim = ecmwfPrecipEventTailTrimMask(h);
-
   for (int i = start; i < end; i++) {
     smoothedTemps.add(h.temperature?[i]);
 
@@ -1859,7 +1655,6 @@ _SmoothedValues _smoothHourlyData(HourlyForecast h, int start, int end,
       rawPrecip,
       isHourly: true,
       timeStr: h.time[i],
-      trimPrecipTail: precipTailTrim[i],
       cloudCoverPercent: h.cloudCover?[i],
     );
 
@@ -2037,31 +1832,11 @@ Map<String, dynamic> _getDayPartWeather(
   int countCloudRawInPart = 0;
   final String datePrefix = date;
 
-  final DateTime? locForHourlyPipe = locationTime;
-  /// Ten istý pás ikon ako panel „24 h“ — aj pre zajtrajšok, ak je v najbližších 24 h.
-  final Map<int, int>? stripIconsByIdx = stripState?.icons ??
-      (current != null && locForHourlyPipe != null
-          ? _hourlyStripDisplayIconByIndex(
-              hourly, locForHourlyPipe, current, daily, utcOffsetSeconds)
-          : null);
-
-  final Map<String, (int, List<int>)?>? slicesFair =
-      current != null && locForHourlyPipe != null ? <String, (int, List<int>)?>{} : null;
-
-  /// Fair-mriežka pre hodinu používa **kalendár dňa danej hodiny** (noc po polnoci: slot patrí inému „dňu forecastu“, nie len k dátumu kartičky).
-  (int, List<int>)? sliceEnsure(String isoDay) =>
-      slicesFair!.putIfAbsent(
-          isoDay,
-          () => _hourlyFairDisplayIconsForCalendarDay(
-              hourly,
-              isoDay,
-              current!,
-              daily,
-              locForHourlyPipe!));
+  /// Ten istý pás ikon ako panel „24 h“ — len ak je úsek v strip okne (bez padania do radaru).
+  final Map<int, int>? stripIconsByIdx = stripState?.icons;
 
   final List<int> partGridDisplayedCodes = [];
   final List<int> partGridStripOnlyCodes = [];
-  final precipTailTrim = ecmwfPrecipEventTailTrimMask(hourly);
 
   var stripAlignedPart = false;
   if (stripState != null) {
@@ -2108,67 +1883,25 @@ Map<String, dynamic> _getDayPartWeather(
         if (!stripAlignedPart) continue;
       }
 
-      int rawCode = hourly.weatherCode?[i] ?? 0;
-      int rawProb = hourly.precipitationProbability?[i] ?? 0;
-      double rawPrecip = hourly.precipitation?[i] ?? 0.0;
+      final rawProb = hourly.precipitationProbability?[i] ?? 0;
+      final rawPrecip = hourly.precipitation?[i] ?? 0.0;
       if (rawProb > maxProbRawInPart) maxProbRawInPart = rawProb;
       if (rawPrecip > maxPrecipRawInPart) maxPrecipRawInPart = rawPrecip;
       sumPrecipRawInPart += rawPrecip;
 
-      final processed = _processWeather(
-        rawCode,
-        rawProb,
-        rawPrecip,
-        isHourly: false,
-        timeStr: timeStr,
-        trimPrecipTail: precipTailTrim[i],
-        cloudCoverPercent: ccList != null && i < ccList.length ? ccList[i] : null,
-        daysFromToday: daysFromToday,
-      );
-
-      codes.add(processed.code);
-      precip.add(processed.precip);
-      probs.add(processed.prob);
+      /// Open-Meteo jediný zdroj — žiadny radar getter chain (Stack Overflow na „10 dní“).
+      final slotUi = openMeteoHourSlotUiFromApi(h: hourly, idx: i);
+      codes.add(slotUi.displayIconCode);
+      precip.add(slotUi.precipMm);
+      probs.add(slotUi.displayProbPercent);
 
       times.add(timeStr);
 
-      var iconForPart = processed.code;
-      if (slicesFair != null) {
-        final dayStampLocal = _calendarDateStamp(localSlot);
-        final fk = sliceEnsure(dayStampLocal);
-        if (fk != null) {
-          final (dsBk, iconsBk) = fk;
-          final offBk = i - dsBk;
-          if (offBk >= 0 && offBk < iconsBk.length) {
-            iconForPart = iconsBk[offBk];
-          }
-        }
-      }
-
+      var iconForPart = slotUi.displayIconCode;
       final stripIcon = stripIconsByIdx?[i];
       if (stripIcon != null) {
         iconForPart = stripIcon;
         partGridStripOnlyCodes.add(iconForPart);
-      } else if (radarNowcast.eligible && locationTime != null) {
-        final slotHour = DateTime(
-          localSlot.year,
-          localSlot.month,
-          localSlot.day,
-          localSlot.hour,
-        );
-        if (radarNowcast.authorizesPrecipAtLocalHour(slotHour, locationTime)) {
-          final slotTemp = hourly.temperature?[i];
-          final dbz = radarNowcast.precipNow
-              ? radarNowcast.precipIntensityDbz
-              : radarNowcast.stripDisplayDbz;
-          final snow = radarNowcast.fromRainViewer
-              ? rainViewerSnowLikely(tempC: slotTemp, uiDbz: dbz)
-              : radarSnowLikely(tempC: slotTemp);
-          iconForPart = radarNowcast.fromRainViewer
-              ? wmoFromRainViewerDbz(dbz, snow: snow)
-              : wmoFromRadarDbz(dbz, snow: snow);
-          partGridStripOnlyCodes.add(iconForPart);
-        }
       }
       partGridDisplayedCodes.add(iconForPart);
     }
@@ -2325,7 +2058,9 @@ Map<String, dynamic> _getDayPartWeather(
     iconProb = math.max(iconProb, dailyPrecipProbMax);
   }
 
-  final bool snowBlock = kSnowWeatherCodes.contains(blockIconCandidate) ||
+  final bool snowBlock = dailyTotalSnowCm >= 0.5 ||
+      (avgTemp != null && avgTemp <= kSnowMaxAirTempC) ||
+      kSnowWeatherCodes.contains(blockIconCandidate) ||
       codesForPartIcon.any(kSnowWeatherCodes.contains);
 
   /// Intenzitu ikony úseku z hodinového súčtu v tom úseku — nie z celého dňa.
@@ -2377,25 +2112,6 @@ Map<String, dynamic> _getDayPartWeather(
     blockIconCode = _precipIconForcedDryWhenSuppressed(blockIconCode, cloudCoverPercent: avgCloudInPart);
   }
 
-  if (!suppressWetDayIcons &&
-      radarNowcast.eligible &&
-      locationTime != null) {
-    final partRadar = _dayPartHasRadarPrecip(
-      hourly,
-      date,
-      part,
-      locationTime,
-      radarNowcast,
-      utcOffsetSeconds: utcOffsetSeconds,
-    );
-    blockIconCode = applyRadarPrecipToDayPartIcon(
-      blockIconCode,
-      radarCtx: radarNowcast,
-      partHasRadarPrecip: partRadar,
-      tempC: avgTemp,
-    );
-  }
-
   // Ak 24 h pás pre tento úsek hlási zrážky, doplni ikonu (neprepisuj sucho z ECMWF).
   if (stripState != null) {
     final stripPartIcon = _dominantPrecipIconForDayPartFromStrip(
@@ -2420,22 +2136,26 @@ Map<String, dynamic> _getDayPartWeather(
     intensitySnowCm: intensitySnowCm,
   );
 
+  // −2 °C / denný sneh → sneženie; intenzita podľa súčtu úseku (nie prahy 1 h z 24 h).
   if (!suppressWetDayIcons &&
-      dayPartHeavyPrecipWarranted(iconSumMm, intensityProb)) {
-    final apiWetInPart = apiMaxProbInPart >= kMinPrecipProbPercent &&
-        apiMaxPrecipInPart >= kMeaningfulPrecipMmPerHour;
-    if (kPrecipitationCodes.contains(blockIconCode) &&
-        !kSnowWeatherCodes.contains(blockIconCode)) {
-      blockIconCode = 65;
-    } else if (apiWetInPart) {
-      blockIconCode = 65;
-    }
-  }
-  if (!suppressWetDayIcons &&
-      dayPartHeavySnowWarranted(partSnowCm, intensityProb) &&
-      kSnowWeatherCodes.contains(blockIconCode)) {
-    if (blockIconCode == 71 || blockIconCode == 73) blockIconCode = 75;
-    if (blockIconCode == 85) blockIconCode = 86;
+      (kPrecipitationCodes.contains(blockIconCode) ||
+          iconSumMm >= kMeaningfulPrecipMmPerHour ||
+          dailyTotalSnowCm >= 0.5)) {
+    final partCm = partSnowCm > 0
+        ? partSnowCm
+        : (dailyTotalSnowCm > 0 && dailyTotalPrecipMm > 0
+            ? dailyTotalSnowCm * (iconSumMm / dailyTotalPrecipMm).clamp(0.0, 1.0)
+            : (dailyTotalSnowCm > 0
+                ? dailyTotalSnowCm * (temps.length / 24.0).clamp(0.05, 1.0)
+                : 0.0));
+    blockIconCode = dayPartPrecipDisplayIcon(
+      code: blockIconCode,
+      avgTempC: avgTemp,
+      partSumMm: iconSumMm,
+      probPercent: intensityProb,
+      partSnowCm: partCm,
+      dailySnowCm: dailyTotalSnowCm,
+    );
   }
 
   Widget iconWidget = getWeatherIcon(
