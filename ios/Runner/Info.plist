@@ -43,7 +43,6 @@
 	</array>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
-<<<<<<< HEAD
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSExceptionDomains</key>
@@ -57,10 +56,7 @@
 			</dict>
 		</dict>
 	</dict>
-
-=======
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 </dict>
 </plist>
->>>>>>> ca3055ad5461b7d3ea7d02b1ad01836646ce996b
