@@ -9,6 +9,10 @@ const String _kOpenMeteoDailyVars =
 const String _kOpenMeteoCurrentVars =
     'temperature_2m,is_day,weather_code,cloud_cover,precipitation,wind_speed_10m,wind_direction_10m,relative_humidity_2m,apparent_temperature,pressure_msl,uv_index';
 
+/// Best Match — len oblačnosť / sky WMO z ECMWF (ľahký request).
+const String _kEcmwfCloudHourlyVars = 'cloud_cover,weather_code';
+const String _kEcmwfCloudCurrentVars = 'cloud_cover,weather_code';
+
 String _openMeteoCacheKey(
   double lat,
   double lon,
@@ -51,6 +55,150 @@ Uri _openMeteoForecastUri(
   return Uri.parse(model.apiBase).replace(queryParameters: params);
 }
 
+Uri _ecmwfCloudCoverUri(double lat, double lon, String timezone) {
+  final tz = _normalizeApiTimezone(timezone);
+  return Uri.parse(WeatherForecastModel.openMeteo.apiBase).replace(
+    queryParameters: <String, String>{
+      'latitude': lat.toStringAsFixed(4),
+      'longitude': lon.toStringAsFixed(4),
+      'hourly': _kEcmwfCloudHourlyVars,
+      'current': _kEcmwfCloudCurrentVars,
+      'forecast_days': kOpenMeteoForecastDays.toString(),
+      'timezone': tz,
+    },
+  );
+}
+
+num? _asNum(dynamic v) {
+  if (v == null) return null;
+  if (v is num) return v;
+  return num.tryParse(v.toString());
+}
+
+/// Best Match + ECMWF oblačnosť — jasno/polooblačno podľa ECMWF `cloud_cover`.
+Map<String, dynamic> _mergeEcmwfCloudIntoBestMatch(
+  Map<String, dynamic> bestMatch,
+  Map<String, dynamic> ecmwf,
+) {
+  final bmHourly = bestMatch['hourly'];
+  final ecHourly = ecmwf['hourly'];
+  if (bmHourly is! Map || ecHourly is! Map) {
+    return {...bestMatch, 'ecmwf_cloud_overlay': false};
+  }
+
+  final bmTimes = (bmHourly['time'] as List?)?.map((e) => e.toString()).toList();
+  final ecTimes = (ecHourly['time'] as List?)?.map((e) => e.toString()).toList();
+  final ecCloud = ecHourly['cloud_cover'] as List?;
+  final ecCodes = ecHourly['weather_code'] as List?;
+  if (bmTimes == null ||
+      ecTimes == null ||
+      ecCloud == null ||
+      bmTimes.isEmpty ||
+      ecTimes.isEmpty) {
+    return {...bestMatch, 'ecmwf_cloud_overlay': false};
+  }
+
+  final ecByTime = <String, int>{};
+  for (var i = 0; i < ecTimes.length; i++) {
+    ecByTime[ecTimes[i]] = i;
+  }
+
+  final bmCloud = List<dynamic>.from(
+    (bmHourly['cloud_cover'] as List?) ??
+        List<dynamic>.filled(bmTimes.length, null),
+  );
+  final bmCodes = List<dynamic>.from(
+    (bmHourly['weather_code'] as List?) ??
+        List<dynamic>.filled(bmTimes.length, null),
+  );
+  if (bmCloud.length < bmTimes.length) {
+    bmCloud.addAll(List<dynamic>.filled(bmTimes.length - bmCloud.length, null));
+  }
+  if (bmCodes.length < bmTimes.length) {
+    bmCodes.addAll(List<dynamic>.filled(bmTimes.length - bmCodes.length, null));
+  }
+
+  var mergedHours = 0;
+  for (var i = 0; i < bmTimes.length; i++) {
+    final ecIdx = ecByTime[bmTimes[i]];
+    if (ecIdx == null || ecIdx >= ecCloud.length) continue;
+    final cloud = _asNum(ecCloud[ecIdx])?.toDouble();
+    if (cloud == null) continue;
+    bmCloud[i] = cloud;
+    mergedHours++;
+
+    // Suché sky WMO (0–3): ber oblačnejší z Best Match vs ECMWF.
+    final bmCode = _asNum(bmCodes[i])?.toInt();
+    final ecCode =
+        (ecCodes != null && ecIdx < ecCodes.length) ? _asNum(ecCodes[ecIdx])?.toInt() : null;
+    if (bmCode != null && isSkyOnlyWmoCode(bmCode)) {
+      final fromCloud = skyWmoFromCloudCover(cloud);
+      final fromEcmwfSky = (ecCode != null && isSkyOnlyWmoCode(ecCode)) ? ecCode : fromCloud;
+      bmCodes[i] = math.max(bmCode, math.max(fromCloud, fromEcmwfSky));
+    } else if (bmCode == null) {
+      bmCodes[i] = skyWmoFromCloudCover(cloud);
+    }
+  }
+
+  final mergedHourly = Map<String, dynamic>.from(bmHourly)
+    ..['cloud_cover'] = bmCloud
+    ..['weather_code'] = bmCodes;
+
+  final merged = Map<String, dynamic>.from(bestMatch)
+    ..['hourly'] = mergedHourly
+    ..['ecmwf_cloud_overlay'] = true
+    ..['ecmwf_cloud_hours'] = mergedHours;
+
+  final bmCurrent = bestMatch['current'];
+  final ecCurrent = ecmwf['current'];
+  if (bmCurrent is Map && ecCurrent is Map) {
+    final current = Map<String, dynamic>.from(bmCurrent);
+    final ecCc = _asNum(ecCurrent['cloud_cover'])?.toDouble();
+    if (ecCc != null) {
+      current['cloud_cover'] = ecCc;
+      final bmCurCode = _asNum(current['weather_code'])?.toInt();
+      if (bmCurCode == null || isSkyOnlyWmoCode(bmCurCode)) {
+        final fromCloud = skyWmoFromCloudCover(ecCc);
+        final ecCurCode = _asNum(ecCurrent['weather_code'])?.toInt();
+        final fromEcmwfSky =
+            (ecCurCode != null && isSkyOnlyWmoCode(ecCurCode)) ? ecCurCode : fromCloud;
+        current['weather_code'] = math.max(bmCurCode ?? 0, math.max(fromCloud, fromEcmwfSky));
+      }
+      merged['current'] = current;
+    }
+  }
+
+  return merged;
+}
+
+Future<Map<String, dynamic>?> _downloadEcmwfCloudCover(
+  double lat,
+  double lon,
+  String timezone,
+) async {
+  try {
+    final uri = _ecmwfCloudCoverUri(lat, lon, timezone);
+    debugPrint('Open-Meteo (ECMWF cloud overlay): GET $uri');
+    final r = await http.get(
+      uri,
+      headers: const {
+        'Accept': 'application/json',
+        'User-Agent': 'pocasie-app/1.0 (flutter)',
+      },
+    ).timeout(const Duration(seconds: 25));
+    if (r.statusCode != 200) {
+      debugPrint('ECMWF cloud overlay HTTP ${r.statusCode}');
+      return null;
+    }
+    final raw = json.decode(r.body) as Map<String, dynamic>;
+    if (!raw.containsKey('hourly')) return null;
+    return raw;
+  } catch (e) {
+    debugPrint('ECMWF cloud overlay failed: $e');
+    return null;
+  }
+}
+
 /// Stiahne predpoveď z Open-Meteo API podľa zvoleného modelu.
 Future<Map<String, dynamic>?> _downloadOpenMeteoForecast(
   double lat,
@@ -72,7 +220,9 @@ Future<Map<String, dynamic>?> _downloadOpenMeteoForecast(
         if (cached['error'] != true &&
             cached.containsKey('hourly') &&
             forecastJsonDailyHorizonComplete(cached) &&
-            forecastJsonHas24HourWindow(cached)) {
+            forecastJsonHas24HourWindow(cached) &&
+            (model != WeatherForecastModel.bestMatch ||
+                cached['ecmwf_cloud_overlay'] == true)) {
           debugPrint('Open-Meteo (${model.uiTitle}): using cached data for $lat,$lon');
           return cached;
         }
@@ -109,7 +259,22 @@ Future<Map<String, dynamic>?> _downloadOpenMeteoForecast(
       return null;
     }
 
-    final map = _normalizeOpenMeteoForecast(raw, model);
+    var map = _normalizeOpenMeteoForecast(raw, model);
+
+    // Best Match: oblačnosť (jasno / polooblačno) z ECMWF — BM ju často podhodnocuje.
+    if (model == WeatherForecastModel.bestMatch) {
+      final ecmwfCloud = await _downloadEcmwfCloudCover(lat, lon, timezone);
+      if (ecmwfCloud != null) {
+        map = _mergeEcmwfCloudIntoBestMatch(map, ecmwfCloud);
+        debugPrint(
+          'Best Match: ECMWF cloud overlay '
+          '(${map['ecmwf_cloud_hours'] ?? 0} h)',
+        );
+      } else {
+        map = {...map, 'ecmwf_cloud_overlay': false};
+      }
+    }
+
     await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(map));
     debugPrint(
       'Open-Meteo (${model.uiTitle}): OK '

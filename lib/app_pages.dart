@@ -80,7 +80,6 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
 
   late WindUnit _selectedWindUnit;
   late bool _myLocationEnabled;
-  WeatherForecastModel _selectedForecastModel = WeatherForecastModel.bestMatch;
   TimeOfDay _dailySummaryTime = LocalTestPushService.fixedDailySummaryTime;
   TimeOfDay _eveningSummaryTime = LocalTestPushService.fixedEveningSummaryTime;
   Map<String, bool> _alertTypeStates = <String, bool>{};
@@ -117,7 +116,6 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
   Future<void> _loadSettingsBootstrap() async {
     try {
       final b = await SettingsManager.getSettingsScreenBootstrap();
-      final forecastModel = await SettingsManager.getForecastModel();
       final liveSystemPermission = await LocalTestPushService.areSystemNotificationsEnabled();
       final systemPermission = liveSystemPermission;
       await SettingsManager.setSystemNotificationsEnabled(systemPermission);
@@ -129,7 +127,6 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
         _dailySummaryTime = b.dailySummary;
         _eveningSummaryTime = b.eveningSummary;
         _widgetUpdateMinutes = b.widgetIntervalMinutes;
-        _selectedForecastModel = forecastModel;
       });
     } catch (_) {
       final storedSystemPermission = await SettingsManager.getSystemNotificationsEnabled();
@@ -183,7 +180,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
     ];
     final picked = await showModalBottomSheet<TimeOfDay>(
       context: context,
-      backgroundColor: const Color(0xFF2A3848),
+      backgroundColor: kAmbientBlendColor,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
@@ -279,13 +276,6 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
       setState(() {
         _selectedWindUnit = unit;
       });
-    }
-  }
-
-  Future<void> _saveForecastModel(WeatherForecastModel model) async {
-    await SettingsManager.setForecastModel(model);
-    if (mounted) {
-      setState(() => _selectedForecastModel = model);
     }
   }
 
@@ -534,89 +524,6 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.public, color: _kChartLineBlue, size: 22),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              'Globálny predpovedný model',
-                              style: _chartLabelStyle(size: 16).copyWith(
-                                color: _kChartTextPrimary,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                      child: Text(
-                        'Predvolené Open-Meteo API — bez ručného miešania modelov. Server zvolí najlepší mix pre tvoju polohu.',
-                        style: _chartCaptionStyle(size: 13).copyWith(
-                          color: _kChartTextSecondary,
-                          height: 1.35,
-                        ),
-                      ),
-                    ),
-                    ...WeatherForecastModel.values.asMap().entries.map((e) {
-                      final model = e.value;
-                      final isFirst = e.key == 0;
-                      final isSelected = _selectedForecastModel == model;
-                      return ListTile(
-                        visualDensity: VisualDensity.compact,
-                        contentPadding: EdgeInsets.fromLTRB(12, isFirst ? 0 : 2, 12, 2),
-                        horizontalTitleGap: 8,
-                        minVerticalPadding: 0,
-                        leading: Radio<WeatherForecastModel>(
-                          value: model,
-                          // ignore: deprecated_member_use
-                          groupValue: _selectedForecastModel,
-                          // ignore: deprecated_member_use
-                          onChanged: (value) async {
-                            if (value != null) {
-                              await _saveForecastModel(value);
-                            }
-                          },
-                          fillColor: WidgetStateProperty.resolveWith<Color>(
-                            (Set<WidgetState> states) => Colors.white,
-                          ),
-                        ),
-                        title: Text(
-                          model.uiTitle,
-                          style: _chartLabelStyle(size: 16).copyWith(
-                            color: _kChartTextPrimary,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                        subtitle: Text(
-                          model.uiSubtitle,
-                          style: _chartCaptionStyle(size: 13).copyWith(
-                            color: _kChartTextSecondary,
-                            height: 1.3,
-                          ),
-                        ),
-                        trailing: isSelected
-                            ? const Icon(Icons.check, color: _kChartLineBlue, size: 20)
-                            : null,
-                        onTap: () async {
-                          await _saveForecastModel(model);
-                        },
-                      );
-                    }),
-                  ],
-                ),
-              ),
-
-              _chartSectionDivider(),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
-                child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Padding(
@@ -722,7 +629,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
                         child: Text(
-                          'Ak systém aplikáciu príliš šetrí v pozadí, naplánované upozornenia nemusia prísť včas. Tu môžete povoliť výnimku (bez obmedzení batérie) pre Meteo Počasie.',
+                          'Ak systém aplikáciu príliš šetrí v pozadí, naplánované upozornenia nemusia prísť včas. Tu môžete povoliť výnimku (bez obmedzení batérie) pre aplikáciu Meteo Počasie.',
                           style: _chartCaptionStyle(size: 13).copyWith(
                             color: _kChartTextSecondary,
                             height: 1.35,
@@ -1121,7 +1028,7 @@ class _WebcamDetailPageState extends State<_WebcamDetailPage> {
             child: Container(
               margin: const EdgeInsets.symmetric(horizontal: 24),
               decoration: BoxDecoration(
-                color: const Color(0xFF2A3848),
+                color: kAmbientBlendColor,
                 borderRadius: BorderRadius.circular(20),
               ),
               child: Padding(
@@ -1177,7 +1084,7 @@ class _WebcamDetailPageState extends State<_WebcamDetailPage> {
                       child: ElevatedButton(
                         onPressed: () => Navigator.of(context).pop(),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF34495E),
+                          backgroundColor: kAmbientBlendColor,
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(10),
@@ -1712,7 +1619,7 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
       barrierColor: Colors.black.withAlpha(153),
       builder: (dialogContext) {
         return Dialog(
-          backgroundColor: const Color(0xFF2C3E50),
+          backgroundColor: kAmbientBlendColor,
           surfaceTintColor: Colors.transparent,
           elevation: 16,
           shadowColor: Colors.black54,
@@ -1726,7 +1633,7 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
                   width: double.maxFinite,
                   padding: const EdgeInsets.all(24),
                   decoration: const BoxDecoration(
-                    color: Color(0xFF243341),
+                    color: kAppCardNavy,
                     borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
                   ),
                   child: Column(
@@ -1840,7 +1747,7 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
       decoration: BoxDecoration(
-        color: const Color(0xFF243341).withAlpha(102),
+        color: kAppCardNavy.withAlpha(102),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: Colors.white.withAlpha(38),
@@ -2430,10 +2337,7 @@ class _PinnedHeaderDelegate extends SliverPersistentHeaderDelegate {
 
   @override
   Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) {
-    return Container(
-      height: 48,
-      color: const Color(0xFF2A3848), // kAmbientBlendColor = forecastSectionBackground
-    );
+    return const SizedBox(height: 48);
   }
 
   @override
@@ -2529,6 +2433,246 @@ class _CitySearchPageState extends State<CitySearchPage> {
     });
   }
 
+  BoxDecoration _citySearchBarDecoration() {
+    return BoxDecoration(
+      color: kAppCardNavyElevated,
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: kAppCardNavyBorder.withValues(alpha: 0.85)),
+    );
+  }
+
+  Widget _citySearchChromeButton({
+    required IconData icon,
+    required VoidCallback onTap,
+    bool active = false,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 40,
+        height: 40,
+        margin: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: active ? kAppAccentBlue : kAppCardNavy,
+          border: Border.all(
+            color: active
+                ? kAppAccentBlueBright.withValues(alpha: 0.45)
+                : kAppCardNavyBorder,
+          ),
+        ),
+        child: Center(
+          child: Icon(icon, size: 20, color: Colors.white),
+        ),
+      ),
+    );
+  }
+
+  Widget _citySectionLabel(String title, {IconData? icon}) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 2, 20, 12),
+      child: Row(
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 15, color: kAppAccentBlueBright),
+            const SizedBox(width: 7),
+          ],
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.7,
+              color: Colors.white.withValues(alpha: 0.5),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Kraj / región na zobrazenie — admin1, inak admin2; SK/CZ doplní „kraj“.
+  String _cityRegionLabel(GeoCity city) {
+    var region = city.admin1.trim();
+    if (region.isEmpty) region = city.admin2.trim();
+    if (region.isEmpty) return '';
+    return _formatRegionForDisplay(region, city.countryCode);
+  }
+
+  String _formatRegionForDisplay(String raw, String countryCode) {
+    final region = raw.trim();
+    if (region.isEmpty) return '';
+    final cc = countryCode.toUpperCase();
+    final lower = _foldDiacritics(region).toLowerCase();
+    final alreadyTyped = RegExp(
+      r'\b(kraj|okres|oblast|region|county|district|province|land|bundesland)\b',
+    ).hasMatch(lower);
+    if (!alreadyTyped && (cc == 'SK' || cc == 'CZ')) {
+      // Open-Meteo: „Trenčiansky“ → „Trenčiansky kraj“
+      if (RegExp(r'(ský|cký|ní)$', caseSensitive: false).hasMatch(region) ||
+          RegExp(r'(sky|cky|ni)$').hasMatch(lower)) {
+        return '$region kraj';
+      }
+    }
+    return region;
+  }
+
+  String _citySubtitle(GeoCity city) {
+    final region = _cityRegionLabel(city);
+    final country = city.country.trim();
+    if (region.isNotEmpty && country.isNotEmpty) {
+      return '$region$_citySubtitleSep$country';
+    }
+    if (region.isNotEmpty) return region;
+    return country;
+  }
+
+  /// Pri zlúčení Open-Meteo + Nominatim doplní chýbajúci kraj.
+  GeoCity _enrichCityRegion(GeoCity preferred, GeoCity other) {
+    if (preferred.admin1.trim().isNotEmpty) return preferred;
+    if (other.admin1.trim().isEmpty && other.admin2.trim().isEmpty) {
+      return preferred;
+    }
+    return GeoCity(
+      name: preferred.name,
+      lat: preferred.lat,
+      lon: preferred.lon,
+      country: preferred.country.isNotEmpty ? preferred.country : other.country,
+      countryCode:
+          preferred.countryCode.isNotEmpty ? preferred.countryCode : other.countryCode,
+      admin1: other.admin1.trim().isNotEmpty ? other.admin1 : preferred.admin1,
+      admin2: preferred.admin2.trim().isNotEmpty
+          ? preferred.admin2
+          : other.admin2,
+      population: preferred.population ?? other.population,
+      timezone: preferred.timezone,
+    );
+  }
+
+  Widget _cityListPanel({
+    required List<GeoCity> cities,
+    required bool history,
+  }) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        16,
+        0,
+        16,
+        16 + MediaQuery.of(context).viewInsets.bottom,
+      ),
+      child: DecoratedBox(
+        decoration: appSurfaceDecoration(radius: 22, withShadow: false),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(22),
+          child: ListView.separated(
+            shrinkWrap: true,
+            padding: EdgeInsets.zero,
+            itemCount: cities.length,
+            separatorBuilder: (_, __) => Divider(
+              height: 1,
+              thickness: 1,
+              color: kAppCardNavyBorder.withValues(alpha: 0.4),
+            ),
+            itemBuilder: (_, i) {
+              final city = cities[i];
+              final subtitle = _citySubtitle(city);
+              return Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: (_editMode && history) ? null : () => _choose(city),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: kAppAccentBlue.withValues(alpha: 0.16),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: kAppAccentBlueBright.withValues(alpha: 0.22),
+                            ),
+                          ),
+                          child: Center(
+                            child: history
+                                ? Icon(
+                                    Icons.location_on_outlined,
+                                    size: 20,
+                                    color: kAppAccentBlueBright.withValues(alpha: 0.95),
+                                  )
+                                : Text(
+                                    _flag(city.countryCode),
+                                    style: const TextStyle(fontSize: 18),
+                                  ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                city.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFFF5F8FC),
+                                  height: 1.2,
+                                ),
+                              ),
+                              if (subtitle.isNotEmpty) ...[
+                                const SizedBox(height: 3),
+                                Text(
+                                  subtitle,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                    color: Color(0xFFB8C8DA),
+                                    height: 1.25,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        if (_editMode && history)
+                          IconButton(
+                            onPressed: () => _removeFromHistory(city),
+                            visualDensity: VisualDensity.compact,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(
+                              minWidth: 36,
+                              minHeight: 36,
+                            ),
+                            icon: Icon(
+                              Icons.close_rounded,
+                              size: 18,
+                              color: Colors.white.withValues(alpha: 0.45),
+                            ),
+                          )
+                        else
+                          Icon(
+                            Icons.north_east_rounded,
+                            size: 16,
+                            color: Colors.white.withValues(alpha: 0.28),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final bool showHistory = _c.text.isEmpty && _searchHistory.isNotEmpty;
@@ -2539,55 +2683,29 @@ class _CitySearchPageState extends State<CitySearchPage> {
       title: 'Vyhľadávanie miest',
       wrapBodyInGlass: false,
       resizeToAvoidBottomInset: false,
-      leading: GestureDetector(
-          onTap: () {
-            if (_editMode) {
-              _toggleEditMode();
-            } else {
-              Navigator.of(context).maybePop();
-            }
-          },
-          child: Container(
-            width: 36,
-            height: 36,
-            margin: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: const Color.fromRGBO(255, 255, 255, 0.1),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Center(
-              child: Icon(_editMode ? Icons.close : Icons.arrow_back, size: 22, color: Colors.white),
-            ),
-          ),
-        ),
+      leading: _citySearchChromeButton(
+        icon: _editMode ? Icons.close : Icons.arrow_back,
+        onTap: () {
+          if (_editMode) {
+            _toggleEditMode();
+          } else {
+            Navigator.of(context).maybePop();
+          }
+        },
+      ),
       actions: [
         if (showHistory)
-          GestureDetector(
+          _citySearchChromeButton(
+            icon: Icons.delete_outline,
+            active: _editMode,
             onTap: _toggleEditMode,
-            child: Container(
-              width: 36,
-              height: 36,
-              margin: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: _editMode ? _kChartLineBlue : const Color.fromRGBO(255, 255, 255, 0.1),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Center(
-                child: Icon(Icons.delete_outline, size: 22, color: Colors.white),
-              ),
-            ),
           ),
       ],
       body: Column(
         children: [
           Container(
-            margin: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-            decoration: BoxDecoration(
-              color: const Color.fromRGBO(255, 255, 255, 0.08),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color.fromRGBO(255, 255, 255, 0.1)),
-              boxShadow: const [BoxShadow(color: Color.fromRGBO(0, 0, 0, 0.2), blurRadius: 8, offset: Offset(0, 2))],
-            ),
+            margin: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            decoration: _citySearchBarDecoration(),
             child: TextField(
               controller: _c,
               focusNode: _focus,
@@ -2595,11 +2713,23 @@ class _CitySearchPageState extends State<CitySearchPage> {
               onSubmitted: (_) {
                 if (_results.isNotEmpty) _choose(_results.first);
               },
-              style: const TextStyle(color: Colors.white, fontSize: 16),
+              style: const TextStyle(
+                color: Color(0xFFF2F6FA),
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+              ),
+              cursorColor: kAppAccentBlueBright,
               decoration: InputDecoration(
                 hintText: 'Zadajte názov mesta...',
-                hintStyle: const TextStyle(color: Color.fromRGBO(255, 255, 255, 0.6)),
-                prefixIcon: const Icon(Icons.search, size: 24, color: Color.fromRGBO(255, 255, 255, 0.6)),
+                hintStyle: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.4),
+                  fontWeight: FontWeight.w400,
+                ),
+                prefixIcon: Icon(
+                  Icons.search_rounded,
+                  size: 22,
+                  color: kAppAccentBlueBright.withValues(alpha: 0.85),
+                ),
                 suffixIcon: _c.text.isNotEmpty
                     ? GestureDetector(
                         onTap: () {
@@ -2608,16 +2738,17 @@ class _CitySearchPageState extends State<CitySearchPage> {
                             _results = <GeoCity>[];
                           });
                         },
-                        child: SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: Center(
-                          child: Icon(Icons.close, size: 18, color: Colors.white.withAlpha(153)),
-                        ),
+                        child: Icon(
+                          Icons.close_rounded,
+                          size: 20,
+                          color: Colors.white.withValues(alpha: 0.5),
                         ),
                       )
                     : null,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
                 filled: false,
                 border: InputBorder.none,
                 enabledBorder: InputBorder.none,
@@ -2626,26 +2757,27 @@ class _CitySearchPageState extends State<CitySearchPage> {
             ),
           ),
           if (_loading)
-            const LinearProgressIndicator(
-              minHeight: 2,
-              backgroundColor: Colors.transparent,
-              valueColor: AlwaysStoppedAnimation<Color>(_kChartLineBlue),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: LinearProgressIndicator(
+                minHeight: 2,
+                backgroundColor: Colors.transparent,
+                valueColor: AlwaysStoppedAnimation<Color>(kAppAccentBlue),
+              ),
             ),
           Expanded(
-            child: _forecastGlassBody(
-              child: Builder(
-                builder: (context) {
-                  if (showEmptyState) {
-                    return _buildEmptyState();
-                  } else if (showHistory) {
-                    return _buildHistoryList();
-                  } else if (showResults) {
-                    return _buildSearchResults();
-                  } else {
-                    return const SizedBox.shrink();
-                  }
-                },
-              ),
+            child: Builder(
+              builder: (context) {
+                if (showEmptyState) {
+                  return _buildEmptyState();
+                } else if (showHistory) {
+                  return _buildHistoryList();
+                } else if (showResults) {
+                  return _buildSearchResults();
+                } else {
+                  return const SizedBox.shrink();
+                }
+              },
             ),
           ),
         ],
@@ -2654,112 +2786,19 @@ class _CitySearchPageState extends State<CitySearchPage> {
   }
 
   Widget _buildHistoryList() {
-    if (_searchHistory.isEmpty) return _buildEmptyState(message: 'Žiadna história vyhľadávania.');
+    if (_searchHistory.isEmpty) {
+      return _buildEmptyState(message: 'Žiadna história vyhľadávania.');
+    }
 
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Padding(
-          padding: EdgeInsets.fromLTRB(20, 12, 20, 8),
-          child: Row(
-            children: [
-              Icon(Icons.history, size: 18, color: Colors.white70),
-              SizedBox(width: 8),
-              Text('Naposledy hľadané', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white70)),
-            ],
-          ),
+        _citySectionLabel(
+          'NAPOSLEDY HĽADANÉ',
+          icon: Icons.history_rounded,
         ),
         Expanded(
-          child: ListView.separated(
-            padding: EdgeInsets.fromLTRB(
-              12,
-              0,
-              12,
-              16 + MediaQuery.of(context).viewInsets.bottom,
-            ),
-            itemCount: _searchHistory.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
-            itemBuilder: (_, i) {
-              final c = _searchHistory[i];
-              return Container(
-                margin: const EdgeInsets.only(bottom: 6),
-                decoration: _chartStatTileDecoration(radius: 10),
-                child: Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(10),
-                    onTap: () {
-                      if (!_editMode) {
-                        _choose(c);
-                      }
-                    },
-                    child: Padding(
-                      padding: const EdgeInsets.all(10),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 36,
-                            height: 36,
-                            decoration: _chartStatTileDecoration(),
-                            child: const Center(
-                              child: Icon(Icons.history, size: 16, color: Colors.white),
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                SizedBox(
-                                  height: 20,
-                                  child: FittedBox(
-                                    fit: BoxFit.scaleDown,
-                                    alignment: Alignment.centerLeft,
-                                    child: Text(
-                                      c.name,
-                                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.white, height: 1.2),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                SizedBox(
-                                  height: 16,
-                                  child: FittedBox(
-                                    fit: BoxFit.scaleDown,
-                                    alignment: Alignment.centerLeft,
-                                    child: Text(
-                                      [c.admin1, c.country].where((e) => e.isNotEmpty).join(_citySubtitleSep),
-                                      style: const TextStyle(fontSize: 12, color: Color.fromRGBO(255, 255, 255, 0.7), height: 1.1),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          if (_editMode)
-                            GestureDetector(
-                              onTap: () => _removeFromHistory(c),
-                              child: Container(
-                                width: 36,
-                                height: 36,
-                                decoration: BoxDecoration(
-                                  color: const Color.fromRGBO(255, 255, 255, 0.05),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: const Center(
-                                  child: Icon(Icons.delete_outline, size: 18, color: Colors.white70),
-                                ),
-                              ),
-                            )
-                          else
-                            const SizedBox.shrink(),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
+          child: _cityListPanel(cities: _searchHistory, history: true),
         ),
       ],
     );
@@ -2770,98 +2809,40 @@ class _CitySearchPageState extends State<CitySearchPage> {
       return _buildEmptyState(message: 'Nenašli sa žiadne výsledky.');
     }
 
-    return ListView.separated(
-      padding: EdgeInsets.fromLTRB(
-        12,
-        12,
-        12,
-        16 + MediaQuery.of(context).viewInsets.bottom,
-      ),
-      itemCount: _results.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 6),
-      itemBuilder: (_, i) {
-        final c = _results[i];
-
-        return Container(
-          margin: const EdgeInsets.only(bottom: 6),
-          decoration: _chartStatTileDecoration(radius: 10),
-          child: Material(
-            color: Colors.transparent,
-            child: InkWell(
-              borderRadius: BorderRadius.circular(10),
-              onTap: () => _choose(c),
-              child: Padding(
-                padding: const EdgeInsets.all(10),
-                child: Row(
-                children: [
-                  Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF2A3848),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Center(
-                      child: Text(_flag(c.countryCode), style: const TextStyle(fontSize: 14)),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SizedBox(
-                          height: 20,
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              c.name,
-                              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.white, height: 1.2),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        SizedBox(
-                          height: 16,
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              [c.admin1, c.country].where((e) => e.isNotEmpty).join(_citySubtitleSep),
-                              style: const TextStyle(fontSize: 12, color: Color.fromRGBO(255, 255, 255, 0.7), height: 1.1),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _citySectionLabel('VÝSLEDKY'),
+        Expanded(
+          child: _cityListPanel(cities: _results, history: false),
         ),
-      );
-    },
-  );
-}
+      ],
+    );
+  }
 
-  Widget _buildEmptyState({String message = 'Zadajte názov mesta a vyberte z ponuky.'}) {
+  Widget _buildEmptyState({
+    String message = 'Zadajte názov mesta a vyberte z ponuky.',
+  }) {
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 40),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const SizedBox(
-              width: 64,
-              height: 64,
-              child: Icon(Icons.search, size: 48, color: Color.fromRGBO(255, 255, 255, 0.6)),
+            Icon(
+              Icons.travel_explore_rounded,
+              size: 40,
+              color: kAppAccentBlueBright.withValues(alpha: 0.55),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 14),
             Text(
               message,
-              style: const TextStyle(color: Color.fromRGBO(255, 255, 255, 0.6), fontSize: 15, height: 1.4),
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.5),
+                fontSize: 15,
+                height: 1.4,
+                fontWeight: FontWeight.w500,
+              ),
               textAlign: TextAlign.center,
             ),
           ],
@@ -2901,8 +2882,12 @@ class _CitySearchPageState extends State<CitySearchPage> {
     for (final c in cities) {
       final key = _cityDedupKey(c);
       final prev = uniqueByDedupKey[key];
-      if (prev == null || _preferSearchCity(c, prev)) {
+      if (prev == null) {
         uniqueByDedupKey[key] = c;
+      } else if (_preferSearchCity(c, prev)) {
+        uniqueByDedupKey[key] = _enrichCityRegion(c, prev);
+      } else {
+        uniqueByDedupKey[key] = _enrichCityRegion(prev, c);
       }
     }
     final mergedCities =
@@ -2915,6 +2900,9 @@ class _CitySearchPageState extends State<CitySearchPage> {
 
   /// Lepší záznam pri zhode z Open-Meteo + Nominatim (populácia, diakritika, úplnejší kraj).
   bool _preferSearchCity(GeoCity candidate, GeoCity current) {
+    final candHasRegion = candidate.admin1.trim().isNotEmpty;
+    final currHasRegion = current.admin1.trim().isNotEmpty;
+    if (candHasRegion != currHasRegion) return candHasRegion;
     final candPop = candidate.population ?? 0;
     final currPop = current.population ?? 0;
     if (candPop != currPop) return candPop > currPop;
@@ -2999,8 +2987,16 @@ class _CitySearchPageState extends State<CitySearchPage> {
       lon: lon,
       country: pick(['country']),
       countryCode: pick(['country_code']).toUpperCase(),
-      admin1: pick(['state', 'region']),
-      admin2: pick(['county', 'state_district']),
+      admin1: pick([
+        'state',
+        'region',
+        'province',
+        'county',
+        'state_district',
+        'ISO3166-2-lvl4',
+        'ISO3166-2-lvl5',
+      ]),
+      admin2: pick(['county', 'state_district', 'municipality', 'city_district']),
       population: null,
       timezone: 'auto',
     );
@@ -3085,7 +3081,9 @@ class _CitySearchPageState extends State<CitySearchPage> {
         }
 
         if (_preferSearchCity(c, selected)) {
-          selected = c;
+          selected = _enrichCityRegion(c, selected);
+        } else {
+          selected = _enrichCityRegion(selected, c);
         }
       }
       if (selected != null) out.add(selected);
@@ -3387,7 +3385,7 @@ class FullscreenRadarPage extends StatelessWidget {
                         child: Container(
                           margin: const EdgeInsets.symmetric(horizontal: 24),
                           decoration: BoxDecoration(
-                            color: const Color(0xFF2A3848),
+                            color: kAmbientBlendColor,
                             borderRadius: BorderRadius.circular(20),
                           ),
                           child: Padding(
@@ -3445,7 +3443,7 @@ class FullscreenRadarPage extends StatelessWidget {
                                       child: ElevatedButton(
                                         onPressed: () => Navigator.of(context).pop(),
                                         style: ElevatedButton.styleFrom(
-                                          backgroundColor: const Color(0xFF34495E),
+                                          backgroundColor: kAmbientBlendColor,
                                           padding: const EdgeInsets.symmetric(vertical: 12),
                                           shape: RoundedRectangleBorder(
                                             borderRadius: BorderRadius.circular(10),
@@ -3598,7 +3596,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   VystrahyWebViewPreloader._();
   static final VystrahyWebViewPreloader instance = VystrahyWebViewPreloader._();
 
-  static const Color pageBg = Color(0xFF091628);
+  static const Color pageBg = kAmbientBlendColor;
   static const List<int> _mapResizeInjectDelaysMs = [
     0,
     150,
@@ -3609,19 +3607,32 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     10000,
   ];
 
+  /// CDN / hosting assety — pred WebView, aby DNS + HTTP cache boli teplé.
+  static const List<String> _prefetchAssetUrls = [
+    kMeteoVystrahyUrl,
+    kMeteoVystrahyOkresyUrl,
+    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
+    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css',
+  ];
+
   WebViewController? _controller;
   bool _warming = false;
   bool _attachedToPage = false;
+  bool _assetsPrefetchStarted = false;
   bool loaded = false;
   bool loading = false;
   bool failed = false;
   Timer? _loadTimeout;
+  Timer? _scheduledWarmupTimer;
   final List<Timer> _mapResizeInjectTimers = [];
   double? _userLat;
   double? _userLon;
 
   WebViewController? get controller => _controller;
   bool get attachedToPage => _attachedToPage;
+  bool get isReadyForInstantOpen =>
+      _controller != null && loaded && !failed;
 
   void _notifySafely() {
     final binding = WidgetsBinding.instance;
@@ -3634,7 +3645,45 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     });
   }
 
+  /// Prednačítanie HTML + JSON hraníc + Leaflet (bez druhého WebView).
+  void prefetchAssets() {
+    if (_assetsPrefetchStarted) return;
+    _assetsPrefetchStarted = true;
+    unawaited(_prefetchAssetsNow());
+  }
+
+  Future<void> _prefetchAssetsNow() async {
+    await Future.wait(
+      _prefetchAssetUrls.map((url) async {
+        try {
+          await http
+              .get(Uri.parse(url))
+              .timeout(const Duration(seconds: 12));
+        } catch (_) {}
+      }),
+    );
+  }
+
+  /// Oneskorený WebView warmup — po štarte appky / radare, nie naraz (OOM).
+  void scheduleWarmup({
+    Duration delay = const Duration(seconds: 4),
+  }) {
+    prefetchAssets();
+    if (_controller != null || _warming) return;
+    _scheduledWarmupTimer?.cancel();
+    _scheduledWarmupTimer = Timer(delay, () {
+      warmup();
+    });
+  }
+
+  void cancelScheduledWarmup() {
+    _scheduledWarmupTimer?.cancel();
+    _scheduledWarmupTimer = null;
+  }
+
   void warmup() {
+    cancelScheduledWarmup();
+    prefetchAssets();
     if (_controller != null || _warming) return;
     _warming = true;
     unawaited(_ensureController());
@@ -3672,7 +3721,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   Widget buildWarmupHost() {
     final c = _controller;
     if (c == null || _attachedToPage) return const SizedBox.shrink();
-    return Offstage(
+    return const Offstage(
       child: SizedBox(
         width: 1,
         height: 1,
@@ -3867,122 +3916,138 @@ class _MeteoVystrahyPageState extends State<MeteoVystrahyPage> {
     final controller = _preloader.controller;
     final loading = _preloader.loading;
     final failed = _preloader.failed;
-    return Scaffold(
-      backgroundColor: _pageBg,
-      body: Column(
-        children: [
-          Container(
-            color: const Color(0xFF0D1F35),
-            padding: EdgeInsets.fromLTRB(8, top + 6, 8, 10),
-            child: Row(
-              children: [
-                GestureDetector(
-                  onTap: () => Navigator.of(context).pop(),
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Icon(Icons.arrow_back, color: Colors.white, size: 22),
-                  ),
-                ),
-                const Expanded(
-                  child: Text(
-                    'Meteo výstrahy SR',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-                GestureDetector(
-                  onTap: () => unawaited(_reload()),
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Icon(Icons.refresh_rounded, color: Colors.white, size: 22),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                if (controller != null)
-                  WebViewWidget(
-                    controller: controller,
-                    gestureRecognizers: {
-                      Factory<OneSequenceGestureRecognizer>(
-                        () => EagerGestureRecognizer(),
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: kAmbientBlendColor,
+        statusBarIconBrightness: Brightness.light,
+        statusBarBrightness: Brightness.dark,
+        systemNavigationBarColor: kAmbientBlendColor,
+        systemNavigationBarIconBrightness: Brightness.light,
+        systemNavigationBarDividerColor: kAmbientBlendColor,
+      ),
+      child: Scaffold(
+        backgroundColor: _pageBg,
+        body: Column(
+          children: [
+            Container(
+              color: kAmbientBlendColor,
+              padding: EdgeInsets.fromLTRB(8, top + 6, 8, 10),
+              child: Row(
+                children: [
+                  GestureDetector(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: kAppCardNavy,
+                        border: Border.all(color: kAppCardNavyBorder),
                       ),
-                    },
+                      child: const Center(
+                        child: Icon(Icons.arrow_back, color: Colors.white, size: 20),
+                      ),
+                    ),
                   ),
-                if (loading)
-                  const ColoredBox(
-                    color: _pageBg,
-                    child: Center(
-                      child: SizedBox(
-                        width: 32,
-                        height: 32,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.6,
-                          color: Color(0xFF4B9CFF),
+                  const Expanded(
+                    child: Text(
+                      'Meteo výstrahy SR',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: () => unawaited(_reload()),
+                    child: Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: kAppCardNavy,
+                        border: Border.all(color: kAppCardNavyBorder),
+                      ),
+                      child: const Center(
+                        child: Icon(Icons.refresh_rounded, color: Colors.white, size: 20),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (controller != null)
+                    WebViewWidget(
+                      controller: controller,
+                      gestureRecognizers: {
+                        Factory<OneSequenceGestureRecognizer>(
+                          () => EagerGestureRecognizer(),
+                        ),
+                      },
+                    ),
+                  if (loading && !_preloader.loaded)
+                    const ColoredBox(
+                      color: _pageBg,
+                      child: Center(
+                        child: SizedBox(
+                          width: 32,
+                          height: 32,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.6,
+                            color: kAppAccentBlue,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                if (failed && !loading)
-                  ColoredBox(
-                    color: _pageBg,
-                    child: Center(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 28),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(
-                              Icons.cloud_off_rounded,
-                              size: 48,
-                              color: Colors.white54,
-                            ),
-                            const SizedBox(height: 14),
-                            const Text(
-                              'Mapu výstrah sa nepodarilo načítať.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: Colors.white70,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w600,
+                  if (failed && !loading && !_preloader.loaded)
+                    ColoredBox(
+                      color: _pageBg,
+                      child: Center(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 28),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.cloud_off_rounded,
+                                size: 48,
+                                color: Colors.white54,
                               ),
-                            ),
-                            const SizedBox(height: 16),
-                            FilledButton(
-                              onPressed: () => unawaited(_reload()),
-                              style: FilledButton.styleFrom(
-                                backgroundColor: const Color(0xFF3498DB),
-                                foregroundColor: Colors.white,
+                              const SizedBox(height: 14),
+                              const Text(
+                                'Mapu výstrah sa nepodarilo načítať.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
-                              child: const Text('Skúsiť znova'),
-                            ),
-                          ],
+                              const SizedBox(height: 16),
+                              FilledButton(
+                                onPressed: () => unawaited(_reload()),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: kAppAccentBlue,
+                                  foregroundColor: Colors.white,
+                                ),
+                                child: const Text('Skúsiť znova'),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -4099,7 +4164,7 @@ class _SplashScreenContent extends StatelessWidget {
                   height: 42,
                   child: CircularProgressIndicator(
                     strokeWidth: 3.2,
-                    valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF4B9CFF)),
+                    valueColor: AlwaysStoppedAnimation<Color>(kAppAccentBlue),
                   ),
                 ),
                 SizedBox(height: 24),

@@ -8,10 +8,10 @@ alwaysApply: false
 
 ## Vzhľad
 
-- Základ: farba karty v appke `Color(0xFF2A3848)`.
-- Riadok / bunka: „sklo“ = `0x15FFFFFF` + okraj `0x28FFFFFF` a zaoblenie 10–14 dp (rovnaká logika ako v `WeatherPage` – `glassColor` + `glassBorderColor`).
-- Texty: biele a svetlosedé ako v hlavnej obrazovke; dôležité čísla `FontWeight.w800`, sekundárne `w600`.
-- Ikony počasia: `SvgPicture` z existujúcich `assets/*.svg` (kódy WMO), nie nové miesta na „odhad“ ikon.
+- Základ: farba karty v appke `kAppCardNavy` (`#243850`) — drawable `meteo_widget_bg` (gradient + border `#3A5674`, radius 20 dp).
+- Layout ako hero karta: **teplota + Pocitovo vľavo**, **ikona + popis vpravo**; Plus má dole panel Vietor / Východ·západ / Vlhkosť (`meteo_widget_hero_glass_info`).
+- Texty: biele a svetlosedé; dôležité čísla bold.
+- Ikony počasia: `SvgPicture` / bitmapy z existujúcich `assets/*.svg` (kódy WMO), nie nové miesta na „odhad“ ikon.
 
 ## Implementácia
 

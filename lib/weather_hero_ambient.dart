@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:pocasie/app_theme.dart';
 
 /// Pozadie podľa `weather_code` ako v `_weatherCodeMap`.
 ///
@@ -63,77 +64,42 @@ class _Palette {
   static Color skyTop(WeatherAmbientKind kind, bool isDay) {
     if (isDay) {
       return switch (kind) {
-        WeatherAmbientKind.clear => const Color(0xFF6790B8),
-        WeatherAmbientKind.partlyCloudy => const Color(0xFF7A9CBD),
-        // Nižší jas – predchádzaj prepálenému „prášku“ hore pri veľkých oblakoch.
-        WeatherAmbientKind.cloudy => const Color(0xFF6F8BAD),
-        WeatherAmbientKind.fog => const Color(0xFF7D92AD),
-        WeatherAmbientKind.drizzle => const Color(0xFF6D89AD),
-        WeatherAmbientKind.rain => const Color(0xFF5E7A99),
-        WeatherAmbientKind.snow => const Color(0xFF8FA4BC),
-        WeatherAmbientKind.thunder => const Color(0xFF4D5F85),
+        WeatherAmbientKind.clear => const Color(0xFF3A6A9A),
+        WeatherAmbientKind.partlyCloudy => const Color(0xFF406FA0),
+        WeatherAmbientKind.cloudy => const Color(0xFF456888),
+        WeatherAmbientKind.fog => const Color(0xFF4A6A84),
+        WeatherAmbientKind.drizzle => const Color(0xFF3A648C),
+        WeatherAmbientKind.rain => const Color(0xFF345A80),
+        WeatherAmbientKind.snow => const Color(0xFF4E708C),
+        WeatherAmbientKind.thunder => const Color(0xFF2E4E78),
       };
     }
-    return switch (kind) {
-      WeatherAmbientKind.clear => const Color(0xFF0E1628),
-      WeatherAmbientKind.partlyCloudy => const Color(0xFF111B2F),
-      WeatherAmbientKind.cloudy => const Color(0xFF101A2C),
-      WeatherAmbientKind.fog => const Color(0xFF151E30),
-      WeatherAmbientKind.drizzle => const Color(0xFF0F1929),
-      WeatherAmbientKind.rain => const Color(0xFF0D1726),
-      WeatherAmbientKind.snow => const Color(0xFF161F30),
-      WeatherAmbientKind.thunder => const Color(0xFF0A0F1C),
-    };
+    // Noc = rovnaký canvas ako scroll (bez zlomu).
+    return Color.lerp(kAmbientBlendColor, kAppCardNavy, 0.15)!;
   }
 
   static Color skyUpper(WeatherAmbientKind kind, bool isDay) {
     if (isDay) {
       return switch (kind) {
-        WeatherAmbientKind.clear => const Color(0xFF4F77A8),
-        WeatherAmbientKind.partlyCloudy => const Color(0xFF5F85B0),
-        WeatherAmbientKind.cloudy => const Color(0xFF5D82AD),
-        WeatherAmbientKind.fog => const Color(0xFF5C7390),
-        WeatherAmbientKind.drizzle => const Color(0xFF577896),
-        WeatherAmbientKind.rain => const Color(0xFF4B6C88),
-        WeatherAmbientKind.snow => const Color(0xFF6E879E),
-        WeatherAmbientKind.thunder => const Color(0xFF3F4F72),
+        WeatherAmbientKind.clear => const Color(0xFF346090),
+        WeatherAmbientKind.partlyCloudy => const Color(0xFF386696),
+        WeatherAmbientKind.cloudy => const Color(0xFF3E6080),
+        WeatherAmbientKind.fog => const Color(0xFF446480),
+        WeatherAmbientKind.drizzle => const Color(0xFF345C84),
+        WeatherAmbientKind.rain => const Color(0xFF2E5478),
+        WeatherAmbientKind.snow => const Color(0xFF466880),
+        WeatherAmbientKind.thunder => const Color(0xFF2A4870),
       };
     }
-    return switch (kind) {
-      WeatherAmbientKind.clear => const Color(0xFF182644),
-      WeatherAmbientKind.partlyCloudy => const Color(0xFF1B2A42),
-      WeatherAmbientKind.cloudy => const Color(0xFF1C2C44),
-      WeatherAmbientKind.fog => const Color(0xFF1F2D40),
-      WeatherAmbientKind.drizzle => const Color(0xFF19253A),
-      WeatherAmbientKind.rain => const Color(0xFF162234),
-      WeatherAmbientKind.snow => const Color(0xFF1F293A),
-      WeatherAmbientKind.thunder => const Color(0xFF131C30),
-    };
+    return kAmbientBlendColor;
   }
 
   static Color skyLower(WeatherAmbientKind kind, bool isDay) {
     if (isDay) {
-      return switch (kind) {
-        WeatherAmbientKind.clear => const Color(0xFF3A5D82),
-        WeatherAmbientKind.partlyCloudy => const Color(0xFF45688C),
-        WeatherAmbientKind.cloudy => const Color(0xFF45698A),
-        WeatherAmbientKind.fog => const Color(0xFF445A70),
-        WeatherAmbientKind.drizzle => const Color(0xFF3E5F78),
-        WeatherAmbientKind.rain => const Color(0xFF36546A),
-        WeatherAmbientKind.snow => const Color(0xFF556B82),
-        WeatherAmbientKind.thunder => const Color(0xFF334358),
-      };
+      // Spodok ambientu = canvas → plynulý prechod do scroll oblasti.
+      return Color.lerp(kAmbientBlendColor, const Color(0xFF2E5880), 0.35)!;
     }
-    return switch (kind) {
-      WeatherAmbientKind.clear => const Color(0xFF22334D),
-      WeatherAmbientKind.partlyCloudy => const Color(0xFF26364C),
-      WeatherAmbientKind.cloudy => const Color(0xFF283A52),
-      WeatherAmbientKind.fog => const Color(0xFF283646),
-      WeatherAmbientKind.drizzle => const Color(0xFF232F44),
-      WeatherAmbientKind.rain => const Color(0xFF1F2C3F),
-      WeatherAmbientKind.snow => const Color(0xFF283444),
-      WeatherAmbientKind.thunder => const Color(0xFF1E2840),
-    };
+    return kAmbientBlendColor;
   }
 
   static List<Color> skyGradientColors(
@@ -167,20 +133,20 @@ class _Palette {
 
     final gradient = [top, upper, lower, nearBody, floor];
     if (isDay) {
-      // Cez deň znížiť saturáciu a jas hornej polovice palety, aby neudierala do očí.
-      const dimToBlack = 0.10;
+      // Len jemné stlmenie — canvas má sedieť so scrollom, nie byť čierny pás.
+      const dimToBlack = 0.04;
       final adjusted = <Color>[
         Color.lerp(
-          Color.lerp(gradient[0], gradient[1], 0.55)!,
-          Colors.black,
-          dimToBlack + 0.04,
-        )!,
-        Color.lerp(
-          Color.lerp(gradient[1], gradient[2], 0.30)!,
+          Color.lerp(gradient[0], gradient[1], 0.45)!,
           Colors.black,
           dimToBlack,
         )!,
-        Color.lerp(gradient[2], Colors.black, dimToBlack * 0.6)!,
+        Color.lerp(
+          Color.lerp(gradient[1], gradient[2], 0.25)!,
+          Colors.black,
+          dimToBlack * 0.7,
+        )!,
+        Color.lerp(gradient[2], Colors.black, dimToBlack * 0.4)!,
         gradient[3],
         gradient[4],
       ];
@@ -188,22 +154,22 @@ class _Palette {
         adjusted[0],
         adjusted[1],
         adjusted[2],
-        Color.lerp(adjusted[3], adjusted[1], 0.22)!,
-        Color.lerp(adjusted[4], adjusted[1], 0.34)!,
+        Color.lerp(adjusted[3], blendColor, 0.35)!,
+        blendColor,
       ];
     }
-    // Noc – výraznejšie svetlejšie nadvihnutie palety, aby pozadie pri pinned bloku pôsobilo bledšie a rovnomerne.
-    const nightLift = 0.22;
-    const nightTint = Color(0xFF8AA1C4);
+    // Noc – rovnaký canvas ako UI, mierne nadvihnutý.
+    const nightLift = 0.12;
+    const nightTint = Color(0xFF7A92B0);
     final lifted = gradient
         .map((c) => Color.lerp(c, nightTint, nightLift)!)
         .toList(growable: false);
     return [
       lifted[0],
       lifted[1],
-      lifted[2],
-      Color.lerp(lifted[3], lifted[1], 0.4)!,
-      Color.lerp(lifted[4], lifted[1], 0.55)!,
+      Color.lerp(lifted[2], blendColor, 0.25)!,
+      Color.lerp(lifted[3], blendColor, 0.55)!,
+      blendColor,
     ];
   }
 }

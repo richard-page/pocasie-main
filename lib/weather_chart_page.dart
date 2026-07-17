@@ -35,15 +35,15 @@ const _kChartTextPrimary = Color(0xFFF2F6FA);
 const _kChartTextSecondary = Color(0xFFD4DEE9);
 const _kChartTextMuted = Color(0xFFAEBBCC);
 
-const _kChartLineBlue = Color(0xFF42A5F5);
-const _kChartIconBlue = Color(0xFF64B5F6);
+const _kChartLineBlue = kAppAccentBlue;
+const _kChartIconBlue = kAppAccentBlueBright;
 
 /// Malé dlaždice v grafe (Najteplejšie, legenda teploty) — nie pozadie celej stránky.
 BoxDecoration _chartStatTileDecoration({double radius = 12}) {
   return BoxDecoration(
     color: Color.alphaBlend(
       Colors.white.withValues(alpha: 0.18),
-      const Color(0xFF152433),
+      kAppCardNavy,
     ),
     borderRadius: BorderRadius.circular(radius),
     border: Border.all(color: Colors.white.withValues(alpha: 0.28)),
@@ -102,7 +102,17 @@ const _kThunderWmoCodes = <int>{95, 96, 99};
 
 bool _isThunderWmoCode(int code) => _kThunderWmoCodes.contains(code);
 
-/// Rovnaká denná ikona ako v zozname predpovede — podľa nej rozhodneme búrkovú pill.
+/// Graf — len flat pin snapshot (ťažké radar gettery = stack overflow).
+bool _chartRadarAuthorizesHour(
+  RadarNowcastContext radarCtx,
+  DateTime slotHour,
+) {
+  if (!radarCtx.eligible) return false;
+  final snap = radarCtx.pinForecast;
+  if (snap.wetHourStartsMs.isEmpty) return false;
+  return snap.authorizesLocalHour(slotHour);
+}
+
 /// Má aspoň jedna hodina v kalendárnom dni radarom potvrdené zrážky?
 bool _chartCalendarDayHasRadarPrecip(
   HourlyForecast hourly,
@@ -123,7 +133,7 @@ bool _chartCalendarDayHasRadarPrecip(
       localParsed.day,
       localParsed.hour,
     );
-    if (radarCtx.authorizesPrecipAtLocalHour(slotHour, locTime)) return true;
+    if (_chartRadarAuthorizesHour(radarCtx, slotHour)) return true;
   }
   return false;
 }
@@ -201,18 +211,21 @@ int _chartNightDisplayIconCode(
     return moonCode;
   }
 
-  final locTime = DateTime.now().toUtc().add(
-        Duration(seconds: data.utcOffsetSeconds ?? 0),
-      );
   final dateStr = daily.time[dayIndex];
-  final nightRadar = _dayPartHasRadarPrecip(
-    h,
-    dateStr,
-    'night',
-    locTime,
-    radarCtx,
-    utcOffsetSeconds: data.utcOffsetSeconds,
-  );
+  // Flat snapshot — nie _dayPartHasRadarPrecip (getter reťazce → stack overflow).
+  var nightRadar = false;
+  for (var i = 0; i < h.time.length; i++) {
+    if (!h.time[i].startsWith(dateStr)) continue;
+    final parsed = _tryParseHourlyTimestamp(h.time[i]);
+    if (parsed == null) continue;
+    final local = _hourlyParsedLocal(parsed, data.utcOffsetSeconds);
+    if (local.hour < 22 && local.hour > 4) continue;
+    final slotHour = DateTime(local.year, local.month, local.day, local.hour);
+    if (_chartRadarAuthorizesHour(radarCtx, slotHour)) {
+      nightRadar = true;
+      break;
+    }
+  }
   if (!nightRadar) return moonCode;
 
   double? nightTemp;
@@ -259,9 +272,8 @@ int _chartRadarProbForDay(
   )) {
     return 0;
   }
-  final dbz = radarCtx.precipNow || radarCtx.rainAtPinNow
-      ? radarCtx.precipIntensityDbz
-      : radarCtx.stripDisplayDbz;
+  final snap = radarCtx.pinForecast;
+  final dbz = snap.uiDbz > 0 ? snap.uiDbz : kRainViewerLegendMinDbz;
   return effectiveRadarProbFromDbz(dbz, radarCtx);
 }
 
@@ -427,33 +439,16 @@ int _chartThunderRaw({
 }
 
 BoxDecoration _chartGlassDecoration(double borderRadius) {
-  const fillBase = kAmbientBlendColor;
-  final fillTop = Color.alphaBlend(Colors.white.withValues(alpha: 0.09), fillBase);
-  final fillBottom = Color.alphaBlend(Colors.white.withValues(alpha: 0.045), fillBase);
-  return BoxDecoration(
-    borderRadius: BorderRadius.circular(borderRadius),
-    border: Border.all(
-      color: Colors.white.withValues(alpha: 0.14),
-      width: 1,
-    ),
-    gradient: LinearGradient(
-      begin: Alignment.topLeft,
-      end: Alignment.bottomRight,
-      colors: [fillTop, fillBottom],
-    ),
-  );
+  return appSurfaceDecoration(radius: borderRadius);
 }
 
 Widget _chartGlassPanel({required Widget child}) {
-  const radius = 16.0;
+  const radius = 20.0;
   return ClipRRect(
     borderRadius: BorderRadius.circular(radius),
-    child: BackdropFilter(
-      filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-      child: DecoratedBox(
-        decoration: _chartGlassDecoration(radius),
-        child: child,
-      ),
+    child: DecoratedBox(
+      decoration: _chartGlassDecoration(radius),
+      child: child,
     ),
   );
 }
@@ -469,12 +464,13 @@ Widget _forecastSubpageBackButton(BuildContext context, {IconData icon = Icons.a
   return GestureDetector(
     onTap: () => Navigator.of(context).pop(),
     child: Container(
-      width: 36,
-      height: 36,
+      width: 40,
+      height: 40,
       margin: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: const Color.fromRGBO(255, 255, 255, 0.1),
-        borderRadius: BorderRadius.circular(8),
+        shape: BoxShape.circle,
+        color: Colors.white.withValues(alpha: 0.12),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.20)),
       ),
       child: Center(child: Icon(icon, size: 22, color: Colors.white)),
     ),
@@ -587,9 +583,21 @@ class WeatherChartPage extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(8, 4, 12, 0),
               child: Row(
                 children: [
-                  IconButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close, color: Colors.white),
+                  GestureDetector(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: Container(
+                      width: 40,
+                      height: 40,
+                      margin: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: kAppCardNavy,
+                        border: Border.all(color: kAppCardNavyBorder),
+                      ),
+                      child: const Center(
+                        child: Icon(Icons.close, size: 20, color: Colors.white),
+                      ),
+                    ),
                   ),
                   Expanded(
                     child: Text(
@@ -602,7 +610,7 @@ class WeatherChartPage extends StatelessWidget {
                       ),
                     ),
                   ),
-                  const SizedBox(width: 48),
+                  const SizedBox(width: 56),
                 ],
               ),
             ),
@@ -666,19 +674,22 @@ class WeatherChartPage extends StatelessWidget {
                 child: Align(
                   alignment: Alignment.topCenter,
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 32, 12, 12),
+                    padding: const EdgeInsets.fromLTRB(12, 16, 12, 12),
                     child: _chartGlassPanel(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          _ChartSummaryStrip(data: data, radarCtx: radarCtx),
-                          _ChartDaysScroller(
-                            data: data,
-                            dayCount: dayCount,
-                            radarCtx: radarCtx,
-                          ),
-                        ],
+                      child: SingleChildScrollView(
+                        physics: const ClampingScrollPhysics(),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _ChartSummaryStrip(data: data, radarCtx: radarCtx),
+                            _ChartDaysScroller(
+                              data: data,
+                              dayCount: dayCount,
+                              radarCtx: radarCtx,
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -839,7 +850,7 @@ class _ChartStatTile extends StatelessWidget {
       decoration: BoxDecoration(
         color: Color.alphaBlend(
           Colors.white.withValues(alpha: 0.18),
-          const Color(0xFF152433),
+          kAppCardNavy,
         ),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.white.withValues(alpha: 0.28)),
@@ -905,7 +916,7 @@ class _ChartTempLegend extends StatelessWidget {
         decoration: BoxDecoration(
           color: Color.alphaBlend(
             Colors.white.withValues(alpha: 0.16),
-            const Color(0xFF152433),
+            kAppCardNavy,
           ),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: Colors.white.withValues(alpha: 0.28)),
@@ -1334,7 +1345,7 @@ class _ChartTemperatureCurvePainter extends CustomPainter {
     }
     if (!started) return;
 
-    const lineColor = Color(0xFF42A5F5);
+    const lineColor = kAppAccentBlue;
 
     canvas.drawPath(
       linePath,
@@ -1412,7 +1423,7 @@ class _PrecipChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bg = thunder ? const Color(0xFF7E57C2) : const Color(0xFF42A5F5);
+    final bg = thunder ? const Color(0xFF7E57C2) : kAppAccentBlue;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),

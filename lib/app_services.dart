@@ -44,7 +44,7 @@ class CacheManager {
   /// Vráti `true`, ak sa cache práve vymazala (treba `forceRefresh`).
   static Future<bool> ensureForecastCacheGeneration() async {
     final prefs = await SharedPreferences.getInstance();
-    final flag = 'forecast_cache_gen_v$kForecastCacheSchemaVersion';
+    const flag = 'forecast_cache_gen_v$kForecastCacheSchemaVersion';
     if (prefs.getBool(flag) == true) return false;
 
     final toRemove =
@@ -227,13 +227,11 @@ class SettingsManager {
       kHomeWidgetUpdateIntervalMinutesMin,
       kHomeWidgetUpdateIntervalMinutesMax,
     );
-    final forecastModel =
-        WeatherForecastModel.fromStorage(prefs.getString(kForecastModelKey));
     return (
       windUnit: windUnit,
       myLocationEnabled: myLocationEnabled,
       widgetIntervalMinutes: widgetIntervalMinutes,
-      forecastModel: forecastModel,
+      forecastModel: WeatherForecastModel.bestMatch,
     );
   }
 
@@ -280,13 +278,15 @@ class SettingsManager {
   }
 
   static Future<WeatherForecastModel> getForecastModel() async {
-    final prefs = await SharedPreferences.getInstance();
-    return WeatherForecastModel.fromStorage(prefs.getString(kForecastModelKey));
+    return WeatherForecastModel.bestMatch;
   }
 
-  static Future<void> setForecastModel(WeatherForecastModel model) async {
+  static Future<void> setForecastModel(WeatherForecastModel _) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(kForecastModelKey, model.cacheKey);
+    await prefs.setString(
+      kForecastModelKey,
+      WeatherForecastModel.bestMatch.cacheKey,
+    );
   }
 
   static Future<void> saveLastLocation(GeoCity city) async {

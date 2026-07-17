@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:pocasie/forecast_model.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 const String _kWidgetHourlyVars =
     'temperature_2m,cloud_cover,precipitation,precipitation_probability,weather_code,wind_speed_10m';
@@ -15,8 +14,7 @@ const String _kWidgetCurrentVars =
     'temperature_2m,is_day,weather_code,cloud_cover,precipitation,wind_speed_10m,wind_direction_10m,relative_humidity_2m,apparent_temperature,pressure_msl';
 
 Future<WeatherForecastModel> _widgetForecastModel() async {
-  final prefs = await SharedPreferences.getInstance();
-  return WeatherForecastModel.fromStorage(prefs.getString(kForecastModelKey));
+  return WeatherForecastModel.bestMatch;
 }
 
 /// Minimálny Open-Meteo fetch pre Android widget (rovnaký model ako v appke).

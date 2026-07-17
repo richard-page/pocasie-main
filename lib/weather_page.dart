@@ -208,6 +208,7 @@ int _dailyMainIconSkyTextCode(WeatherData data, int dayIndex, {bool lightningNea
     dailyApiProb: dailyApiProb,
     hourlyStripMaxProb: showableDayPrecip.maxProb,
     hourlyDayMaxProb: hourlyDayMaxPrecipProb(h, dateStr),
+    daysFromToday: dayIndex,
   );
   final double effectiveDailyPrecipMm = dailyPrecipMmForIconDisplay(
     apiDailyPrecip: apiDailyPrecip,
@@ -294,7 +295,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   bool _isOffline = false;
   bool _lightningNearby = false;
   RadarNowcastContext _radarNowcastContext = RadarNowcastContext.inactive;
-  String? _radarNowcastContextKey;
   DateTime? _lastRadarStripRefreshAt;
   DateTime? _lastRadarContextUiApplyAt;
   bool _startupReadySignalled = false;
@@ -303,23 +303,14 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   static const Duration _kRadarWatchInterval = Duration(seconds: 20);
   static const Duration _kRadarForecastActiveApplyInterval = Duration(seconds: 20);
   static const Duration _kRadarForecastIdleApplyInterval = Duration(minutes: 2);
-  static const Duration _kStripPrecipMmStableInterval = Duration(minutes: 2);
-  static const double _kStripPrecipMmStableDelta = 0.35;
-  final Map<int, double> _stableStripPrecipMm = {};
-  final Map<int, DateTime> _stableStripPrecipMmAt = {};
-  String? _stableStripPrecipCityKey;
   List<bool> _expandedStates = [];
   (String, Widget, String, int)? _cachedFirstHourInfo;
   Object? _cachedFirstHourInfoKey;
-  HourlyStripDisplayState? _cachedHourlyStripState;
-  Object? _cachedHourlyStripStateKey;
   bool _forceWeatherRefreshOnce = false;
 
   void _invalidateDisplayCaches() {
     _cachedFirstHourInfo = null;
     _cachedFirstHourInfoKey = null;
-    _cachedHourlyStripState = null;
-    _cachedHourlyStripStateKey = null;
   }
 
   Object _firstHourDisplayCacheKey() => (
@@ -330,21 +321,10 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         currentCity?.lon,
       );
 
-  Object _hourlyStripDisplayCacheKey() => (
-        weatherData,
-        _forecastModel,
-        _lightningNearby,
-        currentCity?.lat,
-        currentCity?.lon,
-        activeTab,
-        8, // verzia pipeline 24 h
-      );
-
   Future<void> _applySecondaryWeatherSignals({
     required GeoCity city,
     required int mySerial,
     required int radarSerial,
-    required String radarCtxKey,
   }) async {
     bool lightningNear = false;
     RadarNowcastContext radarCtx = RadarNowcastContext.inactive;
@@ -367,7 +347,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     setState(() {
       _lightningNearby = lightningNear;
       _radarNowcastContext = radarCtx;
-      _radarNowcastContextKey = radarCtx.eligible ? radarCtxKey : null;
       _lastRadarContextUiApplyAt = DateTime.now();
     });
     _invalidateDisplayCaches();
@@ -377,7 +356,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     required GeoCity city,
     required int mySerial,
     required int radarSerial,
-    required String radarCtxKey,
   }) {
     // Počkaj, kým sa UI ustáli — PNG radar + WebView naraz robili OOM na emulátore.
     Future<void>.delayed(const Duration(seconds: 4), () {
@@ -386,51 +364,121 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         city: city,
         mySerial: mySerial,
         radarSerial: radarSerial,
-        radarCtxKey: radarCtxKey,
       ));
     });
   }
 
   void _deferRadarSetup(GeoCity city, {bool forceReload = false}) {
-    _pendingRadarCity = city;
     _pendingRadarForceReload = forceReload;
+    if (!_supportsRadarForCity(city)) return;
+    // Hneď stiahni slovakia.geojson (~1 MB) — WebView to nestíha pri 10 s odklade.
+    prefetchRadarMapAssets();
+    _scheduleRadarWarmLoad(city);
+  }
+
+  /// Spustí WebView load skoro (hranice sa sťahujú), UI panel až neskôr / po pageFinished.
+  void _scheduleRadarWarmLoad(GeoCity city) {
+    if (!_supportsRadarForCity(city)) return;
+    if (_radarController != null) {
+      if (_pendingRadarForceReload) {
+        _setupRadarController(city, forceReload: true);
+        _pendingRadarForceReload = false;
+      }
+      return;
+    }
+    if (_radarWarmLoadTimer != null) return;
+    _radarWarmLoadTimer = Timer(const Duration(milliseconds: 500), () {
+      _radarWarmLoadTimer = null;
+      if (!mounted || currentCity == null) return;
+      if ((currentCity!.lat - city.lat).abs() > 0.0002 ||
+          (currentCity!.lon - city.lon).abs() > 0.0002) {
+        return;
+      }
+      // Načítať WebView ešte pred zobrazením panelu — stihnú sa hranice SK.
+      final force = _pendingRadarForceReload;
+      _pendingRadarForceReload = false;
+      _setupRadarController(city, forceReload: force);
+    });
   }
 
   void _scheduleRadarMapUiIfNeeded(GeoCity city) {
+    prefetchRadarMapAssets();
+    _scheduleRadarWarmLoad(city);
+
     if (_radarMapUiReady) {
       if (_radarController == null) {
         _setupRadarController(
           city,
           forceReload: _pendingRadarForceReload,
         );
+        _pendingRadarForceReload = false;
       }
       return;
     }
     if (_radarMapUiTimer != null) return;
-    _radarMapUiTimer = Timer(const Duration(seconds: 10), () {
+    // Fallback ak pageFinished nestihne; hlavný reveal je v onPageFinished.
+    _radarMapUiTimer = Timer(const Duration(milliseconds: 4500), () {
       _radarMapUiTimer = null;
       if (!mounted || currentCity == null) return;
       if ((currentCity!.lat - city.lat).abs() > 0.0002 ||
           (currentCity!.lon - city.lon).abs() > 0.0002) {
         return;
       }
-      _radarMapUiReady = true;
-      _setupRadarController(city, forceReload: _pendingRadarForceReload);
-      if (mounted) setState(() {});
+      _revealRadarMapUi(city);
     });
+  }
+
+  void _revealRadarMapUi(GeoCity city) {
+    if (_radarMapUiReady) return;
+    _radarMapUiReady = true;
+    _radarMapUiTimer?.cancel();
+    _radarMapUiTimer = null;
+    // Controller už beží v Offstage — neprebíjaj load (hranice SK).
+    if (_radarController == null) {
+      _setupRadarController(city, forceReload: _pendingRadarForceReload);
+    }
+    _pendingRadarForceReload = false;
+    if (mounted) setState(() {});
   }
 
   void _ensureRadarMapUiNow(GeoCity city, {bool forceReload = false}) {
     _radarMapUiTimer?.cancel();
     _radarMapUiTimer = null;
+    _radarWarmLoadTimer?.cancel();
+    _radarWarmLoadTimer = null;
     _radarMapUiReady = true;
-    _pendingRadarCity = city;
     _pendingRadarForceReload = forceReload;
+    prefetchRadarMapAssets();
     _setupRadarController(city, forceReload: forceReload);
+    _pendingRadarForceReload = false;
+  }
+
+  /// 1×1 Offstage host — WebView musí byť v strome, inak sa slovakia.geojson nenačíta.
+  Widget _buildRadarWarmupHost() {
+    if (_radarMapUiReady || _radarWebViewWidget == null) {
+      return const SizedBox.shrink();
+    }
+    return Offstage(
+      child: SizedBox(
+        width: 1,
+        height: 1,
+        child: _radarWebViewWidget!,
+      ),
+    );
   }
 
   void _deferVystrahyWarmup(GeoCity city) {
-    // Výstrahy WebView len pri otvorení stránky — druhý WebView pri štarte robil OOM.
+    if (!_supportsVystrahyForCity(city)) {
+      VystrahyWebViewPreloader.instance.cancelScheduledWarmup();
+      return;
+    }
+    // 1) HTTP prefetch hneď (HTML + okresy JSON + Leaflet).
+    // 2) WebView až po radare — nie naraz (OOM). Radar warm start ~0,5 s.
+    VystrahyWebViewPreloader.instance.updateUserLocation(city.lat, city.lon);
+    final hasRadar = _supportsRadarForCity(city);
+    VystrahyWebViewPreloader.instance.scheduleWarmup(
+      delay: Duration(seconds: hasRadar ? 8 : 3),
+    );
   }
 
   bool _isLoadingWebcams = false;
@@ -446,10 +494,10 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
   WebViewController? _radarController;
   GeoCity? _lastRadarCity;
-  GeoCity? _pendingRadarCity;
   bool _pendingRadarForceReload = false;
   bool _radarMapUiReady = false;
   Timer? _radarMapUiTimer;
+  Timer? _radarWarmLoadTimer;
   bool _isRadarFullscreen = false; 
   bool _isRadarReturning = false;
   bool _isRadarLoading = false;
@@ -463,18 +511,18 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   final GlobalKey _radarWebViewKey = GlobalKey();
   Widget? _radarWebViewWidget;
 
-  final Color primaryColor = const Color(0xFF2C3E50);
-  final Color secondaryColor = const Color(0xFF2A3848);
-  final Color accentColor = const Color(0xFF3498DB);
-  final Color lightColor = const Color(0xFFE6F2FF);
-  final Color glassColor = const Color(0x15FFFFFF);
-  final Color glassBorderColor = const Color(0x28FFFFFF);
+  final Color primaryColor = kAmbientBlendColor;
+  final Color secondaryColor = kAppCardNavy;
+  final Color accentColor = kAppAccentBlue;
+  final Color lightColor = const Color(0xFFE8EEF5);
+  final Color glassColor = const Color(0x14FFFFFF);
+  final Color glassBorderColor = kAppCardNavyBorder;
 
-  final Color cardBackgroundColor = const Color(0x20FFFFFF);
+  final Color cardBackgroundColor = kAppCardNavy;
   final Color textColor = Colors.white;
 
   /// Rovnaká vertikálna medzera medzi kartami a sekciami na domovskej obrazovke (len `bottom` predchádzajúceho bloku).
-  static const double _kHomeForecastSectionGap = 8;
+  static const double _kHomeForecastSectionGap = 10;
 
   static const TextStyle _kHomeInsightTitleStyle = TextStyle(
     color: Colors.white,
@@ -500,20 +548,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       child: Center(child: icon),
     );
   }
-  /// Pozadie pásika „Predpoveď“ aj zoznamu 24 h / 14 dní — spodný nátok ambientu.
-  static const Color forecastSectionBackground = kAmbientBlendColor;
   /// Rovnaká max. šírka a bočný okraj ako riadky 24 h / 14 dní.
   static const double _kForecastStripMaxWidth = 800;
-  static const Color _kForecastStripCardFill = Color(0xFF3A4758);
-  static const Color _kForecastStripCardBorder = Color(0xFF5B6777);
 
-  BoxDecoration get _forecastStripCardDecoration => const BoxDecoration(
-        color: _kForecastStripCardFill,
-        border: Border.fromBorderSide(
-          BorderSide(color: _kForecastStripCardBorder),
-        ),
-        borderRadius: BorderRadius.all(Radius.circular(14)),
-      );
+  BoxDecoration get _forecastStripCardDecoration =>
+      appSurfaceDecoration(radius: 20);
 
   /// Rovnaký obal ako jeden riadok v 24 h / 14 dňoch.
   Widget _forecastStripCardShell({
@@ -557,6 +596,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   }
 
   Future<void> _appStartup() async {
+    // Hneď DNS/TCP + geojson — ešte pred settings / weather fetch.
+    if (widget.initialCity != null &&
+        _supportsRadarForCity(widget.initialCity)) {
+      prefetchRadarMapAssets();
+    }
     await _loadSettings();
     final cachePurged = await CacheManager.ensureForecastCacheGeneration();
     _forceWeatherRefreshOnce = cachePurged;
@@ -582,6 +626,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     _radarLoadTimeoutTimer?.cancel();
     _radarConnectivityTimer?.cancel();
     _radarMapUiTimer?.cancel();
+    _radarWarmLoadTimer?.cancel();
+    VystrahyWebViewPreloader.instance.cancelScheduledWarmup();
     super.dispose();
   }
 
@@ -679,7 +725,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         }
         _radarController = WebViewController.fromPlatformCreationParams(params)
           ..setJavaScriptMode(JavaScriptMode.unrestricted)
-          ..setBackgroundColor(const Color(0xFF2A3848))
+          ..setBackgroundColor(kAmbientBlendColor)
           ..setNavigationDelegate(
             NavigationDelegate(
               onPageStarted: (String url) {
@@ -729,6 +775,10 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                   _radarController!.runJavaScript(
                       'if(window.setFullscreen) window.setFullscreen(true); else window.dispatchEvent(new Event("resize"));');
                 }
+                // Po warm loade ukáž panel hneď — hranice SK už bežia / sú hotové.
+                if (mounted && !_radarMapUiReady && currentCity != null) {
+                  _revealRadarMapUi(currentCity!);
+                }
               },
               onWebResourceError: (WebResourceError error) {
                 // Neobnovuj celý radar pri chybe čiastkového assetu (tile/img/js) —
@@ -761,7 +811,13 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         _isRadarLoading = true;
         _radarLoadFailed = false;
       }
-      _radarController!.loadRequest(Uri.parse(url));
+      // Offstage host sa pripojí až po frame — load až potom, inak WebView nestiahne geojson.
+      final loadUrl = url;
+      final ctrl = _radarController!;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _radarController != ctrl) return;
+        ctrl.loadRequest(Uri.parse(loadUrl));
+      });
     }
   }
 
@@ -878,20 +934,14 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   Future<void> _loadSettings() async {
     final s = await SettingsManager.getWeatherPageSettingsSnapshot();
     if (!mounted) return;
-    final modelChanged = s.forecastModel != _forecastModel;
     setState(() {
       _currentWindUnit = s.windUnit;
       _myLocationEnabled = s.myLocationEnabled;
       _widgetRefreshIntervalMinutes = s.widgetIntervalMinutes;
-      _forecastModel = s.forecastModel;
+      _forecastModel = WeatherForecastModel.bestMatch;
     });
     _restartPeriodicTimers();
     unawaited(rescheduleAndroidHomeWidgetPeriodicWork());
-    if (modelChanged && currentCity != null) {
-      unawaited(
-        fetchWeatherByCity(currentCity!, forceRefresh: true, showLoading: false),
-      );
-    }
   }
 
   void _restartPeriodicTimers() {
@@ -1132,23 +1182,20 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     );
   }
 
-  String _radarContextKeyFor(GeoCity city) =>
-      '${city.lat.toStringAsFixed(4)}:${city.lon.toStringAsFixed(4)}';
-
   Widget _radarGlassBadge(IconData icon, String label) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: <Color>[
-            Color.fromRGBO(80, 97, 124, 0.88),
-            Color.fromRGBO(50, 65, 88, 0.84),
-          ],
-        ),
-        border: Border.all(color: const Color.fromRGBO(255, 255, 255, 0.18)),
-        borderRadius: BorderRadius.circular(20),
+        color: kAppCardNavyElevated.withValues(alpha: 0.92),
+        border: Border.all(color: kAppCardNavyBorder),
+        borderRadius: BorderRadius.circular(999),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.25),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1160,7 +1207,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
             style: const TextStyle(
               color: Colors.white,
               fontSize: 12,
-              fontWeight: FontWeight.w600,
+              fontWeight: FontWeight.w700,
             ),
           ),
         ],
@@ -1222,9 +1269,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
           onTap: () {
             final city = currentCity;
             if (city == null) return;
-            VystrahyWebViewPreloader.instance
-                .updateUserLocation(city.lat, city.lon);
-            VystrahyWebViewPreloader.instance.markAttached();
+            final preloader = VystrahyWebViewPreloader.instance;
+            preloader.updateUserLocation(city.lat, city.lon);
+            // Ak ešte beží oneskorený warmup — spusti hneď pred navigáciou.
+            preloader.warmup();
+            preloader.markAttached();
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!context.mounted) return;
               Navigator.push(
@@ -1374,14 +1423,12 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       if (_radarNowcastContext.eligible) {
         setState(() {
           _radarNowcastContext = RadarNowcastContext.inactive;
-          _radarNowcastContextKey = null;
         });
         _invalidateDisplayCaches();
       }
       return;
     }
     final int fetchSerial = ++_radarFetchSerial;
-    final String ctxKey = _radarContextKeyFor(city);
     try {
       final ctx = await _fetchRadarNowcastForCity(city);
       if (!mounted || fetchSerial != _radarFetchSerial) return;
@@ -1394,7 +1441,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       if (!_radarContextUiNeedsUpdate(ctx)) return;
       setState(() {
         _radarNowcastContext = ctx;
-        _radarNowcastContextKey = ctxKey;
         _lastRadarContextUiApplyAt = DateTime.now();
       });
       _invalidateDisplayCaches();
@@ -1430,7 +1476,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       );
       final aqiFuture = _fetchAirQualityData(citySnap.lat, citySnap.lon, forceRefresh: false);
       final int radarSerial = ++_radarFetchSerial;
-      final String radarCtxKey = _radarContextKeyFor(citySnap);
 
       final data = await weatherFuture;
 
@@ -1457,7 +1502,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         city: citySnap,
         mySerial: mySerial,
         radarSerial: radarSerial,
-        radarCtxKey: radarCtxKey,
       );
       unawaited(_syncWeatherFetchFollowUps(citySnap, data));
     // ignore: empty_catches
@@ -2545,7 +2589,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         _expandedStates = [];
         _lightningNearby = false;
         _radarNowcastContext = RadarNowcastContext.inactive;
-        _radarNowcastContextKey = null;
         resetRadarTrackerStabilizer();
         _invalidateDisplayCaches();
         _radarMapUiReady = false;
@@ -2598,7 +2641,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         forceRefresh: false,
       );
       final int radarSerial = ++_radarFetchSerial;
-      final String radarCtxKey = _radarContextKeyFor(city);
 
       AirQualityData? aqiData;
       try {
@@ -2621,7 +2663,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         city: city,
         mySerial: mySerial,
         radarSerial: radarSerial,
-        radarCtxKey: radarCtxKey,
       );
       unawaited(_syncWeatherFetchFollowUps(city, data));
     } catch (e) {
@@ -2874,9 +2915,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     }
     _ensureNearbyWebcamsLoaded();
 
-    const String featureCardBgImageUrl =
-        'https://images.pexels.com/photos/733475/pexels-photo-733475.jpeg?auto=compress&cs=tinysrgb&w=800';
-
     const sectionTitle = Padding(
       padding: EdgeInsets.only(bottom: 8),
       child: Center(
@@ -2948,7 +2986,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                     return Container(
                       height: 90,
                       width: 130,
-                      color: const Color(0xFF2A3544),
+                      color: kAppCardNavy,
                       alignment: Alignment.center,
                       child: const Icon(Icons.broken_image, color: Colors.white54),
                     );
@@ -3011,27 +3049,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, _kHomeForecastSectionGap),
       padding: const EdgeInsets.only(top: 14, bottom: 12, left: 12, right: 12),
-      decoration: BoxDecoration(
-        color: glassColor,
-        border: Border.all(color: glassBorderColor),
-        borderRadius: BorderRadius.circular(16),
-        image: const DecorationImage(
-          image: NetworkImage(featureCardBgImageUrl),
-          fit: BoxFit.cover,
-          alignment: Alignment.center,
-          colorFilter: ColorFilter.mode(
-            Color(0xDA2A3848),
-            BlendMode.srcOver,
-          ),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(38),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
+      decoration: appSurfaceDecoration(radius: 20),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -3346,7 +3364,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
               child: ElevatedButton(
                 onPressed: isLoading ? null : _retryConnection,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF3498DB),
+                  backgroundColor: kAppAccentBlue,
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
@@ -3632,28 +3650,17 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   }
 
   BoxDecoration _heroGlassDecoration(double borderRadius) {
-    final Color fillTop =
-        Color.alphaBlend(Colors.white.withValues(alpha: 0.09), secondaryColor);
-    final Color fillBottom =
-        Color.alphaBlend(Colors.white.withValues(alpha: 0.045), secondaryColor);
     return BoxDecoration(
       borderRadius: BorderRadius.circular(borderRadius),
-      border: Border.all(
-        color: Colors.white.withValues(alpha: 0.14),
-        width: 1,
-      ),
-      gradient: LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [fillTop, fillBottom],
-      ),
+      color: kAppCardNavy,
+      border: Border.all(color: kAppCardNavyBorder, width: 1),
     );
   }
 
   /// Sklenené pozadie pre karty na domovskej obrazovke; [borderRadius] bez zmeny rozloženia widgetu.
   Widget _heroGlassSurface({
     required Widget child,
-    double borderRadius = 16,
+    double borderRadius = 20,
     bool withShadow = false,
   }) {
     final radius = BorderRadius.circular(borderRadius);
@@ -3663,21 +3670,18 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
               borderRadius: radius,
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.14),
-                  blurRadius: 14,
-                  offset: const Offset(0, 5),
+                  color: const Color(0xFF060C14).withValues(alpha: 0.35),
+                  blurRadius: 12,
+                  offset: const Offset(0, 4),
                 ),
               ],
             )
           : null,
       child: ClipRRect(
         borderRadius: radius,
-        child: BackdropFilter(
-          filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-          child: DecoratedBox(
-            decoration: _heroGlassDecoration(borderRadius),
-            child: child,
-          ),
+        child: DecoratedBox(
+          decoration: _heroGlassDecoration(borderRadius),
+          child: child,
         ),
       ),
     );
@@ -3685,25 +3689,52 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
   Widget _heroGlassCard({required Widget child, bool withShadow = true}) {
     return _heroGlassSurface(
-      borderRadius: 16,
+      borderRadius: 20,
       withShadow: withShadow,
       child: child,
     );
   }
 
-  /// Kompaktné sklo — rovnaké pozadie ako ostatné hero karty (blur + gradient).
-  Widget _heroGlassChip({
-    required Widget child,
-    double height = 34,
-    double borderRadius = 8,
-  }) {
-    return _heroGlassSurface(
-      borderRadius: borderRadius,
-      withShadow: false,
-      child: SizedBox(
-        height: height,
-        width: double.infinity,
-        child: child,
+  /// Hero = teplota / ikona — rovnaká rodina ako karty, len mierne nadvihnutá.
+  Widget _heroWeatherPanel({required Widget child}) {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            kAppHeroGradientTop,
+            kAppHeroGradientMid,
+            kAppHeroGradientBottom,
+          ],
+          stops: [0.0, 0.5, 1.0],
+        ),
+        border: Border.all(color: kAppCardNavyBorder),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF0C1828).withValues(alpha: 0.30),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: child,
+    );
+  }
+
+  Widget _heroChromeButton({required IconData icon, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: kAppCardNavy,
+          border: Border.all(color: kAppCardNavyBorder),
+        ),
+        child: Center(child: Icon(icon, size: 20, color: Colors.white)),
       ),
     );
   }
@@ -3769,28 +3800,14 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final dateLine = '$dayText ${locationNow.day}. $monthText, $timeText';
 
     return Padding(
-      padding: EdgeInsets.fromLTRB(12, topPadding, 12, _kHomeForecastSectionGap),
+      padding: EdgeInsets.fromLTRB(14, topPadding, 14, _kHomeForecastSectionGap),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
               Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  GestureDetector(
-                    onTap: _openSearch,
-                    child: Container(
-                      width: 32,
-                      height: 32,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.14),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: Colors.white.withValues(alpha: 0.22)),
-                      ),
-                      child: const Center(
-                        child: Icon(Icons.search, size: 19, color: Colors.white),
-                      ),
-                    ),
-                  ),
+                  _heroChromeButton(icon: Icons.search_rounded, onTap: _openSearch),
                   Expanded(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
@@ -3801,38 +3818,25 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                           overflow: TextOverflow.ellipsis,
                           textAlign: TextAlign.center,
                           style: const TextStyle(
-                            fontSize: 19,
-                            fontWeight: FontWeight.w700,
+                            fontSize: 20,
+                            fontWeight: FontWeight.w800,
                             color: Colors.white,
+                            letterSpacing: 0.2,
                           ),
                         ),
                       ],
                     ),
                   ),
-                  GestureDetector(
-                    onTap: _openSettings,
-                    child: Container(
-                      width: 32,
-                      height: 32,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.14),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: Colors.white.withValues(alpha: 0.22)),
-                      ),
-                      child: const Center(
-                        child: Icon(Icons.settings, size: 19, color: Colors.white),
-                      ),
-                    ),
-                  ),
+                  _heroChromeButton(icon: Icons.settings_rounded, onTap: _openSettings),
                 ],
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
               Text(
                 dateLine,
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 13,
-                  color: Colors.white.withAlpha(190),
+                  color: Colors.white.withAlpha(200),
                   fontWeight: FontWeight.w500,
                 ),
               ),
@@ -3849,101 +3853,98 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                     ),
                   ),
                 ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 12),
+              _heroWeatherPanel(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
               Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Expanded(
                     child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
                           _isOffline ? '--°' : firstHourTemp,
                           style: mono.merge(
                             const TextStyle(
-                              fontSize: 60,
-                              fontWeight: FontWeight.w500,
+                              fontSize: 56,
+                              fontWeight: FontWeight.w600,
                               color: Colors.white,
                               height: 0.95,
                             ),
                           ),
                         ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Pocitovo $apparentText',
+                          style: TextStyle(
+                            fontSize: 15,
+                            color: Colors.white.withAlpha(220),
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
                       ],
                     ),
                   ),
-                  const SizedBox(width: 24),
-                  Expanded(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        _isOffline
-                            ? const SizedBox(
-                                width: 112,
-                                height: 112,
-                                child: Center(
-                                  child: Text(
-                                    '--',
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 60,
-                                      fontWeight: FontWeight.w500,
-                                      height: 0.95,
-                                    ),
+                  const SizedBox(width: 12),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _isOffline
+                          ? const SizedBox(
+                              width: 100,
+                              height: 100,
+                              child: Center(
+                                child: Text(
+                                  '--',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 48,
+                                    fontWeight: FontWeight.w500,
+                                    height: 0.95,
                                   ),
                                 ),
-                              )
-                            : SizedBox(
-                                width: 112,
-                                height: 112,
-                                child: FittedBox(
-                                  fit: BoxFit.contain,
-                                  child: firstHourIcon,
-                                ),
                               ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              Transform.translate(
-                offset: const Offset(0, -8),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Expanded(
-                      child: Text(
-                        'Pocitovo $apparentText',
-                        textAlign: TextAlign.right,
-                        style: TextStyle(
-                          fontSize: 16,
-                          color: Colors.white.withAlpha(200),
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 24),
-                    Expanded(
-                      child: Text(
+                            )
+                          : SizedBox(
+                              width: 100,
+                              height: 100,
+                              child: FittedBox(
+                                fit: BoxFit.contain,
+                                child: firstHourIcon,
+                              ),
+                            ),
+                      const SizedBox(height: 4),
+                      Text(
                         description,
                         textAlign: TextAlign.center,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 16,
-                          color: Colors.white.withAlpha(200),
-                          fontWeight: FontWeight.w600,
+                          fontSize: 15,
+                          color: Colors.white.withAlpha(230),
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                    ),
-                  ],
-                ),
+                    ],
+                  ),
+                ],
               ),
-              const SizedBox(height: 10),
-              _heroGlassCard(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                  child: Row(
+              const SizedBox(height: 14),
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.22),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.08),
+                  ),
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                child: Row(
                     children: [
                       Expanded(
                         child: Column(
@@ -4046,6 +4047,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                       ),
                     ],
                   ),
+              ),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -4057,7 +4061,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
   Widget _tabBtn(String label, String value) {
     final sel = activeTab == value;
-    const tabRadius = 8.0;
+    const tabRadius = 999.0;
     final labelChild = Center(
       child: SizedBox(
         height: 20,
@@ -4065,9 +4069,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
           fit: BoxFit.scaleDown,
           child: Text(
             label,
-            style: const TextStyle(
+            style: TextStyle(
               color: Colors.white,
-              fontWeight: FontWeight.w600,
+              fontWeight: sel ? FontWeight.w700 : FontWeight.w600,
               fontSize: 13,
             ),
           ),
@@ -4078,17 +4082,18 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: () => setState(() => activeTab = value),
-        child: sel
-            ? AnimatedContainer(
-                duration: const Duration(milliseconds: 130),
-                height: 34,
-                decoration: BoxDecoration(
-                  color: accentColor,
-                  borderRadius: BorderRadius.circular(tabRadius),
-                ),
-                child: labelChild,
-              )
-            : _heroGlassChip(height: 34, borderRadius: tabRadius, child: labelChild),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          height: 38,
+          decoration: BoxDecoration(
+            color: sel ? kAppAccentBlue : kAppCardNavy,
+            borderRadius: BorderRadius.circular(tabRadius),
+            border: Border.all(
+              color: sel ? kAppAccentBlueBright.withValues(alpha: 0.35) : kAppCardNavyBorder,
+            ),
+          ),
+          child: labelChild,
+        ),
       ),
     );
   }
@@ -4129,19 +4134,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   Widget _buildRadarMapPanel() {
     return Container(
       height: 220,
-      decoration: BoxDecoration(
-        color: const Color(0xFF2A3848),
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(38),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
+      decoration: appSurfaceDecoration(radius: 20),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(20),
         child: Stack(
           alignment: Alignment.center,
           children: [
@@ -4182,7 +4177,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                     FilledButton(
                       onPressed: () => unawaited(_manualRadarRetry()),
                       style: FilledButton.styleFrom(
-                        backgroundColor: const Color(0xFF3498DB),
+                        backgroundColor: kAppAccentBlue,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(
                           horizontal: 14,
@@ -4240,7 +4235,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                 ),
               )
             else if (!_isRadarReturning)
-              Container(color: const Color(0xFF2A3848)),
+              // Pokiaľ warm load beží v Offstage, tu len placeholder farba.
+              Container(color: kAmbientBlendColor),
             Positioned.fill(
               child: GestureDetector(
                 onTap: () => unawaited(_openRadarFullscreen()),
@@ -4289,31 +4285,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final dateParts = hw.dateStr.split('-');
     final formattedDate = dateParts.length == 3 ? '${dateParts[2]}.${dateParts[1]}.${dateParts[0]}' : hw.dateStr;
 
-    const String bgImageUrl = 'https://images.pexels.com/photos/733475/pexels-photo-733475.jpeg?auto=compress&cs=tinysrgb&w=800';
-
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, _kHomeForecastSectionGap),
-      decoration: BoxDecoration(
-        color: glassColor, 
-        border: Border.all(color: glassBorderColor),
-        borderRadius: BorderRadius.circular(16),
-        image: const DecorationImage(
-          image: NetworkImage(bgImageUrl),
-          fit: BoxFit.cover,
-          alignment: Alignment.center,
-          colorFilter: ColorFilter.mode(
-            Color(0xDA2A3848), 
-            BlendMode.srcOver,
-          ),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(38),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
+      decoration: appSurfaceDecoration(radius: 20),
       padding: const EdgeInsets.only(top: 20, bottom: 16, left: 16, right: 16),
       child: Column(
         children: [
@@ -4402,31 +4376,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   }
 
   Widget _buildSupportCard() {
-    const String bgImageUrl = 'https://images.pexels.com/photos/733475/pexels-photo-733475.jpeg?auto=compress&cs=tinysrgb&w=800';
-
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, _kHomeForecastSectionGap),
-      decoration: BoxDecoration(
-        color: glassColor, 
-        border: Border.all(color: glassBorderColor),
-        borderRadius: BorderRadius.circular(16),
-        image: const DecorationImage(
-          image: NetworkImage(bgImageUrl),
-          fit: BoxFit.cover,
-          alignment: Alignment.center,
-          colorFilter: ColorFilter.mode(
-            Color(0xDA2A3848), 
-            BlendMode.srcOver,
-          ),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(38),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
+      decoration: appSurfaceDecoration(radius: 20),
       padding: const EdgeInsets.only(top: 20, bottom: 16, left: 16, right: 16),
       child: Column(
         children: [
@@ -4494,7 +4446,12 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildContent(bool hasData, String firstHourTemp, int displayCode) {
+  Widget _buildContent(
+    bool hasData,
+    String firstHourTemp,
+    int displayCode, {
+    required Widget hero,
+  }) {
     if (!_startupReadySignalled && (hasData || _isOffline)) {
       _startupReadySignalled = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -4505,23 +4462,67 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     }
 
     if (_isOffline) {
-      return OfflineScreen(
-        onRetry: _retryConnection,
-        isRetrying: isLoading,
-        isOnboarding: false,
+      return CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(
+          parent: ClampingScrollPhysics(),
+        ),
+        slivers: [
+          SliverToBoxAdapter(child: hero),
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: OfflineScreen(
+              onRetry: _retryConnection,
+              isRetrying: isLoading,
+              isOnboarding: false,
+            ),
+          ),
+        ],
       );
     }
 
     if (hasError && !hasData) {
-      return _buildFetchFailureScreen();
+      return CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(
+          parent: ClampingScrollPhysics(),
+        ),
+        slivers: [
+          SliverToBoxAdapter(child: hero),
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: _buildFetchFailureScreen(),
+          ),
+        ],
+      );
     }
 
     if (isLoading && !_isRefreshing && !hasData) {
-      return const SizedBox.shrink();
+      return CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(
+          parent: ClampingScrollPhysics(),
+        ),
+        slivers: [
+          SliverToBoxAdapter(child: hero),
+          const SliverFillRemaining(
+            hasScrollBody: false,
+            child: SizedBox.shrink(),
+          ),
+        ],
+      );
     }
 
     if (!hasData) {
-      return const SizedBox.shrink();
+      return CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(
+          parent: ClampingScrollPhysics(),
+        ),
+        slivers: [
+          SliverToBoxAdapter(child: hero),
+          const SliverFillRemaining(
+            hasScrollBody: false,
+            child: SizedBox.shrink(),
+          ),
+        ],
+      );
     }
 
     final uvWarning = _getTodayUvWarning();
@@ -4530,6 +4531,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     return CustomScrollView(
       physics: const AlwaysScrollableScrollPhysics(parent: ClampingScrollPhysics()),
       slivers: [
+        SliverToBoxAdapter(child: hero),
         if (homeInsightTiles != null)
           SliverToBoxAdapter(
             child: Container(
@@ -4555,21 +4557,18 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         ),
 
         SliverToBoxAdapter(
-          child: ColoredBox(
-            color: forecastSectionBackground,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, _kHomeForecastSectionGap),
-              child: Align(
-                alignment: Alignment.center,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: _kForecastStripMaxWidth),
-                  child: Row(
-                    children: [
-                      _tabBtn('24 hodín', 'hourly'),
-                      const SizedBox(width: 6),
-                      _tabBtn('$kDailyListForecastDays dní', 'daily'),
-                    ],
-                  ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, _kHomeForecastSectionGap),
+            child: Align(
+              alignment: Alignment.center,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: _kForecastStripMaxWidth),
+                child: Row(
+                  children: [
+                    _tabBtn('24 hodín', 'hourly'),
+                    const SizedBox(width: 6),
+                    _tabBtn('$kDailyListForecastDays dní', 'daily'),
+                  ],
                 ),
               ),
             ),
@@ -4577,14 +4576,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         ),
         // Conditional slivers for hourly/daily - vracajú priamo Sliver
         if (activeTab == 'hourly') ...[
-          SliverToBoxAdapter(
-            child: Container(color: forecastSectionBackground, height: 0),
-          ),
           _buildHourly(),
         ] else ...[
-          SliverToBoxAdapter(
-            child: Container(color: forecastSectionBackground, height: 0),
-          ),
           _buildDaily(),
         ],
 
@@ -4645,69 +4638,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     );
   }
 
-  void _syncStableStripPrecipCityKey(GeoCity? city) {
-    final key = city == null
-        ? null
-        : '${city.lat.toStringAsFixed(4)},${city.lon.toStringAsFixed(4)},${city.name}';
-    if (key == _stableStripPrecipCityKey) return;
-    _stableStripPrecipCityKey = key;
-    _stableStripPrecipMm.clear();
-    _stableStripPrecipMmAt.clear();
-  }
-
-  double _quantizeDisplayPrecipMm(double mm) {
-    if (mm < kMeaningfulPrecipMmPerHour) return 0;
-    return (mm * 5).roundToDouble() / 5.0;
-  }
-
-  double _stabilizeStripPrecipMm({
-    required int hourIdx,
-    required double rawMm,
-    required bool showWet,
-    required bool radarActive,
-    required DateTime? slotHour,
-    required DateTime nowHour,
-  }) {
-    if (!radarActive || slotHour == null) {
-      return rawMm >= kMeaningfulPrecipMmPerHour ? rawMm : 0;
-    }
-
-    final hoursOut = slotHour.difference(nowHour).inHours;
-    if (hoursOut < 0 || hoursOut > 6) {
-      return rawMm >= kMeaningfulPrecipMmPerHour ? rawMm : 0;
-    }
-
-    final wet = showWet && rawMm >= kMeaningfulPrecipMmPerHour;
-    final quantized = wet ? _quantizeDisplayPrecipMm(rawMm) : 0.0;
-    final prev = _stableStripPrecipMm[hourIdx];
-    final prevAt = _stableStripPrecipMmAt[hourIdx];
-    final now = DateTime.now();
-
-    if (prev == null) {
-      _stableStripPrecipMm[hourIdx] = quantized;
-      _stableStripPrecipMmAt[hourIdx] = now;
-      return quantized;
-    }
-
-    final prevWet = prev >= kMeaningfulPrecipMmPerHour;
-    if (prevWet != wet) {
-      _stableStripPrecipMm[hourIdx] = quantized;
-      _stableStripPrecipMmAt[hourIdx] = now;
-      return quantized;
-    }
-
-    if (!wet) return 0;
-
-    final delta = (quantized - prev).abs();
-    if (delta >= _kStripPrecipMmStableDelta ||
-        prevAt == null ||
-        now.difference(prevAt) >= _kStripPrecipMmStableInterval) {
-      _stableStripPrecipMm[hourIdx] = quantized;
-      _stableStripPrecipMmAt[hourIdx] = now;
-    }
-    return _stableStripPrecipMm[hourIdx]!;
-  }
-
   Widget _buildHourly() {
     final h = weatherData?.hourly;
     final current = weatherData?.current;
@@ -4717,7 +4647,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
     final DateTime locTime = _getCurrentLocationTime();
     final city = currentCity;
-    _syncStableStripPrecipCityKey(city);
     if (city != null && radarNowcastActiveForCity(city)) {
       final now = DateTime.now();
       if (_lastRadarStripRefreshAt == null ||
@@ -4803,12 +4732,58 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       h: h,
       lightningNearby: _lightningNearby,
       lightningHourIndex: curIdx,
+      utcOffsetSeconds: weatherData?.utcOffsetSeconds,
     );
     applyHourlyStripPrecipPercentRamp(
       displayIcons: displayIcons,
       showRainPrecip: stripShowRainPrecip,
       storedProbs: stripStoredProbs,
       precipMm: stripPrecipMm,
+      stripIndices: stripIndices,
+      h: h,
+      locTime: locTime,
+      utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+      radarCtx: _radarNowcastContext,
+    );
+    applyHourlyStripHorizonProbCaps(
+      storedProbs: stripStoredProbs,
+      stripIndices: stripIndices,
+      h: h,
+      locTime: locTime,
+      utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+    );
+    clampThunderHourlyStripProbs(
+      displayIcons: displayIcons,
+      storedProbs: stripStoredProbs,
+      precipMm: stripPrecipMm,
+    );
+    applyThunderStripDisplayMm(
+      displayIcons: displayIcons,
+      storedProbs: stripStoredProbs,
+      precipMm: stripPrecipMm,
+    );
+    alignHourlyStripIconsWithPrecipPercents(
+      displayIcons: displayIcons,
+      showRainPrecip: stripShowRainPrecip,
+      precipPercents: stripStoredProbs,
+      precipMm: stripPrecipMm,
+      apiWeatherCodes: [
+        for (final idx in stripIndices)
+          h.weatherCode != null && idx < h.weatherCode!.length
+              ? h.weatherCode![idx]
+              : null,
+      ],
+      cloudCoverPercents: [
+        for (final idx in stripIndices)
+          h.cloudCover != null && idx < h.cloudCover!.length
+              ? h.cloudCover![idx]
+              : null,
+      ],
+    );
+    clampNearTermStripPercentsWithoutRadar(
+      displayIcons: displayIcons,
+      showRainPrecip: stripShowRainPrecip,
+      storedProbs: stripStoredProbs,
       stripIndices: stripIndices,
       h: h,
       locTime: locTime,
@@ -4968,13 +4943,13 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                   colors: [
-                    Color(0xFF3A4E62),
-                    Color(0xFF2A3544),
+                    kAppCardNavyElevated,
+                    kAppCardNavy,
                   ],
                 ),
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(
-                  color: const Color(0xFF4A6B82).withValues(alpha: 0.5),
+                  color: kAppCardNavyBorder.withValues(alpha: 0.5),
                   width: 1,
                 ),
               ),
@@ -4990,7 +4965,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                           icon: Icons.water_drop,
                         ),
                     ),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 6),
                     Expanded(
                       child: _buildDetailItem(
                         title: 'Rosný bod',
@@ -4998,7 +4973,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                         icon: Icons.thermostat,
                       ),
                     ),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 6),
                     Expanded(
                       child: _buildDetailItem(
                         title: 'UV index',
@@ -5018,7 +4993,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                     ),
                   ],
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 6),
                 Row(
                   children: [
                     Expanded(
@@ -5028,7 +5003,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                         icon: Icons.air,
                       ),
                     ),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 6),
                     Expanded(
                       child: _buildDetailItem(
                         title: 'Tlak vzduchu',
@@ -5036,7 +5011,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                         icon: Icons.speed,
                       ),
                     ),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 6),
                     Expanded(
                       child: _buildDetailItem(
                         title: 'Pocitová teplota',
@@ -5065,10 +5040,10 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   }) {
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1E2D3A).withValues(alpha: 0.55),
+        color: kAppCardNavyElevated.withValues(alpha: 0.55),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: const Color(0xFF4A6B82).withValues(alpha: 0.28),
+          color: kAppCardNavyBorder.withValues(alpha: 0.28),
         ),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
@@ -5082,7 +5057,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Icon(icon, size: iconSize, color: const Color(0xFF5BC0BE)),
+              Icon(icon, size: iconSize, color: Colors.white),
               const SizedBox(width: 5),
               Flexible(
                 child: FittedBox(
@@ -5423,7 +5398,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     String? text2, {
     double bottomPadding = 12,
   }) {
-    const Color detailIcon = Color(0xFF5BC0BE);
+    const Color detailIcon = kAppAccentBlueBright;
     const TextStyle detailText = TextStyle(
       color: Color(0xFFE2E8F0),
       fontSize: 13,
@@ -5512,14 +5487,19 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     final dateStr = d.time[dayIndex];
 
     final locTime = _getCurrentLocationTime();
-    /// Denné karty — len Open-Meteo (radar getter chain spôsoboval Stack Overflow).
+    final dayPrefix = calendarDayPrefix(dateStr);
+    final utcOff = weatherData?.utcOffsetSeconds;
+    /// Rovnaký 24 h pás ako záložka „24 hodín“ (vrátane RainViewer).
     final stripState = h != null && current != null
         ? _hourlyStripFinalDisplayState(
             h,
             locTime,
             current,
             d,
-            weatherData?.utcOffsetSeconds,
+            utcOff,
+            radarNowcast: _radarNowcastContext,
+            radarCoverageActive:
+                currentCity != null && radarNowcastActiveForCity(currentCity!),
             lightningNearby: _lightningNearby,
           )
         : null;
@@ -5528,11 +5508,16 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         h != null &&
         h.time.asMap().entries.any(
               (e) =>
-                  e.value.startsWith(dateStr) &&
-                  stripState.icons.containsKey(e.key),
+                  stripState.icons.containsKey(e.key) &&
+                  _hourlyIndexOnDailyTile(h, e.key, dayPrefix, utcOff),
             );
     final HourlyStripDisplayState? stripForDay =
         dayInStripWindow ? stripState : null;
+
+    final rainingAtPinNow = dayIndex == 0 &&
+        (_radarNowcastContext.pinForecast.wetAtPinNow ||
+            _radarNowcastContext.precipNow ||
+            _radarNowcastContext.rainAtPinNow);
 
     final rawApiDailyPrecip = (d.precipSum != null && d.precipSum!.length > dayIndex)
         ? (d.precipSum![dayIndex] ?? 0.0)
@@ -5582,9 +5567,10 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
     final int fallbackDailyCode = d.weatherCode?[dayIndex] ?? 0;
 
-    final bool suppressWetDayIcons = shouldSuppressWetDayIconsForDay(
+    final bool suppressWetDayIcons = !rainingAtPinNow &&
+        shouldSuppressWetDayIconsForDay(
       h,
-      dateStr,
+      dayPrefix,
       apiDailyPrecip,
       apiDailySnow,
       dailyApiProb,
@@ -5599,12 +5585,14 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       h,
       dateStr,
       daysFromToday: dayIndex,
+      stripState: stripForDay,
     );
     final ecmwfDayUiSumMm = ecmwfDayUiPrecipSumMm(h, dateStr);
     final int effectiveDailyProb = dailyPrecipProbForIconIntensity(
       dailyApiProb: dailyApiProb,
       hourlyStripMaxProb: showableDayPrecip.maxProb,
       hourlyDayMaxProb: hourlyDayMaxPrecipProb(h, dateStr),
+      daysFromToday: dayIndex,
     );
     final double effectiveDailyPrecipMm = dailyPrecipMmForIconDisplay(
       apiDailyPrecip: apiDailyPrecip,
@@ -5743,11 +5731,50 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
     final showablePrecip = dayExpandedPrecipSummary(
       h,
-      dateStr,
+      dayPrefix,
       stripIcons: stripForDay?.icons,
       stripPrecipMm: stripForDay?.precipMm,
       stripProbs: stripForDay?.probs,
+      utcOffsetSeconds: utcOff,
     );
+
+    // Práve prší na pine — aktuálny úsek + hlavná ikona musia sedieť s hero / 24 h.
+    // Intenzita ikony však podľa denného úhrnu — radar dBZ nesmie dať rain.svg pri 4 mm.
+    if (rainingAtPinNow) {
+      var liveIcon = applyRadarPrecipEndToHeroIcon(
+        61,
+        radarCtx: _radarNowcastContext,
+        locTime: locTime,
+        tempC: current?.temperature,
+        precipMm: math.max(0.5, showablePrecip.sumMm),
+        precipProb: math.max(60, showablePrecip.maxProb),
+      );
+      liveIcon = capPrecipIconByTrustedMm(
+        liveIcon,
+        trustedMm: math.max(rawApiDailyPrecip, effectiveDailyPrecipMm),
+      );
+      final hour = locTime.hour;
+      final livePart = (hour >= 6 && hour < 12)
+          ? morningWeather
+          : (hour >= 12 && hour < 18)
+              ? afternoonWeather
+              : (hour >= 18 && hour < 23)
+                  ? eveningWeather
+                  : nightWeather;
+      livePart['iconCode'] = liveIcon;
+      livePart['icon'] = getWeatherIcon(
+        liveIcon,
+        size: 38,
+        forceDay: hour >= 6 && hour < 18,
+        forceNight: hour < 6 || hour >= 23,
+      );
+      livePart['partSumMm'] = math.max(
+        (livePart['partSumMm'] as double?) ?? 0.0,
+        0.5,
+      );
+      dailyMainIconCode = liveIcon;
+    }
+
     final partsPrecipMm = dayPrecipMmFromVisibleDayParts([
       morningWeather,
       afternoonWeather,
@@ -5762,23 +5789,35 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     ];
     final partIconsAllDry = dayPartIconCodesAllDry(partIconCodes);
     final footerPrecip = resolveDailyCardFooterPrecip(
-      partIconsAllDry: partIconsAllDry,
+      partIconsAllDry: partIconsAllDry && !rainingAtPinNow,
       dailyMainIconCode: dailyMainIconCode,
       apiDailySnow: apiDailySnow,
-      expandedSumMm: showablePrecip.sumMm,
-      expandedMaxProb: showablePrecip.maxProb,
-      partsSumMm: partsPrecipMm,
+      expandedSumMm: math.max(
+        showablePrecip.sumMm,
+        rainingAtPinNow ? 0.5 : 0.0,
+      ),
+      expandedMaxProb: math.max(
+        showablePrecip.maxProb,
+        rainingAtPinNow ? 60 : 0,
+      ),
+      partsSumMm: math.max(partsPrecipMm, rainingAtPinNow ? 0.5 : 0.0),
       hourly: h,
-      dateStr: dateStr,
+      dateStr: dayPrefix,
       apiDailyPrecip: rawApiDailyPrecip,
       dailyApiProb: dailyApiProb,
       latchedDailyMm: 0,
       latchedDailyProb: 0,
+      daysFromToday: dayIndex,
     );
-    final displayMm = footerPrecip.mm;
-    final footerProb = footerPrecip.prob;
+    var displayMm = footerPrecip.mm;
+    var footerProb = footerPrecip.prob;
+    if (rainingAtPinNow) {
+      displayMm = math.max(displayMm, 0.5);
+      footerProb = math.max(footerProb, 60);
+    }
 
-    if (!dailyCardShowsWetPrecip(
+    if (!rainingAtPinNow &&
+        !dailyCardShowsWetPrecip(
       trustedMm: displayMm,
       trustedProb: footerProb,
       snowfallCm: apiDailySnow,
@@ -5817,6 +5856,37 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       }
     }
 
+    // Ikony podľa čísla v pätičke — radar dBZ nesmie dať rain.svg pri 4,6 mm.
+    // partMm nesmie byť vyšší než footer (nafúknuté strip mm).
+    for (final entry in <(String, Map<String, dynamic>)>[
+      ('morning', morningWeather),
+      ('afternoon', afternoonWeather),
+      ('evening', eveningWeather),
+      ('night', nightWeather),
+    ]) {
+      final part = entry.$2;
+      final code = part['iconCode'] as int?;
+      if (code == null) continue;
+      final rawPartMm = (part['partSumMm'] as num?)?.toDouble() ?? 0.0;
+      final capped = capPrecipIconByTrustedMm(
+        code,
+        trustedMm: displayMm,
+        partMm: math.min(rawPartMm, displayMm),
+      );
+      if (capped == code) continue;
+      part['iconCode'] = capped;
+      part['icon'] = getWeatherIcon(
+        capped,
+        size: 38,
+        forceDay: entry.$1 == 'morning' || entry.$1 == 'afternoon',
+        forceNight: entry.$1 == 'night',
+      );
+    }
+    dailyMainIconCode = capPrecipIconByTrustedMm(
+      dailyMainIconCode,
+      trustedMm: displayMm,
+    );
+
     final mainIcon = getWeatherIcon(
       dailyMainIconCode,
       forceDay: true,
@@ -5824,7 +5894,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     );
 
     String precipStr;
-    if (partIconsAllDry &&
+    if (!rainingAtPinNow &&
+        partIconsAllDry &&
         !kPrecipitationCodes.contains(
             normalizeDisplayWeatherCode(dailyMainIconCode))) {
       precipStr =
@@ -5836,7 +5907,10 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     } else if (kPrecipitationCodes.contains(dailyMainIconCode) &&
         footerProb >= kMinPrecipProbPercent) {
       precipStr =
-          '0 mm\nŠanca: ${_roundPrecipProbabilityForDisplay(footerProb)} %';
+          '${displayMm >= kMeaningfulPrecipMmPerHour ? _formatPrecipitation(displayMm, weatherCode: dailyMainIconCode) : '0 mm'}\nŠanca: ${_roundPrecipProbabilityForDisplay(footerProb)} %';
+    } else if (rainingAtPinNow) {
+      precipStr =
+          '${_formatPrecipitation(math.max(displayMm, 0.5), weatherCode: dailyMainIconCode)}\nŠanca: ${_roundPrecipProbabilityForDisplay(math.max(footerProb, 60))} %';
     } else {
       precipStr =
           '0 mm\nŠanca: ${_roundPrecipProbabilityForDisplay(math.max(footerProb, 10))} %';
@@ -5974,13 +6048,13 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                                   begin: Alignment.topLeft,
                                   end: Alignment.bottomRight,
                                   colors: [
-                                    Color(0xFF3A4E62),
-                                    Color(0xFF2A3544),
+                                    kAppCardNavyElevated,
+                                    kAppCardNavy,
                                   ],
                                 ),
                                 borderRadius: BorderRadius.circular(16),
                                 border: Border.all(
-                                  color: const Color(0xFF4A6B82).withValues(alpha: 0.5),
+                                  color: kAppCardNavyBorder.withValues(alpha: 0.5),
                                   width: 1,
                                 ),
                               ),
@@ -6020,9 +6094,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                                         borderRadius: BorderRadius.circular(1),
                                         gradient: LinearGradient(
                                           colors: [
-                                            const Color(0xFF2A3544).withValues(alpha: 0.0),
-                                            const Color(0xFF4ECDC4).withValues(alpha: 0.35),
-                                            const Color(0xFF2A3544).withValues(alpha: 0.0),
+                                            kAppCardNavy.withValues(alpha: 0.0),
+                                            kAppAccentBlueBright.withValues(alpha: 0.35),
+                                            kAppCardNavy.withValues(alpha: 0.0),
                                           ],
                                         ),
                                       ),
@@ -6116,7 +6190,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     return LayoutBuilder(
       builder: (context, c) {
         final w = c.maxWidth;
-        const h = 16.0;
+        const h = 10.0;
         final safeSpan = span <= 0 ? 1.0 : span;
         double nx(double v) => ((v - minTemp) / safeSpan).clamp(0.0, 1.0);
         final double? pos = (current == null) ? null : nx(current) * w;
@@ -6129,36 +6203,49 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                 height: h,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(999),
-                  color: const Color.fromRGBO(255, 255, 255, 0.18),
+                  color: Colors.white.withValues(alpha: 0.12),
                 ),
               ),
               if (pos != null)
                 Positioned(
                   left: 0,
-                  width: math.max(6.0, pos),
+                  width: math.max(8.0, pos),
                   top: 0,
                   bottom: 0,
                   child: Container(
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(999),
-                      color: accentColor,
+                      gradient: const LinearGradient(
+                        colors: [
+                          Color(0xFFFFD54F),
+                          Color(0xFFFF9800),
+                          Color(0xFFE53935),
+                        ],
+                      ),
                     ),
                   ),
                 ),
               if (pos != null && showKnob)
                 Positioned(
-                  left: (pos - 8).clamp(0.0, math.max(0.0, w - 16.0)),
-                  top: (h - 16) / 2,
+                  left: (pos - 6).clamp(0.0, math.max(0.0, w - 12.0)),
+                  top: (h - 12) / 2,
                   child: Container(
-                    width: 16,
-                    height: 16,
+                    width: 12,
+                    height: 12,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: lightColor,
+                      color: Colors.white,
                       border: Border.all(
-                        color: const Color.fromRGBO(0, 0, 0, 0.25),
-                        width: 1,
+                        color: const Color(0xFFFF9800),
+                        width: 2,
                       ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.25),
+                          blurRadius: 4,
+                          offset: const Offset(0, 1),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -6195,27 +6282,34 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: Stack(
+        fit: StackFit.expand,
         children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _buildHero(firstHourTemp, firstHourIcon, displayCode),
-              Expanded(
-                child: NotificationListener<ScrollNotification>(
-                  onNotification: (notification) => false,
-                  child: RefreshIndicator(
-                    onRefresh: _onRefresh,
-                    backgroundColor: kAmbientBlendColor,
-                    color: accentColor,
-                    notificationPredicate: (notification) {
-                      return !_isRefreshing && !isLoading;
-                    },
-                    child: _buildContent(hasData, firstHourTemp, displayCode),
-                  ),
-                ),
+          NotificationListener<ScrollNotification>(
+            onNotification: (notification) => false,
+            child: RefreshIndicator(
+              onRefresh: _onRefresh,
+              backgroundColor: kAppCardNavy,
+              color: accentColor,
+              notificationPredicate: (notification) {
+                return !_isRefreshing && !isLoading;
+              },
+              child: _buildContent(
+                hasData,
+                firstHourTemp,
+                displayCode,
+                hero: _buildHero(firstHourTemp, firstHourIcon, displayCode),
               ),
-            ],
+            ),
           ),
+          // Skrytý 1×1 WebView — radar (hranice SK) skôr, než je karta v strome.
+          if (_supportsRadarForCity(currentCity)) _buildRadarWarmupHost(),
+          // Skrytý 1×1 WebView — prednačíta mapu výstrah na pozadí (po scheduleWarmup).
+          if (_supportsVystrahyForCity(currentCity))
+            ListenableBuilder(
+              listenable: VystrahyWebViewPreloader.instance,
+              builder: (context, _) =>
+                  VystrahyWebViewPreloader.instance.buildWarmupHost(),
+            ),
         ],
       ),
     );
