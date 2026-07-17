@@ -1008,6 +1008,10 @@ double? _flatCenterDbzSlopePerMin(List<RadarFrameSample> history) {
     }
   }
   if (chance > 0 && chance < 30) chance = 30;
+  // UI: šanca vždy po 10 % (50, 60, 70…).
+  if (chance > 0) {
+    chance = ((chance / 10.0).round() * 10).clamp(30, 100);
+  }
 
   return (
     etaMinutes: eta,

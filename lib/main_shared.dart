@@ -1119,7 +1119,9 @@ void applyHourlyStripPrecipPercentRamp({
           );
         }
       }
-      storedProbs[i] = math.max(storedProbs[i], wetPct);
+      storedProbs[i] = _roundPrecipProbabilityForDisplay(
+        math.max(storedProbs[i], wetPct),
+      );
       continue;
     }
 
@@ -1271,7 +1273,12 @@ void applyHourlyStripHorizonProbCaps({
     final dateStr = localT.toIso8601String().substring(0, 10);
     final dayMax = hourlyDayMaxPrecipProb(h, dateStr);
     if (dayMax <= 0) continue;
-    if (storedProbs[i] > dayMax) storedProbs[i] = dayMax;
+    if (storedProbs[i] > dayMax) {
+      storedProbs[i] = _roundPrecipProbabilityForDisplay(dayMax);
+    }
+  }
+  for (var i = 0; i < storedProbs.length; i++) {
+    storedProbs[i] = _roundPrecipProbabilityForDisplay(storedProbs[i]);
   }
 }
 
@@ -1285,7 +1292,9 @@ void clampThunderHourlyStripProbs({
   for (var i = 0; i < len; i++) {
     final c = normalizeDisplayWeatherCode(displayIcons[i]);
     if (!kThunderWeatherCodes.contains(c)) continue;
-    storedProbs[i] = storedProbs[i].clamp(kMinPrecipProbPercent, 100);
+    storedProbs[i] = _roundPrecipProbabilityForDisplay(
+      storedProbs[i].clamp(kMinPrecipProbPercent, 100),
+    );
   }
 }
 
@@ -1490,9 +1499,11 @@ void applyRadarPrecipEndToHourlyStrip({
       final mathChance = snap.wetAtPinNow
           ? math.max(snap.approachChancePercent, 70)
           : math.max(snap.approachChancePercent, kMinPrecipProbPercent);
-      storedProbs[i] = math.max(
-        storedProbs[i],
-        math.max(kMinPrecipProbPercent, math.min(mathChance, 90)),
+      storedProbs[i] = _roundPrecipProbabilityForDisplay(
+        math.max(
+          storedProbs[i],
+          math.max(kMinPrecipProbPercent, math.min(mathChance, 90)),
+        ),
       );
       continue;
     }

@@ -5124,7 +5124,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         index < h.precipitationProbability!.length;
     final int iconCode = displayIconCode;
 
-    final String precipPercent = '$precipColumnPercent%';
+    final String precipPercent =
+        '${_roundPrecipProbabilityForDisplay(precipColumnPercent)}%';
     final bool showPrecipAmount =
         showRainPrecipColumn && precipDisplayMm >= kMeaningfulPrecipMmPerHour;
 
