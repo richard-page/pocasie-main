@@ -13,6 +13,15 @@ const String _kOpenMeteoCurrentVars =
 const String _kEcmwfCloudHourlyVars = 'cloud_cover,weather_code';
 const String _kEcmwfCloudCurrentVars = 'cloud_cover,weather_code';
 
+/// Best Match precip blend — ľahké requesty z ďalších modelov (zhoda mm / %).
+const String _kPrecipBlendHourlyVars =
+    'precipitation,precipitation_probability,weather_code';
+const List<String> _kPrecipBlendModels = [
+  'icon_seamless',
+  'ecmwf_ifs025',
+  'gfs_seamless',
+];
+
 String _openMeteoCacheKey(
   double lat,
   double lon,
@@ -171,6 +180,315 @@ Map<String, dynamic> _mergeEcmwfCloudIntoBestMatch(
   return merged;
 }
 
+double? _medianDouble(List<double> values) {
+  if (values.isEmpty) return null;
+  final sorted = List<double>.from(values)..sort();
+  final mid = sorted.length ~/ 2;
+  if (sorted.length.isOdd) return sorted[mid];
+  return (sorted[mid - 1] + sorted[mid]) / 2.0;
+}
+
+int _roundProbTens(int value) {
+  if (value <= 0) return 0;
+  if (value >= 100) return 100;
+  return ((value / 10.0).round() * 10).clamp(10, 100);
+}
+
+bool _modelHourWet(double? mm) =>
+    mm != null && mm >= kMeaningfulPrecipMmPerHour;
+
+int _wettestPrecipCode(List<int?> codes, double mm) {
+  var best = 0;
+  for (final c in codes) {
+    if (c == null) continue;
+    final n = normalizeDisplayWeatherCode(c);
+    if (!kPrecipitationCodes.contains(n)) continue;
+    if (n > best) best = n;
+  }
+  if (best > 0) return best;
+  return wmoFromPrecipitationMm(mm);
+}
+
+/// Konzervatívne % — mokré len pri väčšine modelov; inak suché / nízke.
+int _precipBlendProbPercent({
+  required int wetCount,
+  required int modelCount,
+  required List<int> modelProbs,
+  required bool consensusWet,
+}) {
+  if (modelCount <= 0) return 0;
+  final medProb = modelProbs.isEmpty
+      ? 0
+      : (_medianDouble(modelProbs.map((e) => e.toDouble()).toList()) ?? 0)
+          .round();
+
+  if (!consensusWet) {
+    // Bez väčšiny — max 40 % (suchá obloha), žiadne 50+ z jedného modelu.
+    return _roundProbTens(math.min(medProb, 40));
+  }
+
+  // Väčšina mokrá: 2/3→60, 3/3→70–80 (nie automaticky 90).
+  final fromAgreement = wetCount >= modelCount
+      ? 70
+      : (wetCount * 2 >= modelCount * 2 - 1 ? 60 : 50);
+  final blended = ((fromAgreement * 2 + math.min(medProb, 80)) / 3).round();
+  return _roundProbTens(math.max(kMinPrecipProbPercent, blended).clamp(50, 80));
+}
+
+Uri _precipBlendModelUri(
+  double lat,
+  double lon,
+  String timezone,
+  String modelId,
+) {
+  final tz = _normalizeApiTimezone(timezone);
+  return Uri.parse('https://api.open-meteo.com/v1/forecast').replace(
+    queryParameters: <String, String>{
+      'latitude': lat.toStringAsFixed(4),
+      'longitude': lon.toStringAsFixed(4),
+      'hourly': _kPrecipBlendHourlyVars,
+      'forecast_days': kOpenMeteoForecastDays.toString(),
+      'timezone': tz,
+      'models': modelId,
+    },
+  );
+}
+
+Future<Map<String, dynamic>?> _downloadPrecipBlendModel(
+  double lat,
+  double lon,
+  String timezone,
+  String modelId,
+) async {
+  try {
+    final uri = _precipBlendModelUri(lat, lon, timezone, modelId);
+    debugPrint('Open-Meteo (precip blend $modelId): GET $uri');
+    final r = await http.get(
+      uri,
+      headers: const {
+        'Accept': 'application/json',
+        'User-Agent': 'pocasie-app/1.0 (flutter)',
+      },
+    ).timeout(const Duration(seconds: 22));
+    if (r.statusCode != 200) {
+      debugPrint('Precip blend $modelId HTTP ${r.statusCode}');
+      return null;
+    }
+    final raw = json.decode(r.body) as Map<String, dynamic>;
+    if (!raw.containsKey('hourly')) return null;
+    return raw;
+  } catch (e) {
+    debugPrint('Precip blend $modelId failed: $e');
+    return null;
+  }
+}
+
+Future<List<({String id, Map<String, dynamic> data})>> _downloadPrecipBlendModels(
+  double lat,
+  double lon,
+  String timezone,
+) async {
+  final results = await Future.wait(
+    _kPrecipBlendModels.map((id) async {
+      final data = await _downloadPrecipBlendModel(lat, lon, timezone, id);
+      return (id: id, data: data);
+    }),
+  );
+  return [
+    for (final r in results)
+      if (r.data != null) (id: r.id, data: r.data!),
+  ];
+}
+
+/// Best Match + multi-model zrážky — **konzervatívne**:
+/// medián mm zo všetkých modelov; mokré len pri väčšine (≥2 z 3).
+/// Best Match sa do hlasovania nepočíta (v EÚ často = ICON → dvojitý hlas).
+Map<String, dynamic> _mergePrecipBlendIntoBestMatch(
+  Map<String, dynamic> bestMatch,
+  List<({String id, Map<String, dynamic> data})> extras,
+) {
+  if (extras.isEmpty) {
+    return {...bestMatch, 'precip_blend': false, 'precip_blend_models': 0};
+  }
+
+  final bmHourly = bestMatch['hourly'];
+  if (bmHourly is! Map) {
+    return {...bestMatch, 'precip_blend': false, 'precip_blend_models': 0};
+  }
+
+  final bmTimes =
+      (bmHourly['time'] as List?)?.map((e) => e.toString()).toList();
+  if (bmTimes == null || bmTimes.isEmpty) {
+    return {...bestMatch, 'precip_blend': false, 'precip_blend_models': 0};
+  }
+
+  // Len extra modely (ICON / ECMWF / GFS) — bez Best Match v hlase.
+  final extraByTime = <String, List<({double? mm, int? prob, int? code})>>{};
+  for (final extra in extras) {
+    final hourly = extra.data['hourly'];
+    if (hourly is! Map) continue;
+    final times = (hourly['time'] as List?)?.map((e) => e.toString()).toList();
+    final mmList = hourly['precipitation'] as List?;
+    final probList = hourly['precipitation_probability'] as List?;
+    final codeList = hourly['weather_code'] as List?;
+    if (times == null || mmList == null) continue;
+    for (var i = 0; i < times.length; i++) {
+      final t = times[i];
+      final mm = i < mmList.length ? _asNum(mmList[i])?.toDouble() : null;
+      final prob = (probList != null && i < probList.length)
+          ? _asNum(probList[i])?.toInt()
+          : null;
+      final code = (codeList != null && i < codeList.length)
+          ? _asNum(codeList[i])?.toInt()
+          : null;
+      extraByTime.putIfAbsent(t, () => []).add((mm: mm, prob: prob, code: code));
+    }
+  }
+
+  final bmMm = List<dynamic>.from(
+    (bmHourly['precipitation'] as List?) ??
+        List<dynamic>.filled(bmTimes.length, null),
+  );
+  final bmProb = List<dynamic>.from(
+    (bmHourly['precipitation_probability'] as List?) ??
+        List<dynamic>.filled(bmTimes.length, null),
+  );
+  final bmCodes = List<dynamic>.from(
+    (bmHourly['weather_code'] as List?) ??
+        List<dynamic>.filled(bmTimes.length, null),
+  );
+  while (bmMm.length < bmTimes.length) {
+    bmMm.add(null);
+  }
+  while (bmProb.length < bmTimes.length) {
+    bmProb.add(null);
+  }
+  while (bmCodes.length < bmTimes.length) {
+    bmCodes.add(null);
+  }
+
+  var blendedHours = 0;
+  var wetHours = 0;
+  for (var i = 0; i < bmTimes.length; i++) {
+    final t = bmTimes[i];
+    final samples = extraByTime[t];
+    if (samples == null || samples.length < 2) continue;
+
+    final allMm = <double>[];
+    final probs = <int>[];
+    final codes = <int?>[];
+    var wetCount = 0;
+    for (final s in samples) {
+      final wet = _modelHourWet(s.mm);
+      if (wet) wetCount++;
+      allMm.add(s.mm ?? 0);
+      if (s.prob != null) probs.add(s.prob!);
+      codes.add(s.code);
+    }
+
+    final modelCount = samples.length;
+    // Väčšina: pri 3 modeloch treba ≥2; pri 2 modeloch treba 2.
+    final majorityWet = wetCount * 2 > modelCount;
+    // Medián vrátane núl — jeden mokrý model nenaťahuje celé mm.
+    final medianMm = _medianDouble(allMm) ?? 0;
+    final consensusWet =
+        majorityWet && medianMm >= kMeaningfulPrecipMmPerHour;
+
+    final blendedProb = _precipBlendProbPercent(
+      wetCount: wetCount,
+      modelCount: modelCount,
+      modelProbs: probs,
+      consensusWet: consensusWet,
+    );
+
+    final blendedMm = consensusWet
+        ? double.parse(medianMm.toStringAsFixed(2))
+        : 0.0;
+
+    bmMm[i] = blendedMm;
+    bmProb[i] = blendedProb;
+    blendedHours++;
+
+    final bmCode = _asNum(bmCodes[i])?.toInt();
+    if (consensusWet) {
+      wetHours++;
+      if (bmCode == null || isSkyOnlyWmoCode(bmCode)) {
+        bmCodes[i] = _wettestPrecipCode(codes, blendedMm);
+      }
+      // Už mokré BM — neeskaluj intenzitu (nesilniť ikonu).
+    } else {
+      // Bez väčšiny: zrážkovú ikonu z Best Match zruš (jeden model ju nenaťahuje).
+      if (bmCode != null &&
+          kPrecipitationCodes.contains(normalizeDisplayWeatherCode(bmCode))) {
+        final cloud = (bmHourly['cloud_cover'] as List?) != null &&
+                i < (bmHourly['cloud_cover'] as List).length
+            ? _asNum((bmHourly['cloud_cover'] as List)[i])?.toDouble()
+            : null;
+        bmCodes[i] = skyWmoFromCloudCover(cloud);
+      }
+    }
+  }
+
+  final mergedHourly = Map<String, dynamic>.from(bmHourly)
+    ..['precipitation'] = bmMm
+    ..['precipitation_probability'] = bmProb
+    ..['weather_code'] = bmCodes;
+
+  // Denné sumy / max % zo zlúčených hodín.
+  final bmDaily = bestMatch['daily'];
+  Map<String, dynamic>? mergedDaily;
+  if (bmDaily is Map) {
+    final dayTimes =
+        (bmDaily['time'] as List?)?.map((e) => e.toString()).toList();
+    if (dayTimes != null && dayTimes.isNotEmpty) {
+      final daySum = List<dynamic>.from(
+        (bmDaily['precipitation_sum'] as List?) ??
+            List<dynamic>.filled(dayTimes.length, 0),
+      );
+      final dayProbMax = List<dynamic>.from(
+        (bmDaily['precipitation_probability_max'] as List?) ??
+            List<dynamic>.filled(dayTimes.length, 0),
+      );
+      while (daySum.length < dayTimes.length) {
+        daySum.add(0);
+      }
+      while (dayProbMax.length < dayTimes.length) {
+        dayProbMax.add(0);
+      }
+
+      for (var d = 0; d < dayTimes.length; d++) {
+        final date = dayTimes[d].length >= 10
+            ? dayTimes[d].substring(0, 10)
+            : dayTimes[d];
+        var sum = 0.0;
+        var maxP = 0;
+        for (var i = 0; i < bmTimes.length; i++) {
+          if (!bmTimes[i].startsWith(date)) continue;
+          sum += _asNum(bmMm[i])?.toDouble() ?? 0;
+          maxP = math.max(maxP, _asNum(bmProb[i])?.toInt() ?? 0);
+        }
+        daySum[d] = double.parse(sum.toStringAsFixed(2));
+        dayProbMax[d] = maxP;
+      }
+      mergedDaily = Map<String, dynamic>.from(bmDaily)
+        ..['precipitation_sum'] = daySum
+        ..['precipitation_probability_max'] = dayProbMax;
+    }
+  }
+
+  final merged = Map<String, dynamic>.from(bestMatch)
+    ..['hourly'] = mergedHourly
+    ..['precip_blend'] = true
+    ..['precip_blend_models'] = extras.length
+    ..['precip_blend_hours'] = blendedHours
+    ..['precip_blend_wet_hours'] = wetHours
+    ..['precip_blend_mode'] = 'majority_median';
+  if (mergedDaily != null) {
+    merged['daily'] = mergedDaily;
+  }
+  return merged;
+}
+
 Future<Map<String, dynamic>?> _downloadEcmwfCloudCover(
   double lat,
   double lon,
@@ -222,7 +540,8 @@ Future<Map<String, dynamic>?> _downloadOpenMeteoForecast(
             forecastJsonDailyHorizonComplete(cached) &&
             forecastJsonHas24HourWindow(cached) &&
             (model != WeatherForecastModel.bestMatch ||
-                cached['ecmwf_cloud_overlay'] == true)) {
+                (cached['ecmwf_cloud_overlay'] == true &&
+                    cached['precip_blend'] == true))) {
           debugPrint('Open-Meteo (${model.uiTitle}): using cached data for $lat,$lon');
           return cached;
         }
@@ -272,6 +591,21 @@ Future<Map<String, dynamic>?> _downloadOpenMeteoForecast(
         );
       } else {
         map = {...map, 'ecmwf_cloud_overlay': false};
+      }
+
+      // Multi-model zrážky: Best Match + ICON + ECMWF + GFS → zhoda / medián mm / %.
+      final precipExtras =
+          await _downloadPrecipBlendModels(lat, lon, timezone);
+      if (precipExtras.isNotEmpty) {
+        map = _mergePrecipBlendIntoBestMatch(map, precipExtras);
+        debugPrint(
+          'Best Match: precip blend '
+          '${map['precip_blend_models']} modelov, '
+          '${map['precip_blend_wet_hours'] ?? 0} mokrých h '
+          '(${precipExtras.map((e) => e.id).join(', ')})',
+        );
+      } else {
+        map = {...map, 'precip_blend': false, 'precip_blend_models': 1};
       }
     }
 

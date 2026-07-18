@@ -1308,23 +1308,23 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         item(
           icon: Icons.warning_amber_rounded,
           label: 'Výstrahy',
-          onTap: () {
+          onTap: () async {
             final city = currentCity;
             if (city == null) return;
             final preloader = VystrahyWebViewPreloader.instance;
             preloader.updateUserLocation(city.lat, city.lon);
-            // Ak ešte beží oneskorený warmup — spusti hneď pred navigáciou.
+            // Dokonči warmup ešte pred navigáciou — stránka sa otvorí už hotová.
             preloader.warmup();
+            await preloader.waitUntilReady();
+            if (!context.mounted) return;
             preloader.markAttached();
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (!context.mounted) return;
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => MeteoVystrahyPage(city: city),
-                ),
-              );
-            });
+            await Navigator.push(
+              // ignore: use_build_context_synchronously
+              context,
+              MaterialPageRoute(
+                builder: (_) => MeteoVystrahyPage(city: city),
+              ),
+            );
           },
         ),
       );
@@ -4804,6 +4804,25 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       storedProbs: stripStoredProbs,
       precipMm: stripPrecipMm,
     );
+    final utcOff = weatherData?.utcOffsetSeconds;
+    final stripSlotHours = <DateTime>[];
+    for (final idx in stripIndices) {
+      final parsed = DateTime.tryParse(h.time[idx]);
+      if (parsed == null) {
+        stripSlotHours.add(DateTime(
+          locTime.year,
+          locTime.month,
+          locTime.day,
+          locTime.hour,
+        ));
+        continue;
+      }
+      final localT =
+          utcOff != null ? parsed.add(Duration(seconds: utcOff)) : parsed;
+      stripSlotHours.add(
+        DateTime(localT.year, localT.month, localT.day, localT.hour),
+      );
+    }
     alignHourlyStripIconsWithPrecipPercents(
       displayIcons: displayIcons,
       showRainPrecip: stripShowRainPrecip,
@@ -4821,6 +4840,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
               ? h.cloudCover![idx]
               : null,
       ],
+      radarCtx: _radarNowcastContext,
+      locTime: locTime,
+      slotHours: stripSlotHours,
     );
     clampNearTermStripPercentsWithoutRadar(
       displayIcons: displayIcons,
@@ -4829,8 +4851,9 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       stripIndices: stripIndices,
       h: h,
       locTime: locTime,
-      utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+      utcOffsetSeconds: utcOff,
       radarCtx: _radarNowcastContext,
+      precipMm: stripPrecipMm,
     );
     reapplyDryCloudyStripPercents(
       displayIcons: displayIcons,
@@ -4841,6 +4864,13 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       radarCtx: _radarNowcastContext,
       locTime: locTime,
       utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+    );
+    diversifyRepetitiveDryStripPercents(
+      displayIcons: displayIcons,
+      showRainPrecip: stripShowRainPrecip,
+      storedProbs: stripStoredProbs,
+      stripIndices: stripIndices,
+      h: h,
     );
 
     return SliverPadding(
@@ -5178,20 +5208,19 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
     final skyFloor = hourlyStripSkyIconPercent(iconCode);
     final rounded = _roundPrecipProbabilityForDisplay(precipColumnPercent);
-    // Suché polooblačno = 20, zamračené = 30, husté/radar = 40.
+    // Suché % — bez zrážok max 30; hodina pred zrážkou 40; jasno 10.
     final int shownPct;
-    if (!showRainPrecipColumn &&
-        rounded < kMinPrecipProbPercent &&
-        _isDryCloudyStripSkyCode(iconCode)) {
-      shownPct = hourlyStripDryCloudyPercentShown(
-        math.max(rounded, skyFloor),
-      );
+    if (!showRainPrecipColumn && _isClearStripSkyCode(iconCode)) {
+      shownPct = 10;
+    } else if (!showRainPrecipColumn && rounded < kMinPrecipProbPercent) {
+      // Pipeline už nastavila 40 pred zrážkou — nerež na 30.
+      shownPct = rounded.clamp(10, 40);
     } else {
       shownPct = math.max(rounded, skyFloor);
     }
     final String precipPercent = '$shownPct%';
     final bool showPrecipAmount =
-        showRainPrecipColumn && precipDisplayMm >= kMeaningfulPrecipMmPerHour;
+        showRainPrecipColumn && precipDisplayMm > 0;
 
     final windWithDirection = _formatWindWithDirection(h.windSpeed?[index], h.windDirection?[index]);
 

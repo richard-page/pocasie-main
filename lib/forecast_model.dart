@@ -82,7 +82,7 @@ enum WeatherForecastModel {
 const String kForecastModelKey = 'forecast_model_v1';
 
 /// Po zmene logiky predpovede / formátu cache zvýšiť — staré záznamy sa ignorujú.
-const int kForecastCacheSchemaVersion = 10;
+const int kForecastCacheSchemaVersion = 12;
 
 /// Kľúč cache predpovede — verzia v názve zruší starú cache po zmene logiky.
 String forecastWeatherCacheKey(WeatherForecastModel model, {int days = 16}) =>

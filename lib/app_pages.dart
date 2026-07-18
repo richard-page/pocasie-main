@@ -3623,6 +3623,10 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   bool loaded = false;
   bool loading = false;
   bool failed = false;
+  /// Obnova pri už načítanej mape — bez bieleho/prázdneho refreshu celej stránky.
+  bool softReloading = false;
+  /// Ďalší `onPageStarted` má nechať mapu viditeľnú (soft navigácia).
+  bool _preferSoftNavigation = false;
   Timer? _loadTimeout;
   Timer? _scheduledWarmupTimer;
   final List<Timer> _mapResizeInjectTimers = [];
@@ -3701,9 +3705,18 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     final lon = _userLon;
     final c = _controller;
     if (lat == null || lon == null || c == null) return;
+    final js = buildVystrahyUserLocationMarkerJs(lat, lon);
     try {
-      await c.runJavaScript(buildVystrahyUserLocationMarkerJs(lat, lon));
+      await c.runJavaScript(js);
     } catch (_) {}
+    // Po layoute mapy ešte raz — inak sa špendlík / zoom nestihne.
+    Future<void>.delayed(const Duration(milliseconds: 450), () async {
+      if (_controller != c) return;
+      if (_userLat != lat || _userLon != lon) return;
+      try {
+        await c.runJavaScript(js);
+      } catch (_) {}
+    });
   }
 
   void markAttached() {
@@ -3745,7 +3758,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       ..setBackgroundColor(pageBg)
       ..setNavigationDelegate(
         NavigationDelegate(
-          onPageStarted: (_) => _onLoadStarted(),
+          onPageStarted: (_) => _onLoadStarted(soft: _preferSoftNavigation),
           onPageFinished: (_) => unawaited(_onLoadFinished()),
           onWebResourceError: (WebResourceError error) {
             final mainFrame = error.isForMainFrame ?? true;
@@ -3762,7 +3775,10 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
 
     _controller = controller;
     _notifySafely();
-    await controller.loadRequest(Uri.parse(kMeteoVystrahyUrl));
+    await controller.loadRequest(
+      _vystrahyRequestUri(),
+      headers: _vystrahyNoCacheHeaders,
+    );
   }
 
   Future<void> _injectMapResize() async {
@@ -3788,10 +3804,14 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     }
   }
 
-  void _onLoadStarted() {
+  void _onLoadStarted({bool soft = false}) {
     _loadTimeout?.cancel();
+    final keepVisible = soft && loaded;
     loading = true;
-    loaded = false;
+    softReloading = keepVisible;
+    if (!keepVisible) {
+      loaded = false;
+    }
     failed = false;
     _notifySafely();
     _loadTimeout = Timer(const Duration(seconds: 18), () {
@@ -3801,21 +3821,155 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
 
   Future<void> _onLoadFinished() async {
     _loadTimeout?.cancel();
+    _preferSoftNavigation = false;
     loading = false;
+    softReloading = false;
     loaded = true;
     failed = false;
+    _warming = false;
     _notifySafely();
     _scheduleMapResizeInject();
   }
 
   void _onLoadFailed() {
     _loadTimeout?.cancel();
+    _preferSoftNavigation = false;
+    final keepMap = softReloading && loaded;
     loading = false;
-    loaded = false;
-    failed = true;
+    softReloading = false;
+    _warming = false;
+    // Pri soft reload nechaj starú mapu; inak označ chybu.
+    if (!keepMap && !loaded) {
+      failed = true;
+    }
     _notifySafely();
   }
 
+  Uri _vystrahyRequestUri() => Uri.parse(
+        '$kMeteoVystrahyUrl?_cb=${DateTime.now().millisecondsSinceEpoch}',
+      );
+
+  static const Map<String, String> _vystrahyNoCacheHeaders = {
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Pragma': 'no-cache',
+  };
+
+  /// Počká, kým je mapa hotová na okamžité otvorenie (warmup).
+  Future<bool> waitUntilReady({
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    if (isReadyForInstantOpen) return true;
+    warmup();
+    final completer = Completer<bool>();
+    late final VoidCallback listener;
+    Timer? timer;
+
+    void finish(bool ok) {
+      timer?.cancel();
+      removeListener(listener);
+      if (!completer.isCompleted) completer.complete(ok);
+    }
+
+    listener = () {
+      if (isReadyForInstantOpen) {
+        finish(true);
+      } else if (failed && !loading) {
+        finish(false);
+      }
+    };
+    addListener(listener);
+    timer = Timer(timeout, () => finish(isReadyForInstantOpen));
+    listener();
+    return completer.future;
+  }
+
+  /// Extrahuje `let dbase = {...}` z HTML výstrah.
+  static String? _extractVystrahyDbaseLiteral(String html) {
+    final marker = RegExp(r'let\s+dbase\s*=\s*');
+    final m = marker.firstMatch(html);
+    if (m == null) return null;
+    var i = m.end;
+    if (i >= html.length || html[i] != '{') return null;
+    var depth = 0;
+    final start = i;
+    for (; i < html.length; i++) {
+      final ch = html[i];
+      if (ch == '"' || ch == "'") {
+        final quote = ch;
+        i++;
+        while (i < html.length) {
+          if (html[i] == r'\') {
+            i += 2;
+            continue;
+          }
+          if (html[i] == quote) break;
+          i++;
+        }
+        continue;
+      }
+      if (ch == '{') {
+        depth++;
+      } else if (ch == '}') {
+        depth--;
+        if (depth == 0) return html.substring(start, i + 1);
+      }
+    }
+    return null;
+  }
+
+  /// Obnova dát bez znovunačítania WebView (mapa ostane na obrazovke).
+  Future<bool> _softReloadInPage(WebViewController c) async {
+    try {
+      final raw = await c.runJavaScriptReturningResult(
+        '(function(){ try { if (typeof loadLevels === "function") { loadLevels(); return "ok"; } '
+        'var b = document.getElementById("reloadBtn"); if (b) { b.click(); return "ok"; } '
+        'return "missing"; } catch (e) { return "err"; } })()',
+      );
+      if (raw.toString().contains('ok')) return true;
+    } catch (_) {}
+
+    try {
+      final res = await http
+          .get(_vystrahyRequestUri(), headers: _vystrahyNoCacheHeaders)
+          .timeout(const Duration(seconds: 12));
+      if (res.statusCode < 200 || res.statusCode >= 300) return false;
+      final literal = _extractVystrahyDbaseLiteral(res.body);
+      if (literal == null || literal.length < 3) return false;
+      await c.runJavaScript('''
+(function() {
+  try {
+    dbase = $literal;
+    var now = new Date();
+    for (var okr in dbase) {
+      if (!Array.isArray(dbase[okr])) continue;
+      dbase[okr] = dbase[okr].filter(function(i) {
+        var d = (typeof parseSKDate === "function") ? parseSKDate(i.do) : null;
+        return d ? d > now : true;
+      });
+      if (dbase[okr].length === 0) delete dbase[okr];
+    }
+    if (typeof vyrenderujTaby === "function") vyrenderujTaby();
+    if (typeof vyrenderujFiltre === "function") vyrenderujFiltre();
+    if (typeof vyrenderujTabulku === "function") vyrenderujTabulku();
+    if (typeof geoLayer !== "undefined" && geoLayer && typeof farbaNaDen === "function") {
+      var off = (typeof vybranyDenOffset === "number") ? vybranyDenOffset : 0;
+      geoLayer.eachLayer(function(l) {
+        try {
+          var id = l.feature && l.feature._bezpecneId;
+          l.setStyle({ fillColor: farbaNaDen(dbase[id], off) });
+        } catch (e1) {}
+      });
+    }
+  } catch (e) {}
+})();
+''');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Obnoví výstrahy bez blanku / full-screen načítania (mapa ostane).
   Future<void> reload() async {
     final c = _controller;
     if (c == null) {
@@ -3823,9 +3977,32 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       await _ensureController();
       return;
     }
-    _onLoadStarted();
+
+    // Už hotová mapa: len tichá obnova dát + spinner v ikone.
+    if (loaded) {
+      softReloading = true;
+      _notifySafely();
+      final ok = await _softReloadInPage(c);
+      softReloading = false;
+      _notifySafely();
+      if (ok) {
+        _scheduleMapResizeInject();
+        return;
+      }
+      // Fallback: nová stránka, ale bez prekrytia spinnerom.
+      _preferSoftNavigation = true;
+      _onLoadStarted(soft: true);
+      await c.loadRequest(
+        _vystrahyRequestUri(),
+        headers: _vystrahyNoCacheHeaders,
+      );
+      return;
+    }
+
+    _onLoadStarted(soft: false);
     await c.loadRequest(
-      Uri.parse('$kMeteoVystrahyUrl?_cb=${DateTime.now().millisecondsSinceEpoch}'),
+      _vystrahyRequestUri(),
+      headers: _vystrahyNoCacheHeaders,
     );
   }
 
@@ -3961,7 +4138,10 @@ class _MeteoVystrahyPageState extends State<MeteoVystrahyPage> {
                     ),
                   ),
                   GestureDetector(
-                    onTap: () => unawaited(_reload()),
+                    onTap: (_preloader.softReloading ||
+                            (_preloader.loading && _preloader.loaded))
+                        ? null
+                        : () => unawaited(_reload()),
                     child: Container(
                       width: 40,
                       height: 40,
@@ -3970,8 +4150,22 @@ class _MeteoVystrahyPageState extends State<MeteoVystrahyPage> {
                         color: kAppCardNavy,
                         border: Border.all(color: kAppCardNavyBorder),
                       ),
-                      child: const Center(
-                        child: Icon(Icons.refresh_rounded, color: Colors.white, size: 20),
+                      child: Center(
+                        child: (_preloader.softReloading ||
+                                (_preloader.loading && _preloader.loaded))
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(
+                                Icons.refresh_rounded,
+                                color: Colors.white,
+                                size: 20,
+                              ),
                       ),
                     ),
                   ),
@@ -4080,18 +4274,40 @@ const String _kVystrahyMobileInjectJs = r'''
   document.body.style.webkitTextSizeAdjust = '100%';
   document.body.style.touchAction = 'manipulation';
 
+  function hookMapCapture() {
+    if (!window.L || !L.Map || window.__pocasieMapProtoHooked) return;
+    window.__pocasieMapProtoHooked = true;
+    ['invalidateSize', 'fitBounds', 'setView', 'panTo', 'flyTo'].forEach(function(method) {
+      var orig = L.Map.prototype[method];
+      if (typeof orig !== 'function') return;
+      L.Map.prototype[method] = function() {
+        window.__pocasieLeafletMap = this;
+        return orig.apply(this, arguments);
+      };
+    });
+  }
+
   function findLeafletMap(el) {
-    if (!el) return null;
+    if (window.__pocasieLeafletMap && window.__pocasieLeafletMap.invalidateSize) {
+      return window.__pocasieLeafletMap;
+    }
+    hookMapCapture();
+    if (!el) return window.__pocasieLeafletMap || null;
     try {
-      if (el._leaflet) return el._leaflet;
+      if (el._leaflet && el._leaflet.invalidateSize) {
+        window.__pocasieLeafletMap = el._leaflet;
+        return el._leaflet;
+      }
       var keys = Object.keys(el);
       for (var i = 0; i < keys.length; i++) {
-        if (keys[i].indexOf('leaflet') === 0 && el[keys[i]] && el[keys[i]].invalidateSize) {
-          return el[keys[i]];
+        var v = el[keys[i]];
+        if (v && v.invalidateSize && v.latLngToLayerPoint) {
+          window.__pocasieLeafletMap = v;
+          return v;
         }
       }
     } catch (e) {}
-    return null;
+    return window.__pocasieLeafletMap || null;
   }
 
   function resizeVystrahyMap() {
@@ -4121,6 +4337,7 @@ const String _kVystrahyMobileInjectJs = r'''
         try { lm.invalidateSize(true); } catch (e2) {}
       }
       try {
+        // Vždy celá SR — nepribližovať na lokalitu / okres.
         if (typeof prerozdelBounndy === 'function') {
           prerozdelBounndy();
         } else if (lm.fitBounds) {
@@ -4129,6 +4346,7 @@ const String _kVystrahyMobileInjectJs = r'''
       } catch (e3) {}
     } else if (typeof prerozdelBounndy === 'function') {
       try { prerozdelBounndy(); } catch (e4) {}
+      findLeafletMap(mapEl);
     }
   }
 

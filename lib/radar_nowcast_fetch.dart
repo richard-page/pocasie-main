@@ -141,8 +141,11 @@ class RadarFrameSample {
 enum RadarPrecipTrackerPhase { idle, loading, watching, active, incoming }
 
 const String kRadarTrackerCardTitle = 'Sledovač radaru';
-/// Horizont textu sledovača — nie len 1 h, aby používateľ videl denný prehľad.
+/// Horizont textu sledovača + pás 24 h — radar nowcast má zmysel cca do 4 h
+/// (RainViewer snímky ~2 h; 2–4 h = trajektória/ETA, ďalej už len model).
 const int kRadarTrackerHorizonHours = 4;
+/// Alias — rovnaký strop pre zrážkové ikony v pásme 24 h.
+const int kRadarNowcastStripHorizonHours = kRadarTrackerHorizonHours;
 const String kRadarTrackerDryHorizonDetail =
     'V najbližších $kRadarTrackerHorizonHours hodinách sa neočakávajú žiadne zrážky.';
 /// Spätná kompatibilita stabilizátora (starý text v cache).
@@ -421,13 +424,14 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
   final now = DateTime.now();
 
   final hardEnd = _trackerHardLockedEnd(cityKey);
-  if (hardEnd != null && prev != null && prev.phase == RadarPrecipTrackerPhase.active) {
-    if (next.phase == RadarPrecipTrackerPhase.incoming ||
-        next.phase == RadarPrecipTrackerPhase.watching) {
-      final locked = _activeTrackerWithEnd(prev, hardEnd, locNow, locked: true);
-      _saveTrackerStable(cityKey, locked, touchPhase: false);
-      return locked;
-    }
+  // Hard lock len pri stále mokrom/incoming — pri suchom pine nesmie držať „Aktuálne prší“.
+  if (hardEnd != null &&
+      prev != null &&
+      prev.phase == RadarPrecipTrackerPhase.active &&
+      next.phase == RadarPrecipTrackerPhase.incoming) {
+    final locked = _activeTrackerWithEnd(prev, hardEnd, locNow, locked: true);
+    _saveTrackerStable(cityKey, locked, touchPhase: false);
+    return locked;
   }
 
   if (prev == null) {
@@ -468,7 +472,10 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
 
   if (prev.phase == RadarPrecipTrackerPhase.active &&
       next.phase == RadarPrecipTrackerPhase.watching) {
-    if (hardEnd != null) {
+    // Suchý výhľad na pine → uvoľni lock (mapa bez echa pri lokalite).
+    final dryNow = next.detail.contains(kRadarTrackerDryHorizonDetail) ||
+        next.detail.contains('Nasledujúcu hodinu sa neočakávajú');
+    if (hardEnd != null && !dryNow) {
       final locked = _activeTrackerWithEnd(prev, hardEnd, locNow, locked: true);
       _saveTrackerStable(cityKey, locked, touchPhase: false);
       return locked;
@@ -784,23 +791,12 @@ const double _kRadarCardinalUnitKm = 18.0;
 
 bool _flatFrameWetAtPin(RadarFrameSample f, {required bool rainViewer}) {
   final center = f.dbz ?? 0.0;
-  final peak = f.innerPeakDbz ?? f.peakDbz ?? center;
   if (rainViewer) {
-    return f.precipAtPoint ||
-        center >= kRainViewerLegendMinDbz ||
-        (peak >= kRainViewerLegendMinDbz && center >= kRainViewerLegendTraceDbz) ||
-        // Slabé zelené echo na pine (mapa už ukazuje dážď).
-        (f.precipAtPoint == false &&
-            center >= 10 &&
-            peak >= kRainViewerLegendMinDbz &&
-            f.coherentPx14 >= 1);
+    // Len stred pinu — peak / nearbyEcho ≠ dážď na lokalite (mapa by bola suchá).
+    return f.precipAtPoint || center >= kRainViewerLegendMinDbz;
   }
-  // Helkor / CMAX — zelená bunka na mape = dážď pri pine.
-  return f.precipAtPoint ||
-      f.precip ||
-      center >= 12 ||
-      (peak >= 16 && center >= 8) ||
-      (peak >= 18 && f.coherentPx14 >= 1);
+  // Helkor: `precip` = echo v okolí, nie na pine — nesmie spustiť „prší tu“.
+  return f.precipAtPoint || center >= kRainViewerLegendMinDbz;
 }
 
 bool _flatFrameNearbyApproach(RadarFrameSample f, {required bool rainViewer}) {
@@ -1497,8 +1493,9 @@ class RadarNowcastContext {
     return false;
   }
 
+  /// Prší priamo na pine — **len stred pinu** (≥ 15 dBZ), nie bunka v okolí.
   bool _rainViewerFrameWetAtPin(RadarFrameSample f) =>
-      _rainViewerCellEngulfsPin(f);
+      _rainViewerFrameRainAtPinCore(f);
 
   /// Prší priamo na pine (stred ≥ 15 dBZ) — pre odhad konca, nie široké echo v diali.
   bool _rainViewerFrameRainAtPinCore(RadarFrameSample f) {
@@ -1618,6 +1615,42 @@ class RadarNowcastContext {
     return _localHourFloor(lastFrameLocal).add(const Duration(hours: 1));
   }
 
+  /// Koniec okna pre pás 24 h — nowcast má zmysel do [kRadarNowcastStripHorizonHours] h.
+  /// RainViewer snímky ~2 h; zvyšok okna = trajektória (ETA / koniec bunky).
+  DateTime nowcastStripGateEndExclusive(DateTime locNow) {
+    final nowHour = _localHourFloor(locNow);
+    return nowHour.add(const Duration(hours: kRadarNowcastStripHorizonHours));
+  }
+
+  /// Zrážková ikona v pásme podľa nowcastu (do 4 h):
+  /// - aktuálna hodina = živý pin
+  /// - v okne RV snímkov (~2 h) = len mokrý pixel na pine v tej hodine
+  /// - za snímkami do 4 h = trajektória (pinForecast)
+  bool nowcastAuthorizesStripPrecipHour(DateTime slotHour, DateTime locNow) {
+    final nowHour = _localHourFloor(locNow);
+    final slot = _localHourFloor(slotHour);
+    if (slot.isBefore(nowHour)) return false;
+    if (!slot.isBefore(nowcastStripGateEndExclusive(locNow))) return false;
+
+    // Aktuálna hodina — živý pin.
+    if (slot == nowHour) {
+      return precipNow || rainAtPinNow || pinForecast.wetAtPinNow;
+    }
+
+    if (fromRainViewer && nowcastHistory.isNotEmpty) {
+      // 1) Skutočná nowcast snímka na tú hodinu.
+      if (_rainViewerNowcastWetAtHour(slot, locNow)) return true;
+      final cov = rainViewerNowcastCoverageEndExclusive(locNow);
+      // V okne snímkov: suchá snímka = suchá hodina (nič nevymýšľať).
+      if (cov != null && slot.isBefore(cov)) return false;
+      // 2) Za poslednou snímkou → do 4 h: ETA / pohyb bunky.
+      return pinForecast.authorizesLocalHour(slot);
+    }
+
+    // Bez RV nowcastu — flat snapshot (helkor / trajektória).
+    return pinForecast.authorizesLocalHour(slot);
+  }
+
   /// Minútový koniec dažďa pre pás 24 h — len nowcast snímky (bez getter reťazcov → Stack Overflow).
   DateTime? stripRainMinuteEndAt(DateTime locNow) =>
       _rainViewerStripRainMinuteEndAt(locNow);
@@ -1671,32 +1704,6 @@ class RadarNowcastContext {
       }
     }
     return null;
-  }
-
-  /// Minúty do konca podľa vizuálneho ústupu bunky (kardinálne smery na mape).
-  int _rainViewerSpatialDepartMinutes(DateTime locNow) {
-    if (_trailingEdgeAtPin) return _trailingEdgeMinutesRemaining();
-    if (_echoDepartingFromPin) return _departingRainMinutesLeft();
-
-    final frame = latest;
-    if (frame == null) return -1;
-    final center = frame.dbz ?? 0;
-    if (center < 6 && !frame.precipAtPoint) return -1;
-
-    bool exitTail(double upwind, double downwind) {
-      if (upwind < 18) return false;
-      if (upwind < center - 2) return false;
-      if (upwind >= downwind + 7) return true;
-      return downwind < 12 && upwind >= 20;
-    }
-
-    if (exitTail(frame.westDbz ?? 0, frame.eastDbz ?? 0) ||
-        exitTail(frame.eastDbz ?? 0, frame.westDbz ?? 0) ||
-        exitTail(frame.northDbz ?? 0, frame.southDbz ?? 0) ||
-        exitTail(frame.southDbz ?? 0, frame.northDbz ?? 0)) {
-      return _trailingEdgeMinutesRemaining();
-    }
-    return -1;
   }
 
   /// Koniec zrážok z nowcast časovej osi — posledný dážď pri pine (+ medzery / druhý front).
@@ -2331,20 +2338,29 @@ class RadarNowcastContext {
   }
 
   /// dBZ pre konkrétny hodinový slot — živý radar alebo nowcast snímka.
+  /// Nikdy nevracia flat intenzitu na cudzie hodiny (to kopírovalo mm).
   double stripDbzForLocalHour(DateTime slotHour, DateTime locNow) {
-    if (!fromRainViewer) return stripDisplayDbz;
-
     final nowHour = _localHourFloor(locNow);
+    final slot = _localHourFloor(slotHour);
+
+    if (!fromRainViewer) {
+      // Helkor: len aktuálna hodina, inak 0.
+      if (slot != nowHour || !precipNow) return 0;
+      return precipIntensityDbz;
+    }
 
     final fromNowcast =
-        _rainViewerMaxDbzInHourSlot(slotHour, locNow, nowcastHistory);
+        _rainViewerMaxDbzInHourSlot(slot, locNow, nowcastHistory);
     if (fromNowcast != null) return fromNowcast;
 
-    final fromHistory =
-        _rainViewerMaxDbzInHourSlot(slotHour, locNow, history);
-    if (fromHistory != null) return fromHistory;
+    // Históriu len pre aktuálnu/minulú hodinu — nie na budúce sloty.
+    if (!slot.isAfter(nowHour)) {
+      final fromHistory =
+          _rainViewerMaxDbzInHourSlot(slot, locNow, history);
+      if (fromHistory != null) return fromHistory;
+    }
 
-    if (slotHour == nowHour && precipNow) {
+    if (slot == nowHour && precipNow) {
       return precipIntensityDbz;
     }
 
@@ -2379,21 +2395,23 @@ class RadarNowcastContext {
   /// Surový stav pixelu — trend v histórii; UI používa [precipNow].
   bool get _rawPrecipAtPoint => latest?.precipAtPoint ?? false;
 
-  /// Prší pri pinom — len echo priamo nad bodkou (RainViewer legenda od 15 dBZ).
+  /// Prší pri pinom — len echo priamo nad bodkou (nie bunka v diaľke na mape).
   bool get precipNow {
     final frame = latest;
     if (frame == null) return false;
     if (fromRainViewer) {
-      return _rainViewerFrameWetAtPin(frame);
+      return _rainViewerFrameRainAtPinCore(frame);
     }
-    return frame.precipAtPoint || frame.precip;
+    // Helkor `precip` = nearbyEcho — pre „teraz“ berieme len stred pinu.
+    return frame.precipAtPoint ||
+        (frame.dbz ?? 0) >= kRainViewerLegendMinDbz;
   }
 
   /// Verejný prístup — RainViewer nowcast / blížiaca sa bunka pri pine.
   bool get rainViewerPredictsPrecip =>
       fromRainViewer &&
       (precipNow ||
-          nowcastHistory.any((f) => _rainViewerFrameWetAtPin(f)) ||
+          nowcastHistory.any((f) => _rainViewerFrameRainAtPinCore(f)) ||
           _rainViewerNearbyPrecipField ||
           _rainViewerTrajectoryIncoming);
 
@@ -2407,8 +2425,9 @@ class RadarNowcastContext {
   bool get _rainAtPinCore {
     final frame = latest;
     if (frame == null) return false;
-    if (fromRainViewer) return _rainViewerFrameWetAtPin(frame);
-    return frame.precipAtPoint || frame.precip;
+    if (fromRainViewer) return _rainViewerFrameRainAtPinCore(frame);
+    return frame.precipAtPoint ||
+        (frame.dbz ?? 0) >= kRainViewerLegendMinDbz;
   }
 
   /// Alias — interné volania.
@@ -2831,18 +2850,14 @@ class RadarNowcastContext {
     final frame = latest;
     if (frame == null) return false;
     if (_precipBandPassedPin) return false;
-    return precipNow || frame.precipAtPoint || frame.precip;
+    return precipNow || frame.precipAtPoint;
   }
 
-  /// Časová verzia — aktívny dážď len pri potvrdenom echo na pine.
+  /// Časová verzia — aktívny dážď len pri potvrdenom echo na pine (aktuálna snímka).
   bool _trackerRainActiveAtPinAt(DateTime locNow) {
     if (!fromRainViewer) return _trackerRainActiveAtPin;
-    if (precipNow || _rainAtPinCore) return true;
-    final nowSec = locNow.millisecondsSinceEpoch ~/ 1000;
-    for (final f in nowcastHistory) {
-      if (f.unix <= nowSec && _rainViewerFrameWetAtPin(f)) return true;
-    }
-    return false;
+    // Len živý pin — nie staré nowcast snímky (tie by držali falošné „prší“).
+    return precipNow || _rainAtPinCore;
   }
 
   /// „Blíži sa…“ — RainViewer nowcast pri pine alebo bunka smerujúca k pinu.

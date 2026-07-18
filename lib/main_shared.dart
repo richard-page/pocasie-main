@@ -7,7 +7,7 @@ enum WeatherForecastModel {
   bestMatch._(
     'bestmatch',
     'Best Match',
-    'Automatický výber modelu z Open-Meteo.',
+    'Zhoda zrážok (väčšina modelov) — bez natiahnutia jedným modelom.',
     'https://api.open-meteo.com/v1/forecast',
     null,
   ),
@@ -515,53 +515,143 @@ String buildVystrahyUserLocationMarkerJs(double lat, double lon) => '''
 (function() {
   var lat = $lat;
   var lon = $lon;
-  function findLeafletMap(el) {
-    if (!el) return null;
-    try {
-      if (el._leaflet) return el._leaflet;
-      var keys = Object.keys(el);
-      for (var i = 0; i < keys.length; i++) {
-        if (keys[i].indexOf('leaflet') === 0 && el[keys[i]] && el[keys[i]].invalidateSize) {
-          return el[keys[i]];
-        }
-      }
-    } catch (e) {}
-    return null;
-  }
-  var mapEl = document.getElementById('map');
-  var lm = findLeafletMap(mapEl);
-  if (!lm || !window.L) return;
+  if (!window.L) return;
+  window.__pocasieUserLat = lat;
+  window.__pocasieUserLon = lon;
 
-  if (window.__pocasieUserLocLayers) {
-    window.__pocasieUserLocLayers.forEach(function(layer) {
-      try { lm.removeLayer(layer); } catch (e) {}
+  function hookMapCapture() {
+    if (!L.Map || window.__pocasieMapProtoHooked) return;
+    window.__pocasieMapProtoHooked = true;
+    ['invalidateSize', 'fitBounds', 'setView', 'panTo', 'flyTo'].forEach(function(method) {
+      var orig = L.Map.prototype[method];
+      if (typeof orig !== 'function') return;
+      L.Map.prototype[method] = function() {
+        window.__pocasieLeafletMap = this;
+        return orig.apply(this, arguments);
+      };
     });
   }
-  window.__pocasieUserLocLayers = [];
 
-  var ring = L.circleMarker([lat, lon], {
-    radius: 11,
-    fillColor: '#38bdf8',
-    color: '#38bdf8',
-    weight: 2,
-    opacity: 0.55,
-    fillOpacity: 0.18,
-    interactive: false
-  }).addTo(lm);
-  var dot = L.circleMarker([lat, lon], {
-    radius: 5,
-    fillColor: '#ffffff',
-    color: '#38bdf8',
-    weight: 3,
-    opacity: 1,
-    fillOpacity: 1,
-    interactive: false
-  }).addTo(lm);
-  window.__pocasieUserLocLayers = [ring, dot];
-  try {
-    ring.bringToFront();
-    dot.bringToFront();
-  } catch (e) {}
+  function findLeafletMap() {
+    if (window.__pocasieLeafletMap && window.__pocasieLeafletMap.invalidateSize) {
+      return window.__pocasieLeafletMap;
+    }
+    hookMapCapture();
+    var mapEl = document.getElementById('map');
+    if (mapEl) {
+      try {
+        if (mapEl._leaflet && mapEl._leaflet.invalidateSize) return mapEl._leaflet;
+        var keys = Object.keys(mapEl);
+        for (var i = 0; i < keys.length; i++) {
+          var v = mapEl[keys[i]];
+          if (v && v.invalidateSize && v.latLngToLayerPoint) {
+            window.__pocasieLeafletMap = v;
+            return v;
+          }
+        }
+      } catch (e) {}
+    }
+    try {
+      if (typeof prerozdelBounndy === 'function') prerozdelBounndy();
+      else if (window.dispatchEvent) window.dispatchEvent(new Event('resize'));
+    } catch (e2) {}
+    if (window.__pocasieLeafletMap && window.__pocasieLeafletMap.invalidateSize) {
+      return window.__pocasieLeafletMap;
+    }
+    return null;
+  }
+
+  function placePin(attempt) {
+    var lm = findLeafletMap();
+    if (!lm) {
+      if (attempt < 30) setTimeout(function() { placePin(attempt + 1); }, 200);
+      return;
+    }
+
+    if (window.__pocasieUserLocLayers) {
+      window.__pocasieUserLocLayers.forEach(function(layer) {
+        try { lm.removeLayer(layer); } catch (e3) {}
+      });
+    }
+    window.__pocasieUserLocLayers = [];
+
+    // Farba = stupeň výstrahy; bez výstrahy svetlá modrá z palety (nie tmavá).
+    var palette = {
+      '1': '#42A5F5',
+      '2': '#FFD600',
+      '3': '#FF6D00',
+      '4': '#E53935'
+    };
+    var pinColor = palette['1'];
+    try {
+      var pt = L.latLng(lat, lon);
+      var allowed = {};
+      Object.keys(palette).forEach(function(k) { allowed[palette[k].toLowerCase()] = palette[k]; });
+      allowed['#1565c0'] = palette['1'];
+      var bestRank = 0;
+      var rankOf = {};
+      Object.keys(palette).forEach(function(k) { rankOf[palette[k].toLowerCase()] = parseInt(k, 10); });
+      lm.eachLayer(function(layer) {
+        if (!layer || typeof layer.eachLayer !== 'function') return;
+        layer.eachLayer(function(sub) {
+          try {
+            if (!sub.feature || !sub.getBounds || !sub.getBounds().contains(pt)) return;
+            var c = sub.options && sub.options.fillColor;
+            if (!c) return;
+            var key = String(c).toLowerCase();
+            var hit = allowed[key];
+            var rank = rankOf[key] || 0;
+            if (hit && rank >= bestRank) {
+              bestRank = rank;
+              pinColor = hit;
+            }
+          } catch (e4) {}
+        });
+      });
+    } catch (e5) {}
+
+    var styleEl = document.getElementById('pocasie-user-pin-style');
+    if (styleEl) styleEl.remove();
+    var st = document.createElement('style');
+    st.id = 'pocasie-user-pin-style';
+    // Špička pinu = geografický bod (iconAnchor na tip). Bez prázdneho miesta pod špičkou.
+    st.textContent = ''
+      + '.pocasie-user-pin{background:transparent!important;border:0!important;}'
+      + '.pocasie-user-pin .leaflet-marker-shadow{display:none!important;}'
+      + '.pocasie-user-pin-inner{position:relative;width:24px;height:24px;}'
+      + '.pocasie-user-pin-head{position:absolute;left:50%;top:50%;width:16px;height:16px;'
+      + 'margin:-8px 0 0 -8px;border-radius:50% 50% 50% 0;background:' + pinColor + ';'
+      + 'transform:rotate(-45deg);border:2px solid #ffffff;box-sizing:border-box;'
+      + 'box-shadow:0 1px 4px rgba(0,0,0,.4)!important;}'
+      + '.pocasie-user-pin-head:after{content:"";position:absolute;left:50%;top:50%;'
+      + 'width:5px;height:5px;margin:-2.5px 0 0 -2.5px;border-radius:50%;'
+      + 'background:#ffffff;transform:rotate(45deg);box-shadow:none!important;}';
+    document.head.appendChild(st);
+
+    // Tip ~8*sqrt(2)≈11.3px pod stredom → tip y≈22.
+    var icon = L.divIcon({
+      className: 'pocasie-user-pin',
+      html: '<div class="pocasie-user-pin-inner"><div class="pocasie-user-pin-head"></div></div>',
+      iconSize: [24, 24],
+      iconAnchor: [12, 22],
+      popupAnchor: [0, -20]
+    });
+
+    var pin = L.marker([lat, lon], {
+      icon: icon,
+      interactive: false,
+      keyboard: false,
+      zIndexOffset: 1200,
+      shadowUrl: null,
+      shadowPane: null
+    }).addTo(lm);
+
+    window.__pocasieUserLocLayers = [pin];
+    try { pin.setZIndexOffset(1200); } catch (e6) {}
+    // Bez setView / flyTo — mapa ostáva na celom SR.
+  }
+
+  placePin(0);
 })();
 ''';
 
@@ -784,16 +874,7 @@ double _ecmwfHourlyPrecipMm(HourlyForecast h, int idx) =>
 int _ecmwfHourlyPrecipProb(HourlyForecast h, int idx) =>
     h.precipitationProbability?[idx] ?? 0;
 
-bool _neighborSamePrecipMm(HourlyForecast h, int idx, int delta) {
-  final other = idx + delta;
-  if (other < 0 || other >= h.time.length) return false;
-  final a = h.precipitation?[idx];
-  final b = h.precipitation?[other];
-  if (a == null || b == null) return false;
-  return a >= kMeaningfulPrecipMmPerHour && (a - b).abs() < 0.01;
-}
-
-/// Reprezentatívne mm pre % keď model nemá hodnotu alebo radar nesmie kopírovať.
+/// Reprezentatívne mm pre % — len legacy / denné sumy; 24 h pás to nepoužíva na ikony.
 double displayMmFromPrecipProbability(int prob) {
   if (prob >= 90) return 1.4;
   if (prob >= 80) return 1.0;
@@ -803,7 +884,7 @@ double displayMmFromPrecipProbability(int prob) {
   return kMeaningfulPrecipMmPerHour;
 }
 
-/// Finálne mm pre riadok 24 h — vždy per-hodina, nie radarová kópia.
+/// Finálne mm pre riadok 24 h — **presne z API / radaru**, bez mm vymyslených z %.
 double resolveHourlyStripPrecipMm(
   HourlyForecast h,
   int idx, {
@@ -812,103 +893,18 @@ double resolveHourlyStripPrecipMm(
   bool wetDisplayIcon = false,
   int? displayIconCode,
 }) {
-  if (radarPinMm != null && radarPinMm >= kMeaningfulPrecipMmPerHour) {
-    return radarPinMm;
-  }
-
-  final mm = _ecmwfHourlyPrecipMm(h, idx);
-  var prob = _ecmwfHourlyPrecipProb(h, idx);
-  if (stripProb != null && stripProb > prob) {
-    prob = stripProb;
-  }
-  if (wetDisplayIcon && prob < kMinPrecipProbPercent) {
-    prob = kMinPrecipProbPercent;
-  }
-
-  if (prob < kMinPrecipProbPercent && mm < kMeaningfulPrecipMmPerHour) {
-    return mm > 0 ? mm : 0.0;
-  }
-
-  final probBased = displayMmFromPrecipProbability(prob);
-  final neighborDup =
-      _neighborSamePrecipMm(h, idx, -1) || _neighborSamePrecipMm(h, idx, 1);
-
-  if (mm < kMeaningfulPrecipMmPerHour) {
-    return _finalizeHourlyStripPrecipMm(
-      probBased,
-      displayIconCode: displayIconCode,
-      probPercent: prob,
-      ecmwfMm: mm,
-      hourIndex: idx,
-      deDuplicateNeighbors: neighborDup,
-    );
-  }
-
-  // ECMWF niekedy opakuje rovnaké mm v susedných hodinách — odlíš podľa % tejto hodiny.
-  if (neighborDup) {
-    if (mm >= kMeaningfulPrecipMmPerHour && prob > 0) {
-      final scaled = mm * prob / 100.0;
-      if (scaled >= kMeaningfulPrecipMmPerHour) {
-        return _finalizeHourlyStripPrecipMm(
-          double.parse(scaled.toStringAsFixed(1)),
-          displayIconCode: displayIconCode,
-          probPercent: prob,
-          ecmwfMm: mm,
-          hourIndex: idx,
-          deDuplicateNeighbors: true,
-        );
-      }
-    }
-    return _finalizeHourlyStripPrecipMm(
-      probBased,
-      displayIconCode: displayIconCode,
-      probPercent: prob,
-      ecmwfMm: mm,
-      hourIndex: idx,
-      deDuplicateNeighbors: true,
-    );
-  }
-
-  return _finalizeHourlyStripPrecipMm(
-    mm,
-    displayIconCode: displayIconCode,
-    probPercent: prob,
-    ecmwfMm: mm,
-    hourIndex: idx,
-  );
+  if (radarPinMm != null && radarPinMm > 0) return radarPinMm;
+  return _ecmwfHourlyPrecipMm(h, idx);
 }
-
-double _finalizeHourlyStripPrecipMm(
-  double mm, {
-  int? displayIconCode,
-  int probPercent = 0,
-  double ecmwfMm = 0,
-  int? hourIndex,
-  bool deDuplicateNeighbors = false,
-}) {
-  final code = displayIconCode != null
-      ? normalizeDisplayWeatherCode(displayIconCode)
-      : null;
-  if (code != null && kThunderWeatherCodes.contains(code)) {
-    return hourlyThunderStripDisplayMm(
-      iconCode: code,
-      probPercent: probPercent,
-      ecmwfMm: math.max(ecmwfMm, mm),
-      hourIndex: hourIndex,
-      deDuplicateNeighbors: deDuplicateNeighbors,
-    );
-  }
-  return mm;
-}
-
-
 
 /// `false` = hybrid len ak radar nie je k dispozícii.
 /// Keď [useRadarOnlyNearTermPrecip] — 24 h pás / hero = výhradne radar + nowcast.
 const bool kRadarOnlyPrecipTestMode = false;
 
-/// Krátkodobá predpoveď — hybrid ECMWF (max 50 %) + radar potvrdenie.
-bool useRadarOnlyNearTermPrecip(RadarNowcastContext ctx) => false;
+/// Blízke hodiny: **nowcast do 4 h** má prioritu —
+/// bez mokrej snímky/trajektórie na danú hodinu žiadna zrážková ikona.
+bool useRadarOnlyNearTermPrecip(RadarNowcastContext ctx) =>
+    ctx.eligible && ctx.latest != null;
 
 
 
@@ -978,11 +974,11 @@ void applyOpenMeteoPrecipToHourlyStrip({
   }
 }
 
-/// Jediný vstup pre 24 h pás — Open-Meteo základ + RainViewer hybrid v blízkom okne.
+/// Jediný vstup pre 24 h pás — Open-Meteo základ + **nowcast do 4 h**.
 ///
-/// Pravidlá (model first, radar confirm):
-/// - Open-Meteo: zrážková ikona pri % ≥ 50 + (mm ≥ 0,1 alebo WMO dážď/búrka z API)
-/// - Radar: len doplní / potvrdí blízke hodiny — **nesmie** zmazať modelovú predpoveď
+/// Pravidlá:
+/// - Do 4 h: zrážková ikona len podľa nowcastu (snímky ~2 h, potom trajektória)
+/// - Mimo 4 h: ostáva model
 /// - Denné karty: radar sa nepoužíva (len tento pás + hero)
 void applyUnifiedHourlyStripPrecip({
   required List<int> displayIcons,
@@ -1044,6 +1040,13 @@ void applyUnifiedHourlyStripPrecip({
     locTime: locTime,
     utcOffsetSeconds: utcOffsetSeconds,
     radarCtx: radarCtx,
+  );
+  diversifyRepetitiveDryStripPercents(
+    displayIcons: displayIcons,
+    showRainPrecip: showRainPrecip,
+    storedProbs: storedProbs,
+    stripIndices: stripIndices,
+    h: h,
   );
 }
 
@@ -1153,7 +1156,8 @@ void applyHourlyStripPrecipPercentRamp({
             certaintyPercent: math.max(wetPct, certainty),
             hoursAhead: hoursAhead,
           );
-          if (mm > precipMm[i] || precipMm[i] < 0.05) {
+          // Radar nesmie prepísať modelové mm rovnakou hodnotou na celý pás.
+          if (precipMm[i] < kMeaningfulPrecipMmPerHour && mm > precipMm[i]) {
             precipMm[i] = mm;
             displayIcons[i] = hourlyStripPrecipIntensityIcon(
               baseCode: displayIcons[i],
@@ -1234,30 +1238,34 @@ void applyHourlyStripPrecipPercentRamp({
       cloudCoverPercent: cloud,
     );
 
-    var pct = _isDryCloudyStripSkyCode(displayIcons[i])
-        ? hourlyStripDryCloudyBasePercent(
-            iconCode: displayIcons[i],
-            cloudCoverPercent: cloud,
-            apiProbPercent: apiProb,
-            radarApproachPercent: radarApproach,
-          )
-        : skyFloor;
+    // Suché hodiny: % z API (variácia), nie flat 30 z ikony zamračené.
+    var pct = hourlyStripDryHourPercentFromApi(
+      apiProbPercent: apiProb,
+      radarApproachPercent: radarApproach,
+      iconCode: displayIcons[i],
+      cloudCoverPercent: cloud,
+    );
 
-    if (decay > 0) {
-      // Po zrážkovej ikone: 40 → 30 → 20.
-      pct = math.max(pct, decay);
-    }
-    if (approach > 0) {
-      pct = math.max(pct, approach);
+    // Po daždi / pred dažďom — NIE na jasnej ikone; bez blízkych zrážok max 30.
+    if (!_isClearStripSkyCode(displayIcons[i])) {
+      if (decay > 0) pct = math.max(pct, decay);
+      if (approach > 0) pct = math.max(pct, approach);
+      final farFromRain = (until == null || until > 2) &&
+          (since == null || since > 2);
+      if (farFromRain) pct = math.min(pct, 30);
     }
 
-    if (_isDryCloudyStripSkyCode(displayIcons[i])) {
-      storedProbs[i] = hourlyStripDryCloudyPercentShown(
-        pct.clamp(20, 40),
+    if (!_hourShowsPrecipIcon(displayIcons[i]) && !showRainPrecip[i]) {
+      storedProbs[i] = _dryStripPercentWithNearbyRainCap(
+        pct: pct,
+        hoursUntilRain: until,
+        hoursSinceRain: since,
+        radarApproachPercent: radarApproach,
+        iconCode: displayIcons[i],
       );
     } else {
       storedProbs[i] = _roundPrecipProbabilityForDisplay(
-        pct.clamp(skyFloor, 40),
+        pct.clamp(skyFloor, 100),
       );
     }
   }
@@ -1325,9 +1333,7 @@ void alignHourlyStripThunderWithProbability({
         math.max(storedProbs[i], apiProb),
         kMinPrecipProbPercent,
       );
-      if (precipMm[i] < kMeaningfulPrecipMmPerHour) {
-        precipMm[i] = kMeaningfulPrecipMmPerHour;
-      }
+      // mm nechaj z API — nič umelo nedoplňaj.
       continue;
     }
 
@@ -1343,8 +1349,13 @@ void alignHourlyStripThunderWithProbability({
     } else {
       displayIcons[i] = skyWmoFromCloudCover(cloud);
       showRainPrecip[i] = false;
-      storedProbs[i] = hourlyStripSkyIconPercent(
-        displayIcons[i],
+      final apiProb = h.precipitationProbability != null &&
+              idx < h.precipitationProbability!.length
+          ? (h.precipitationProbability![idx] ?? 0)
+          : 0;
+      storedProbs[i] = hourlyStripDryHourPercentFromApi(
+        apiProbPercent: apiProb,
+        iconCode: displayIcons[i],
         cloudCoverPercent: cloud,
       );
       precipMm[i] = 0;
@@ -1404,8 +1415,8 @@ void applyHourlyStripHorizonProbCaps({
   }
 }
 
-/// Po všetkých clampoch znova nastav suché oblačné % (20/30/40 podľa ikony).
-/// Po zrážkovej ikone vždy max(…, 40 → 30 → 20) — neprepisuj dozvuk.
+/// Po všetkých clampoch — suché % drž z API (variácia 10/20/30/40),
+/// len doplň dozvuk / blízkosť dažďa. **Neflatni** na jedno číslo.
 void reapplyDryCloudyStripPercents({
   required List<int> displayIcons,
   required List<bool> showRainPrecip,
@@ -1424,13 +1435,9 @@ void reapplyDryCloudyStripPercents({
 
   for (var i = 0; i < displayIcons.length; i++) {
     if (wetIcon[i]) continue;
-    if (!_isDryCloudyStripSkyCode(displayIcons[i])) continue;
     if (storedProbs[i] >= kMinPrecipProbPercent) continue;
 
     final idx = stripIndices[i];
-    final cloud = h.cloudCover != null && idx < h.cloudCover!.length
-        ? h.cloudCover![idx]
-        : null;
     final apiProb = h.precipitationProbability != null &&
             idx < h.precipitationProbability!.length
         ? (h.precipitationProbability![idx] ?? 0)
@@ -1471,16 +1478,26 @@ void reapplyDryCloudyStripPercents({
     }
 
     final sinceRain = _hoursSinceLastRainInStrip(i, wetIcon);
+    final untilRain = _hoursUntilNextRainInStrip(i, wetIcon);
     final decay = _postRainDecayPercent(sinceRain);
-    final base = hourlyStripDryCloudyBasePercent(
+    final cloud = h.cloudCover != null && idx < h.cloudCover!.length
+        ? h.cloudCover![idx]
+        : null;
+    var pct = hourlyStripDryHourPercentFromApi(
+      apiProbPercent: math.max(apiProb, storedProbs[i]),
+      radarApproachPercent: radarApproach,
       iconCode: displayIcons[i],
       cloudCoverPercent: cloud,
-      apiProbPercent: apiProb,
-      radarApproachPercent: radarApproach,
     );
-    // Po dažďovej ikone: 1. suchá hodina = 40 % (nie 30 zo zamračeného).
-    storedProbs[i] = hourlyStripDryCloudyPercentShown(
-      math.max(base, decay).clamp(20, 40),
+    if (decay > 0 && !_isClearStripSkyCode(displayIcons[i])) {
+      pct = math.max(pct, decay);
+    }
+    storedProbs[i] = _dryStripPercentWithNearbyRainCap(
+      pct: pct,
+      hoursUntilRain: untilRain,
+      hoursSinceRain: sinceRain,
+      radarApproachPercent: radarApproach,
+      iconCode: displayIcons[i],
     );
   }
 }
@@ -1523,7 +1540,8 @@ void applyThunderStripDisplayMm({
   }
 }
 
-/// Legacy hook — modelová predpoveď sa zobrazuje vždy; radar len doplní blízko.
+/// Blízke hodiny po všetkých OM/align krokoch — zrážková ikona len podľa
+/// **nowcastu do 4 h**. Bez signálu na tú hodinu = sky + 0 mm.
 void clampNearTermStripPercentsWithoutRadar({
   required List<int> displayIcons,
   required List<bool> showRainPrecip,
@@ -1533,11 +1551,63 @@ void clampNearTermStripPercentsWithoutRadar({
   required DateTime locTime,
   int? utcOffsetSeconds,
   required RadarNowcastContext radarCtx,
+  List<double>? precipMm,
 }) {
-  // No-op: percentá a ikony idú z Open-Meteo; radar potvrdí neskôr pri pine.
+  if (!useRadarOnlyNearTermPrecip(radarCtx)) return;
+
+  final nowHour = DateTime(
+    locTime.year,
+    locTime.month,
+    locTime.day,
+    locTime.hour,
+  );
+  final trimStop = radarCtx.nowcastStripGateEndExclusive(locTime);
+
+  for (var i = 0; i < stripIndices.length; i++) {
+    final idx = stripIndices[i];
+    final parsed = DateTime.tryParse(h.time[idx]);
+    if (parsed == null) continue;
+    final localT = utcOffsetSeconds != null
+        ? parsed.add(Duration(seconds: utcOffsetSeconds))
+        : parsed;
+    final slotHour = DateTime(
+      localT.year,
+      localT.month,
+      localT.day,
+      localT.hour,
+    );
+    if (slotHour.isBefore(nowHour) || !slotHour.isBefore(trimStop)) continue;
+
+    if (radarCtx.nowcastAuthorizesStripPrecipHour(slotHour, locTime)) {
+      continue;
+    }
+
+    if (!(showRainPrecip[i] ||
+        _hourShowsPrecipIcon(displayIcons[i]) ||
+        (precipMm != null && precipMm[i] >= kMeaningfulPrecipMmPerHour))) {
+      continue;
+    }
+
+    final cloud = h.cloudCover != null && idx < h.cloudCover!.length
+        ? h.cloudCover![idx]
+        : null;
+    final apiProb = h.precipitationProbability != null &&
+            idx < h.precipitationProbability!.length
+        ? (h.precipitationProbability![idx] ?? 0)
+        : 0;
+    displayIcons[i] = skyWmoFromCloudCover(cloud);
+    showRainPrecip[i] = false;
+    if (precipMm != null) precipMm[i] = 0;
+    storedProbs[i] = hourlyStripDryHourPercentFromApi(
+      apiProbPercent: apiProb,
+      iconCode: displayIcons[i],
+      cloudCoverPercent: cloud,
+    );
+  }
 }
 
-/// Bez zrážkovej ikony — % pod 50, ale **nikdy 0** (oblačno 20–40 podľa radaru, jasno ≥ 10).
+/// Bez zrážkovej ikony — % z API (po 10), tip floor 10, suché max 40.
+/// **Nestrať variáciu** floorom 30 na celé zamračené ráno.
 void clampDryHourlyStripPrecipPercents({
   required List<int> displayIcons,
   required List<bool> showRainPrecip,
@@ -1550,18 +1620,18 @@ void clampDryHourlyStripPrecipPercents({
         showRainPrecip[i] || _hourShowsPrecipIcon(displayIcons[i]);
     if (wetUi) continue;
     final idx = stripIndices[i];
+    final apiProb = h.precipitationProbability != null &&
+            idx < h.precipitationProbability!.length
+        ? (h.precipitationProbability![idx] ?? 0)
+        : storedProbs[i];
     final cloud = h.cloudCover != null && idx < h.cloudCover!.length
         ? h.cloudCover![idx]
         : null;
-    final floor = hourlyStripSkyIconPercent(
-      displayIcons[i],
+    storedProbs[i] = hourlyStripDryHourPercentFromApi(
+      apiProbPercent: math.max(apiProb, storedProbs[i]),
+      iconCode: displayIcons[i],
       cloudCoverPercent: cloud,
     );
-    if (storedProbs[i] >= kMinPrecipProbPercent) {
-      storedProbs[i] = floor;
-    } else {
-      storedProbs[i] = math.max(storedProbs[i], floor);
-    }
   }
 }
 
@@ -1703,8 +1773,8 @@ int radarStripCertaintyPercent({
   return 50;
 }
 
-/// mm/h pre konkrétnu hodinu — len zo snímky blízkej tej hodine.
-/// **0** = žiadna spoľahlivá intenzita (NEkópiruj floor 0.1 na celý pás).
+/// mm/h pre konkrétnu hodinu — **len zo snímky v [slotHour, slotHour+1)**.
+/// Žiadne ±35 min / flat dBZ cez pás (to kopírovalo rovnaké mm).
 double radarStripMmForHour({
   required RadarNowcastContext radarCtx,
   required RadarPinForecastSnapshot snap,
@@ -1712,75 +1782,34 @@ double radarStripMmForHour({
   required DateTime locTime,
   required int hoursAhead,
 }) {
-  final tz = locTime.timeZoneOffset;
-  final slotMid = slotHour.add(const Duration(minutes: 30));
-  final slotMidUnix =
-      slotMid.toUtc().subtract(tz).millisecondsSinceEpoch ~/ 1000;
-
-  RadarFrameSample? best;
-  var bestDt = 1 << 30;
-  for (final f in radarCtx.nowcastHistory) {
-    final dt = (f.unix - slotMidUnix).abs();
-    if (dt < bestDt) {
-      bestDt = dt;
-      best = f;
-    }
-  }
-  if (best == null || bestDt > 40 * 60) {
-    for (final f in radarCtx.history) {
-      final dt = (f.unix - slotMidUnix).abs();
-      if (dt < bestDt) {
-        bestDt = dt;
-        best = f;
-      }
-    }
+  // Helkor nemá budúce hodinové snímky — live mm len v aktuálnej hodine.
+  if (!radarCtx.fromRainViewer) {
+    if (hoursAhead != 0) return 0;
+    final dbz = radarCtx.precipIntensityDbz;
+    if (dbz < kRainViewerLegendMinDbz) return 0;
+    final mm = radarLegendMmFromDbz(dbz);
+    return mm > 0 ? mm : 0.0;
   }
 
-  // Bez snímky v okolí ±35 min — nič nekópiruj z pinu na ďalšie hodiny.
-  if (best == null || bestDt > 35 * 60) return 0;
-
-  final center = best.dbz ?? 0.0;
-  final peak = best.innerPeakDbz ?? best.peakDbz ?? center;
-  final atPin = center >= kRainViewerLegendMinDbz;
-
-  double dbz;
-  if (atPin) {
-    // Intenzita NA PINE v tej snímke.
-    dbz = center;
-  } else if (snap.approaching && peak >= kRainViewerLegendMinDbz) {
-    // Príchod — konzervatívne, nie plný peak jadra.
-    dbz = rainViewerIntensityDbz(center: center, peak: peak, atPoint: false);
-  } else {
-    return 0;
-  }
-
+  // RainViewer: dBZ len z nowcast/histórie v tej hodine (stripDbzForLocalHour).
+  final dbz = radarCtx.stripDbzForLocalHour(slotHour, locTime);
   if (dbz < kRainViewerLegendMinDbz) return 0;
-
   final mm = radarLegendMmFromDbz(dbz);
-  if (mm < 0.05) return 0;
-  return mm.clamp(0.05, 12.0);
+  return mm > 0 ? mm : 0.0;
 }
 
-/// mm pre radarom autorizovanú hodinu — model > snímka hodiny > % (rozmanité), nikdy flat 0.1.
+/// mm pre radarom autorizovanú hodinu — **model/API má prioritu**;
+/// radar len keď model nemá mm **a** máme snímku tej hodiny (nie flat).
 double resolveRadarAuthorizedStripMm({
   required double modelMm,
   required double radarMm,
   required int certaintyPercent,
   required int hoursAhead,
 }) {
-  if (radarMm >= 0.05) {
-    return math.max(modelMm, radarMm).clamp(0.05, 12.0);
-  }
-  if (modelMm >= kMeaningfulPrecipMmPerHour) {
-    return modelMm;
-  }
-  // Bez snímky: mm podľa istoty hodiny (60→0.35, 70→0.6, …) + jemný rozptyl podľa času.
-  var fromProb = displayMmFromPrecipProbability(certaintyPercent);
-  if (hoursAhead >= 3) fromProb = math.max(0.15, fromProb * 0.75);
-  if (hoursAhead >= 5) fromProb = math.max(0.15, fromProb * 0.7);
-  // Rozlíš susedné hodiny so rovnakým % (inak vyzerá ako kópia).
-  final jitter = 1.0 + ((hoursAhead % 3) - 1) * 0.12;
-  return (fromProb * jitter).clamp(0.15, 8.0);
+  // certaintyPercent / hoursAhead zámerne nepoužité — žiadne umelé mm.
+  if (modelMm > 0) return modelMm;
+  if (radarMm > 0) return radarMm;
+  return 0.0;
 }
 
 double rainingFallbackDbz(RadarPinForecastSnapshot snap) {
@@ -1792,8 +1821,8 @@ double rainingFallbackDbz(RadarPinForecastSnapshot snap) {
   return kRainViewerLegendDrizzleDbz;
 }
 
-/// Near-term pás: radar **doplní** mokré hodiny podľa odhadu konca zrážok.
-/// Hero aj pás používajú rovnaký „prší teraz“ signál (live pin).
+/// Near-term pás: zrážková ikona **podľa nowcastu do 4 h**.
+/// Hodina bez nowcastu/trajektórie na pine = modelový dážď preč.
 void applyRadarPrecipEndToHourlyStrip({
   required List<int> displayIcons,
   required List<bool> showRainPrecip,
@@ -1809,31 +1838,14 @@ void applyRadarPrecipEndToHourlyStrip({
   if (!radarCtx.eligible) return;
   final snap = radarCtx.pinForecast;
   final live = radarLivePinUi(radarCtx);
-  final rainingNow = live.wetAtPin || snap.wetAtPinNow;
-  if (snap.wetHourStartsMs.isEmpty &&
-      !snap.clearEcmwfNearTerm &&
-      !rainingNow &&
-      !snap.approaching) {
-    return;
-  }
-
+  final rainingNow = live.wetAtPin;
   final nowHour = DateTime(
     locTime.year,
     locTime.month,
     locTime.day,
     locTime.hour,
   );
-
-  // Odhad konca: snapshot + minútový koniec z kontextu (dlhá bunka).
-  final holdMins = math.max(
-    snap.endMinutes ?? (rainingNow ? 55 : 0),
-    rainingNow ? 55 : 0,
-  );
-  final minuteEnd = radarCtx.stripRainMinuteEndAt(locTime);
-  final holdFromMinuteEnd = minuteEnd != null
-      ? minuteEnd.difference(locTime).inMinutes.clamp(0, 180)
-      : 0;
-  final effectiveHoldMins = math.max(holdMins, holdFromMinuteEnd);
+  final trimStop = radarCtx.nowcastStripGateEndExclusive(locTime);
 
   for (var i = 0; i < stripIndices.length; i++) {
     final idx = stripIndices[i];
@@ -1851,24 +1863,13 @@ void applyRadarPrecipEndToHourlyStrip({
 
     final hoursAhead = slotHour.difference(nowHour).inHours;
     final minsToSlotStart = slotHour.difference(locTime).inMinutes;
-    final minsToSlotEnd = minsToSlotStart + 60;
+    final inNowcastWindow =
+        !slotHour.isBefore(nowHour) && slotHour.isBefore(trimStop);
 
-    // Mokrá hodina ak: autorizovaná, alebo dážď na pine ešte siaha do tej hodiny.
-    final overlapsRainWindow = rainingNow &&
-        hoursAhead >= 0 &&
-        hoursAhead <= 6 &&
-        effectiveHoldMins > minsToSlotStart + 5 &&
-        minsToSlotEnd > 0;
+    final radarWet =
+        radarCtx.nowcastAuthorizesStripPrecipHour(slotHour, locTime);
 
-  final approachingHitsHour = snap.approaching &&
-      hoursAhead >= 0 &&
-      hoursAhead <= 6 &&
-      (snap.etaMinutes == null ||
-          minsToSlotEnd > (snap.etaMinutes! - 10));
-
-    if (snap.authorizesLocalHour(slotHour) ||
-        overlapsRainWindow ||
-        approachingHitsHour) {
+    if (radarWet) {
       final radarMm = radarStripMmForHour(
         radarCtx: radarCtx,
         snap: snap,
@@ -1878,11 +1879,11 @@ void applyRadarPrecipEndToHourlyStrip({
       );
       final certainty = radarStripCertaintyPercent(
         rainingNow: rainingNow,
-        approaching: snap.approaching || approachingHitsHour,
+        approaching: snap.approaching && !rainingNow,
         hoursAhead: hoursAhead,
         minsToSlotStart: minsToSlotStart,
         etaMinutes: snap.etaMinutes,
-        endMinutes: effectiveHoldMins,
+        endMinutes: snap.endMinutes,
         distanceKm: snap.distanceKmEstimate,
         approachChancePercent: snap.approachChancePercent,
         pinUiDbz: snap.uiDbz,
@@ -1894,16 +1895,15 @@ void applyRadarPrecipEndToHourlyStrip({
         certaintyPercent: certainty,
         hoursAhead: hoursAhead,
       );
-      // Ikona podľa mm tej hodiny — nie jeden uiDbz na celý pás.
-      final iconDbz = radarMm >= 0.05
+      final iconMm = mm > 0 ? mm : radarMm;
+      final iconDbz = iconMm >= 0.05
           ? math.max(
               kRainViewerLegendMinDbz,
-              // Spatná väzba dBZ≈mm: slabé mm → nižšia ikona.
-              mm >= 5
+              iconMm >= 5
                   ? kRainViewerLegendModerateRainDbz
-                  : (mm >= 1.2
+                  : (iconMm >= 1.2
                       ? kRainViewerLegendLightRainDbz
-                      : (mm >= 0.35
+                      : (iconMm >= 0.35
                           ? 30.0
                           : kRainViewerLegendDrizzleDbz)),
             )
@@ -1917,26 +1917,46 @@ void applyRadarPrecipEndToHourlyStrip({
         rainViewer: live.rainViewer || snap.rainViewer,
         tempC: h.temperature?[idx],
         precipProb: certainty,
-        precipMm: mm,
+        precipMm: iconMm > 0 ? iconMm : kMeaningfulPrecipMmPerHour,
       );
       displayIcons[i] = hourlyStripPrecipIntensityIcon(
         baseCode: icon,
-        precipMm: mm,
+        precipMm: iconMm > 0 ? iconMm : precipMm[i],
         tempC: h.temperature?[idx],
       );
       showRainPrecip[i] = true;
-      precipMm[i] = mm;
+      if (precipMm[i] < kMeaningfulPrecipMmPerHour && mm > 0) {
+        precipMm[i] = mm;
+      }
       storedProbs[i] = _roundPrecipProbabilityForDisplay(
         math.max(storedProbs[i], certainty),
       );
       continue;
     }
 
-    // Modelová predpoveď ostáva — suchý radar ju nesmie vymazať.
+    // V nowcast okne bez mokrej snímky — žiadna zrážková ikona z modelu.
+    if (inNowcastWindow &&
+        (showRainPrecip[i] || _hourShowsPrecipIcon(displayIcons[i]))) {
+      final cloud = h.cloudCover != null && idx < h.cloudCover!.length
+          ? h.cloudCover![idx]
+          : null;
+      final apiProb = h.precipitationProbability != null &&
+              idx < h.precipitationProbability!.length
+          ? (h.precipitationProbability![idx] ?? 0)
+          : 0;
+      displayIcons[i] = skyWmoFromCloudCover(cloud);
+      showRainPrecip[i] = false;
+      storedProbs[i] = hourlyStripDryHourPercentFromApi(
+        apiProbPercent: apiProb,
+        iconCode: displayIcons[i],
+        cloudCoverPercent: cloud,
+      );
+      precipMm[i] = 0;
+    }
   }
 }
 
-/// Hero — radar wet / approaching má prioritu pred ECMWF (ako RainViewer).
+/// Hero — „prší teraz“ len keď je pin mokrý. Blížiaca sa bunka ≠ aktuálny dážď.
 int applyRadarPrecipEndToHeroIcon(
   int code, {
   required RadarNowcastContext radarCtx,
@@ -1948,14 +1968,23 @@ int applyRadarPrecipEndToHeroIcon(
   bool radarCoverageActive = false,
 }) {
   final live = radarLivePinUi(radarCtx);
-  if (!live.wetAtPin && !live.approaching) return code;
-  return _radarLivePinIconCode(
-    uiDbz: live.uiDbz > 0 ? live.uiDbz : kRainViewerLegendMinDbz,
-    rainViewer: live.rainViewer,
-    tempC: tempC,
-    precipProb: math.max(precipProb, kMinPrecipProbPercent),
-    precipMm: math.max(precipMm, kMeaningfulPrecipMmPerHour),
-  );
+  if (live.wetAtPin) {
+    return _radarLivePinIconCode(
+      uiDbz: live.uiDbz > 0 ? live.uiDbz : kRainViewerLegendMinDbz,
+      rainViewer: live.rainViewer,
+      tempC: tempC,
+      precipProb: math.max(precipProb, kMinPrecipProbPercent),
+      precipMm: math.max(precipMm, kMeaningfulPrecipMmPerHour),
+    );
+  }
+  // Radar pokrýva lokalitu a pin je suchý — žiadny „Dážď“ z modelu / approaching.
+  if (radarCtx.eligible && radarCtx.latest != null) {
+    final c = normalizeDisplayWeatherCode(code);
+    if (kPrecipitationCodes.contains(c)) {
+      return skyWmoFromCloudCover(cloudCoverPercent);
+    }
+  }
+  return code;
 }
 
 /// Ikona denného úseku — iba Open-Meteo (radar v denných kartách spôsoboval stack overflow).
@@ -2136,7 +2165,7 @@ const int kStripPhantomDecayHours = 3;
 /// Búrková ikona — min. šanca a mm/h na zobrazenie ikony (nie zobrazený úhrn).
 const double kThunderMinMmPerHour = 2.0;
 
-/// mm/h v 24 h pásme pri búrke — konvektívny lejak, nie 2 mm zo slabej škály.
+/// mm/h v 24 h pásme pri búrke — **presne z modelu**, bez umelého navýšenia.
 double hourlyThunderStripDisplayMm({
   required int iconCode,
   required int probPercent,
@@ -2144,42 +2173,7 @@ double hourlyThunderStripDisplayMm({
   int? hourIndex,
   bool deDuplicateNeighbors = false,
 }) {
-  final c = normalizeDisplayWeatherCode(iconCode);
-  if (!kThunderWeatherCodes.contains(c)) return ecmwfMm;
-
-  final baseFloor = switch (c) {
-    95 => 4.5,
-    96 => 6.5,
-    99 => 9.5,
-    _ => 4.5,
-  };
-  final probFactor = switch (probPercent) {
-    >= 90 => 1.65,
-    >= 80 => 1.4,
-    >= 70 => 1.22,
-    >= 60 => 1.08,
-    >= 50 => 1.0,
-    _ => 0.9,
-  };
-  final iconFloor = baseFloor * probFactor;
-
-  final convectiveScale = switch (c) {
-    95 => 2.6,
-    96 => 3.0,
-    99 => 3.8,
-    _ => 2.6,
-  };
-  final probWeight = (probPercent / 70.0).clamp(0.85, 1.4);
-  final scaledModel = ecmwfMm >= kMeaningfulPrecipMmPerHour
-      ? ecmwfMm * convectiveScale * probWeight
-      : (ecmwfMm > 0 ? ecmwfMm * convectiveScale * probWeight * 4 : 0.0);
-
-  var result = math.max(iconFloor, scaledModel);
-  if (deDuplicateNeighbors && hourIndex != null) {
-    final skew = ((hourIndex % 5) - 2) * 0.4;
-    result = (result + skew).clamp(iconFloor * 0.92, iconFloor * 1.18);
-  }
-  return double.parse(result.toStringAsFixed(1));
+  return ecmwfMm;
 }
 
 bool isMeaningfulPrecipMm(double mm, {double snowfallCm = 0.0}) =>
@@ -2458,6 +2452,14 @@ void applyPostRainDecayToHourlyStrip({
     if (pastRainHour[i] || precipMm[i] >= kMeaningfulPrecipMmPerHour) continue;
     if (_hourShowsPrecipIcon(displayIcons[i]) && showRainPrecip[i]) continue;
 
+    // Jasno — nikdy dozvuk 40 %, vždy 10 %.
+    if (_isClearStripSkyCode(displayIcons[i])) {
+      precipPercents[i] = 10;
+      showRainPrecip[i] = false;
+      precipMm[i] = 0;
+      continue;
+    }
+
     final sinceRain = _hoursSinceLastRainInStrip(
       i,
       pastRainHour,
@@ -2473,7 +2475,7 @@ void applyPostRainDecayToHourlyStrip({
     precipMm[i] = 0;
 
     final sky = normalizeDisplayWeatherCode(displayIcons[i]);
-    if (sky <= 1 || kPrecipitationCodes.contains(sky)) {
+    if (kPrecipitationCodes.contains(sky)) {
       displayIcons[i] = _postRainSkyIcon(
         sinceRain!,
         cloudCoverPercents.length > i ? cloudCoverPercents[i] : null,
@@ -2530,10 +2532,11 @@ void applyRadarAuthorizedHourlyStripDisplay({
       effectiveRadarProbFromDbz(iconDbz, radarCtx),
       kMinPrecipProbPercent,
     );
-    final mm = math.max(
-      precipMm[i],
-      effectiveRadarMmFromDbz(iconDbz, radarCtx),
-    );
+    final radarMmOnly = effectiveRadarMmFromDbz(iconDbz, radarCtx);
+    // Modelové mm majú prioritu — radar ich nesmie zjednotiť cez celý pás.
+    final mm = precipMm[i] > 0
+        ? precipMm[i]
+        : radarMmOnly;
     var icon = radarCtx.fromRainViewer
         ? wmoFromRainViewerDbz(
             iconDbz,
@@ -2548,14 +2551,17 @@ void applyRadarAuthorizedHourlyStripDisplay({
     );
     displayIcons[i] = icon;
     showRainPrecip[i] = true;
-    precipMm[i] = mm;
+    if (precipMm[i] <= 0 && radarMmOnly > 0) {
+      precipMm[i] = radarMmOnly;
+    }
     precipPercents[i] = _roundPrecipProbabilityForDisplay(
       math.max(precipPercents[i], radarProb),
     );
   }
 }
 
-/// Ikona a % v 24 h — model WMO + % ≥ 50 → zrážková ikona (radar netreba).
+/// Ikona a % v 24 h — mimo radarového okna model WMO + % ≥ 50 → zrážková ikona.
+/// V blízkom okne s radarom ikonu nedopĺňa — to robí radar gate.
 void alignHourlyStripIconsWithPrecipPercents({
   required List<int> displayIcons,
   required List<bool> showRainPrecip,
@@ -2563,7 +2569,18 @@ void alignHourlyStripIconsWithPrecipPercents({
   required List<double> precipMm,
   required List<int?> apiWeatherCodes,
   required List<double?> cloudCoverPercents,
+  RadarNowcastContext radarCtx = RadarNowcastContext.inactive,
+  DateTime? locTime,
+  List<DateTime>? slotHours,
 }) {
+  final loc = locTime;
+  final trimStop = loc != null && useRadarOnlyNearTermPrecip(radarCtx)
+      ? radarCtx.nowcastStripGateEndExclusive(loc)
+      : null;
+  final nowHour = loc == null
+      ? null
+      : DateTime(loc.year, loc.month, loc.day, loc.hour);
+
   for (var i = 0; i < displayIcons.length; i++) {
     final pct = precipPercents[i];
     var icon = displayIcons[i];
@@ -2574,16 +2591,25 @@ void alignHourlyStripIconsWithPrecipPercents({
     final apiPrecipCode = api != null &&
         kPrecipitationCodes.contains(normalizeDisplayWeatherCode(api));
 
-    // Model hlási dážď/búrku + % ≥ 50 — ukáž ikonu hneď, nečakaj na radar.
-    if (apiPrecipCode && roundedPct >= kMinPrecipProbPercent) {
+    final stop = trimStop;
+    final inRadarNearTerm = stop != null &&
+        nowHour != null &&
+        slotHours != null &&
+        i < slotHours.length &&
+        !slotHours[i].isBefore(nowHour) &&
+        slotHours[i].isBefore(stop);
+
+    // Model hlási dážď/búrku + % ≥ 50 — mimo radarového okna ukáž ikonu.
+    // V near-terme s radarom to nerob — inak znova maľuje „Dážď“ bez echo.
+    if (apiPrecipCode &&
+        roundedPct >= kMinPrecipProbPercent &&
+        !inRadarNearTerm) {
       showRainPrecip[i] = true;
       if (!_hourShowsPrecipIcon(icon)) {
         displayIcons[i] = _clampPrecipitationIconIntensity(
           normalizeDisplayWeatherCode(api),
           roundedPct,
-          mm >= kMeaningfulPrecipMmPerHour
-              ? mm
-              : math.max(mm, displayMmFromPrecipProbability(pct)),
+          mm,
           isDailyContext: false,
         );
       }
@@ -2596,12 +2622,7 @@ void alignHourlyStripIconsWithPrecipPercents({
           cloudCoverPercent: cloud,
         ),
       );
-      if (precipMm[i] < kMeaningfulPrecipMmPerHour) {
-        precipMm[i] = math.max(
-          precipMm[i],
-          displayMmFromPrecipProbability(precipPercents[i]),
-        );
-      }
+      // precipMm ostáva z API / blendu — bez doplnenia z %.
       continue;
     }
 
@@ -2611,7 +2632,7 @@ void alignHourlyStripIconsWithPrecipPercents({
     if (!wetSlot) continue;
 
     if (pct >= kMinPrecipProbPercent) {
-      if (!wetIcon) {
+      if (!wetIcon && !inRadarNearTerm) {
         final modelCode = effectiveWmoWeatherCode(
           apiCode: api,
           precipMm: mm,
@@ -3146,67 +3167,216 @@ int hourlyStripSkyIconPercent(int iconCode, {double? cloudCoverPercent}) {
   }
 }
 
-/// Suché polooblačno/zamračené v 24 h — len 20, 30 alebo 40.
-int hourlyStripDryCloudyPercentShown(int value) {
-  final rounded = _roundPrecipProbabilityForDisplay(value);
-  if (rounded <= 20) return 20;
-  if (rounded <= 30) return 30;
-  return 40;
+/// Tip % zo skutočnej oblačnosti — bez plánovaných zrážok max **30** (nie 40).
+int _dryPercentHintFromCloudCover(double? cloudCoverPercent) {
+  final c = cloudCoverPercent;
+  if (c == null) return 10;
+  if (c < 35) return 10;
+  if (c < 55) return 20;
+  return 30;
 }
 
-/// Základ suchého % podľa ikony + oblačnosti + API (pod 50 %) + radaru.
-/// Polooblačno ≥ 20, zamračené ≥ 30, husté / blízky dážď → 40.
+/// Suché % v 24 h — API + oblačnosť.
+/// Bez zrážok v pláne: max **30**. Čisté jasno = 10. Nikdy flat 40.
+int hourlyStripDryHourPercentFromApi({
+  required int apiProbPercent,
+  int radarApproachPercent = 0,
+  int? iconCode,
+  double? cloudCoverPercent,
+  bool allowFortyNearRain = false,
+}) {
+  final sky = iconCode != null
+      ? normalizeDisplayWeatherCode(iconCode)
+      : null;
+
+  if (sky == 0) return 10;
+
+  final cloudHint = _dryPercentHintFromCloudCover(cloudCoverPercent);
+  var pct = _roundPrecipProbabilityForDisplay(apiProbPercent);
+
+  if (apiProbPercent <= 14) {
+    pct = cloudHint;
+  } else {
+    if (pct < 10) pct = 10;
+    // Suchá ikona — API ≥50 neznamená 40, keď nie sú zrážky na pine/v páse.
+    if (pct >= kMinPrecipProbPercent) pct = 30;
+    if ((cloudHint - pct).abs() >= 20) {
+      pct = pct + (cloudHint > pct ? 10 : -10);
+    }
+  }
+
+  // Prevažne jasno — max 20, okrem hodiny tesne pred zrážkou.
+  if (sky == 1 && !allowFortyNearRain) {
+    pct = math.min(pct, 20);
+  }
+
+  if (!allowFortyNearRain) {
+    if (radarApproachPercent >= 25) {
+      pct = math.max(pct, 30);
+    } else if (radarApproachPercent >= 15) {
+      pct = math.max(pct, 20);
+    }
+  }
+
+  // Ďalšia hodina je zrážka → 40 %.
+  if (allowFortyNearRain) {
+    pct = math.max(pct, 40);
+  }
+
+  final cap = allowFortyNearRain ? 40 : 30;
+  return _roundPrecipProbabilityForDisplay(pct.clamp(10, cap));
+}
+
+/// Čisté jasno — len WMO 0 (slnko / mesiac bez oblaku).
+bool _isClearStripSkyCode(int iconCode) {
+  return normalizeDisplayWeatherCode(iconCode) == 0;
+}
+
+/// Bez blízkych zrážok: max 30. Hodina pred/po zrážke: **40**.
+int _dryStripPercentWithNearbyRainCap({
+  required int pct,
+  required int? hoursUntilRain,
+  required int? hoursSinceRain,
+  required int radarApproachPercent,
+  int? iconCode,
+}) {
+  if (iconCode != null && _isClearStripSkyCode(iconCode)) {
+    return 10;
+  }
+  final nearIncoming = hoursUntilRain != null && hoursUntilRain <= 1;
+  final justAfter = hoursSinceRain != null && hoursSinceRain == 1;
+  final nearRain = nearIncoming || justAfter;
+  var out = _roundPrecipProbabilityForDisplay(pct);
+  if (nearRain) {
+    out = 40;
+  } else {
+    out = out.clamp(10, 30);
+    if (iconCode != null && normalizeDisplayWeatherCode(iconCode) == 1) {
+      out = math.min(out, 20);
+    }
+  }
+  return _roundPrecipProbabilityForDisplay(out);
+}
+
+/// Striedaj 20↔30 (alebo 10↔20), aby sa to isté nelepilo 3+× za sebou.
+int _nextDifferentDryPercent(int current, int iconCode) {
+  if (_isClearStripSkyCode(iconCode)) return 10;
+  final sky = normalizeDisplayWeatherCode(iconCode);
+  if (sky == 1) {
+    return current >= 20 ? 10 : 20;
+  }
+  if (current >= 30) return 20;
+  if (current == 20) return 30;
+  return 20;
+}
+
+/// Suché %: max 30 bez zrážok; max **2 rovnaké** za sebou, potom striedaj 20/30.
+void diversifyRepetitiveDryStripPercents({
+  required List<int> displayIcons,
+  required List<bool> showRainPrecip,
+  required List<int> storedProbs,
+  required List<int> stripIndices,
+  required HourlyForecast h,
+}) {
+  final n = displayIcons.length;
+  if (n == 0) return;
+
+  final wetIcon = List<bool>.generate(
+    n,
+    (i) => showRainPrecip[i] || _hourShowsPrecipIcon(displayIcons[i]),
+  );
+
+  // 1) Prepočítaj suché hodiny — bez zrážok v okolí strop 30.
+  for (var i = 0; i < n; i++) {
+    if (wetIcon[i]) continue;
+    if (storedProbs[i] >= kMinPrecipProbPercent) continue;
+
+    final idx = stripIndices[i];
+    final api = h.precipitationProbability != null &&
+            idx < h.precipitationProbability!.length
+        ? (h.precipitationProbability![idx] ?? 0)
+        : storedProbs[i];
+    final cloud = h.cloudCover != null && idx < h.cloudCover!.length
+        ? h.cloudCover![idx]
+        : null;
+    final until = _hoursUntilNextRainInStrip(i, wetIcon);
+    final since = _hoursSinceLastRainInStrip(i, wetIcon);
+    final nearRain = (until != null && until <= 1) ||
+        (since != null && since == 1);
+
+    var pct = hourlyStripDryHourPercentFromApi(
+      apiProbPercent: api,
+      iconCode: displayIcons[i],
+      cloudCoverPercent: cloud,
+      allowFortyNearRain: nearRain,
+    );
+    // Hodina pred zrážkou — vždy 40 (aj keď API/oblaky dajú menej).
+    if (nearRain && !_isClearStripSkyCode(displayIcons[i])) {
+      pct = 40;
+    } else {
+      pct = _dryStripPercentWithNearbyRainCap(
+        pct: pct,
+        hoursUntilRain: until,
+        hoursSinceRain: since,
+        radarApproachPercent: 0,
+        iconCode: displayIcons[i],
+      );
+      if (!nearRain) pct = math.min(pct, 30);
+    }
+    storedProbs[i] = pct;
+  }
+
+  // 2) Max 2 rovnaké suché % — ale 40 pred zrážkou nestriedaj preč.
+  for (var i = 2; i < n; i++) {
+    if (wetIcon[i]) continue;
+    if (storedProbs[i] >= kMinPrecipProbPercent) continue;
+    final until = _hoursUntilNextRainInStrip(i, wetIcon);
+    if (until != null && until <= 1) continue; // nechaj 40
+    if (wetIcon[i - 1] || wetIcon[i - 2]) continue;
+    if (storedProbs[i] == storedProbs[i - 1] &&
+        storedProbs[i] == storedProbs[i - 2]) {
+      storedProbs[i] = _nextDifferentDryPercent(
+        storedProbs[i],
+        displayIcons[i],
+      );
+    }
+  }
+
+  for (var i = 1; i < n; i++) {
+    if (wetIcon[i] || wetIcon[i - 1]) continue;
+    if (storedProbs[i] >= kMinPrecipProbPercent) continue;
+    final until = _hoursUntilNextRainInStrip(i, wetIcon);
+    if (until != null && until <= 1) continue;
+    if (i >= 2 &&
+        !wetIcon[i - 2] &&
+        storedProbs[i - 1] == storedProbs[i - 2] &&
+        storedProbs[i] == storedProbs[i - 1]) {
+      storedProbs[i] = _nextDifferentDryPercent(
+        storedProbs[i - 1],
+        displayIcons[i],
+      );
+    }
+  }
+}
+
+/// Legacy — suché % podľa ikony; preferuj [hourlyStripDryHourPercentFromApi].
+int hourlyStripDryCloudyPercentShown(int value) {
+  return _roundPrecipProbabilityForDisplay(value.clamp(10, 30));
+}
+
+/// Legacy wrapper — API first.
 int hourlyStripDryCloudyBasePercent({
   required int iconCode,
   double? cloudCoverPercent,
   int apiProbPercent = 0,
   int radarApproachPercent = 0,
-}) {
-  final sky = normalizeDisplayWeatherCode(
-    _stripSkyCodeForPercent(iconCode, cloudCoverPercent: cloudCoverPercent),
-  );
-
-  final overcast = sky == 3 || sky == 45 || sky == 48;
-  // Ikona: polooblačno 20, zamračené 30 — vždy rozdiel.
-  var base = overcast ? 30 : 20;
-
-  final cloud = cloudCoverPercent;
-  if (cloud != null) {
-    if (cloud >= 85) {
-      base = 40;
-    } else if (cloud >= 70) {
-      base = math.max(base, overcast ? 30 : 30);
-    } else if (cloud < 50 && !overcast) {
-      base = 20;
-    }
-  }
-
-  final api = apiProbPercent;
-  if (api >= 35) {
-    base = math.max(base, 40);
-  } else if (api >= 22) {
-    base = math.max(base, 30);
-  } else if (api >= 12 && !overcast) {
-    base = math.max(base, 20);
-  }
-
-  final radar = radarApproachPercent;
-  if (radar >= 40) {
-    base = math.max(base, 40);
-  } else if (radar >= 25) {
-    base = math.max(base, 30);
-  }
-
-  // Zamračené nikdy pod 30 (okrem cieľového 20 len pri polooblačno).
-  if (overcast) base = math.max(base, 30);
-
-  return hourlyStripDryCloudyPercentShown(base);
-}
-
-bool _isDryCloudyStripSkyCode(int iconCode) {
-  final sky = normalizeDisplayWeatherCode(iconCode);
-  return sky == 2 || sky == 3 || sky == 45 || sky == 48;
-}
+}) =>
+    hourlyStripDryHourPercentFromApi(
+      apiProbPercent: apiProbPercent,
+      radarApproachPercent: radarApproachPercent,
+      iconCode: iconCode,
+      cloudCoverPercent: cloudCoverPercent,
+    );
 
 /// Koľko hodín od poslednej zrážkovej hodiny (ikona alebo stĺpec dažďa).
 int? _hoursSinceLastRainInStrip(
@@ -4237,16 +4407,15 @@ int ecmwfWetHourDisplayProbPercent({
   final apiThunder = ecmwfJsonThunderHour(apiCode);
   // Model hlási búrku (95/96/99) → búrková ikona + % podľa API/mm (50+).
   if (apiThunder) {
-    final mm = math.max(rawMm, kMeaningfulPrecipMmPerHour);
     return (
       displayIconCode: normalizeDisplayWeatherCode(apiCode!),
       displayProbPercent: ecmwfWetHourDisplayProbPercent(
         rawApiProb: rawProb,
-        precipMm: mm,
+        precipMm: rawMm,
         weatherCode: apiCode,
         cloudCoverPercent: cloud,
       ),
-      precipMm: mm,
+      precipMm: rawMm,
       showRainPrecip: true,
     );
   }
@@ -4287,17 +4456,16 @@ int ecmwfWetHourDisplayProbPercent({
       displayIconCode,
       cloudCoverPercent: cloud,
     );
-    // Suchá ikona: pod 50 %, ale nikdy pod floor (oblačno 20–40, jasno 10).
-    displayProbPercent = displayProb >= kMinPrecipProbPercent
-        ? skyFloor
-        : math.max(displayProb, skyFloor);
+    // Suchá ikona: % z API (variácia), nie flat skyFloor 30 na zamračené.
+    displayProbPercent = hourlyStripDryHourPercentFromApi(
+      apiProbPercent: displayProb < 10 ? skyFloor : displayProb,
+      iconCode: displayIconCode,
+      cloudCoverPercent: cloud,
+    );
   }
 
-  final slotMm = wet
-      ? (rawMm >= kMeaningfulPrecipMmPerHour
-          ? rawMm
-          : math.max(rawMm, displayMmFromPrecipProbability(rawProb)))
-      : 0.0;
+  // mm presne z API — žiadne umelé mm z %.
+  final slotMm = wet ? rawMm : 0.0;
 
   return (
     displayIconCode: displayIconCode,
