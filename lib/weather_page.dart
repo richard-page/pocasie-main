@@ -369,7 +369,12 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   }
 
   void _deferRadarSetup(GeoCity city, {bool forceReload = false}) {
-    _pendingRadarForceReload = forceReload;
+    // Pri zmene lokality vždy znova načítaj radar (inak bodka ostane na starom mieste).
+    final cityChanged = _lastRadarCity == null ||
+        (_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
+        (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
+        _lastRadarCity!.name != city.name;
+    _pendingRadarForceReload = forceReload || cityChanged;
     if (!_supportsRadarForCity(city)) return;
     // Hneď stiahni slovakia.geojson (~1 MB) — WebView to nestíha pri 10 s odklade.
     prefetchRadarMapAssets();
@@ -380,18 +385,35 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   void _scheduleRadarWarmLoad(GeoCity city) {
     if (!_supportsRadarForCity(city)) return;
     if (_radarController != null) {
-      if (_pendingRadarForceReload) {
-        _setupRadarController(city, forceReload: true);
+      final cityChanged = _lastRadarCity == null ||
+          (_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
+          (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
+          _lastRadarCity!.name != city.name;
+      if (_pendingRadarForceReload || cityChanged) {
+        _setupRadarController(
+          city,
+          forceReload: true,
+        );
         _pendingRadarForceReload = false;
       }
       return;
     }
-    if (_radarWarmLoadTimer != null) return;
+    if (_radarWarmLoadTimer != null) {
+      // Nová lokalita počas čakania — zruš starý timer a naplánuj znova.
+      _radarWarmLoadTimer?.cancel();
+      _radarWarmLoadTimer = null;
+    }
     _radarWarmLoadTimer = Timer(const Duration(milliseconds: 500), () {
       _radarWarmLoadTimer = null;
       if (!mounted || currentCity == null) return;
       if ((currentCity!.lat - city.lat).abs() > 0.0002 ||
           (currentCity!.lon - city.lon).abs() > 0.0002) {
+        // Medzitým sa lokalita zmenila — načítaj aktuálnu.
+        _setupRadarController(
+          currentCity!,
+          forceReload: true,
+        );
+        _pendingRadarForceReload = false;
         return;
       }
       // Načítať WebView ešte pred zobrazením panelu — stihnú sa hranice SK.
@@ -406,36 +428,56 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     _scheduleRadarWarmLoad(city);
 
     if (_radarMapUiReady) {
-      if (_radarController == null) {
+      final cityChanged = _lastRadarCity == null ||
+          (_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
+          (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
+          _lastRadarCity!.name != city.name;
+      if (_radarController == null || cityChanged || _pendingRadarForceReload) {
         _setupRadarController(
           city,
-          forceReload: _pendingRadarForceReload,
+          forceReload: cityChanged || _pendingRadarForceReload,
         );
         _pendingRadarForceReload = false;
       }
       return;
     }
-    if (_radarMapUiTimer != null) return;
+    if (_radarMapUiTimer != null) {
+      _radarMapUiTimer?.cancel();
+      _radarMapUiTimer = null;
+    }
     // Fallback ak pageFinished nestihne; hlavný reveal je v onPageFinished.
     _radarMapUiTimer = Timer(const Duration(milliseconds: 4500), () {
       _radarMapUiTimer = null;
       if (!mounted || currentCity == null) return;
-      if ((currentCity!.lat - city.lat).abs() > 0.0002 ||
-          (currentCity!.lon - city.lon).abs() > 0.0002) {
-        return;
-      }
-      _revealRadarMapUi(city);
+      _revealRadarMapUi(currentCity!);
     });
   }
 
   void _revealRadarMapUi(GeoCity city) {
-    if (_radarMapUiReady) return;
+    if (_radarMapUiReady) {
+      // Panel už beží — pri zmene mesta aj tak precentruj bodku.
+      final cityChanged = _lastRadarCity == null ||
+          (_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
+          (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
+          _lastRadarCity!.name != city.name;
+      if (cityChanged || _pendingRadarForceReload) {
+        _setupRadarController(city, forceReload: true);
+        _pendingRadarForceReload = false;
+      }
+      return;
+    }
     _radarMapUiReady = true;
     _radarMapUiTimer?.cancel();
     _radarMapUiTimer = null;
-    // Controller už beží v Offstage — neprebíjaj load (hranice SK).
-    if (_radarController == null) {
-      _setupRadarController(city, forceReload: _pendingRadarForceReload);
+    final cityChanged = _lastRadarCity == null ||
+        (_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
+        (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
+        _lastRadarCity!.name != city.name;
+    if (_radarController == null || cityChanged || _pendingRadarForceReload) {
+      _setupRadarController(
+        city,
+        forceReload: cityChanged || _pendingRadarForceReload,
+      );
     }
     _pendingRadarForceReload = false;
     if (mounted) setState(() {});
@@ -2611,7 +2653,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       }
     });
 
-    _deferRadarSetup(city, forceReload: wasOffline);
+    _deferRadarSetup(city, forceReload: wasOffline || locationChanged);
     _syncVystrahyPreloaderForCity(city);
 
     try {
@@ -4790,6 +4832,16 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       utcOffsetSeconds: weatherData?.utcOffsetSeconds,
       radarCtx: _radarNowcastContext,
     );
+    reapplyDryCloudyStripPercents(
+      displayIcons: displayIcons,
+      showRainPrecip: stripShowRainPrecip,
+      storedProbs: stripStoredProbs,
+      stripIndices: stripIndices,
+      h: h,
+      radarCtx: _radarNowcastContext,
+      locTime: locTime,
+      utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+    );
 
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(0, 0, 0, _kHomeForecastSectionGap),
@@ -5124,8 +5176,20 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         index < h.precipitationProbability!.length;
     final int iconCode = displayIconCode;
 
-    final String precipPercent =
-        '${_roundPrecipProbabilityForDisplay(precipColumnPercent)}%';
+    final skyFloor = hourlyStripSkyIconPercent(iconCode);
+    final rounded = _roundPrecipProbabilityForDisplay(precipColumnPercent);
+    // Suché polooblačno = 20, zamračené = 30, husté/radar = 40.
+    final int shownPct;
+    if (!showRainPrecipColumn &&
+        rounded < kMinPrecipProbPercent &&
+        _isDryCloudyStripSkyCode(iconCode)) {
+      shownPct = hourlyStripDryCloudyPercentShown(
+        math.max(rounded, skyFloor),
+      );
+    } else {
+      shownPct = math.max(rounded, skyFloor);
+    }
+    final String precipPercent = '$shownPct%';
     final bool showPrecipAmount =
         showRainPrecipColumn && precipDisplayMm >= kMeaningfulPrecipMmPerHour;
 

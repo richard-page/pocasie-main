@@ -1112,11 +1112,55 @@ void applyHourlyStripPrecipPercentRamp({
           localT.day,
           localT.hour,
         );
-        if (snap.authorizesLocalHour(slotHour)) {
-          wetPct = math.max(
-            wetPct,
-            math.max(kMinPrecipProbPercent, snap.approachChancePercent),
+        if (snap.authorizesLocalHour(slotHour) ||
+            snap.wetAtPinNow ||
+            snap.approaching) {
+          final hoursAhead = slotHour
+              .difference(DateTime(
+                locTime.year,
+                locTime.month,
+                locTime.day,
+                locTime.hour,
+              ))
+              .inHours;
+          final minsToSlot = slotHour.difference(locTime).inMinutes;
+          final live = radarLivePinUi(radarCtx);
+          final rainingNow = live.wetAtPin || snap.wetAtPinNow;
+          final certainty = radarStripCertaintyPercent(
+            rainingNow: rainingNow,
+            approaching: snap.approaching,
+            hoursAhead: hoursAhead,
+            minsToSlotStart: minsToSlot,
+            etaMinutes: snap.etaMinutes,
+            endMinutes: snap.endMinutes,
+            distanceKm: snap.distanceKmEstimate,
+            approachChancePercent: snap.approachChancePercent,
+            pinUiDbz: snap.uiDbz,
+            motionSpeedKmH: snap.motionSpeedKmH,
           );
+          wetPct = math.max(wetPct, certainty);
+          // mm podľa snímky hodiny / modelu / % — nekópiruj flat 0.1.
+          final radarMm = radarStripMmForHour(
+            radarCtx: radarCtx,
+            snap: snap,
+            slotHour: slotHour,
+            locTime: locTime,
+            hoursAhead: hoursAhead,
+          );
+          final mm = resolveRadarAuthorizedStripMm(
+            modelMm: precipMm[i],
+            radarMm: radarMm,
+            certaintyPercent: math.max(wetPct, certainty),
+            hoursAhead: hoursAhead,
+          );
+          if (mm > precipMm[i] || precipMm[i] < 0.05) {
+            precipMm[i] = mm;
+            displayIcons[i] = hourlyStripPrecipIntensityIcon(
+              baseCode: displayIcons[i],
+              precipMm: mm,
+              tempC: h.temperature?[apiIdx],
+            );
+          }
         }
       }
       storedProbs[i] = _roundPrecipProbabilityForDisplay(
@@ -1138,25 +1182,84 @@ void applyHourlyStripPrecipPercentRamp({
     final cloud = h.cloudCover != null && idx < h.cloudCover!.length
         ? h.cloudCover![idx]
         : null;
+    final apiProb = h.precipitationProbability != null &&
+            idx < h.precipitationProbability!.length
+        ? (h.precipitationProbability![idx] ?? 0)
+        : 0;
+
+    var radarApproach = 0;
+    final snap = radarCtx.pinForecast;
+    final parsed = DateTime.tryParse(h.time[idx]);
+    if (parsed != null && radarCtx.eligible) {
+      final localT = utcOffsetSeconds != null
+          ? parsed.add(Duration(seconds: utcOffsetSeconds))
+          : parsed;
+      final slotHour = DateTime(
+        localT.year,
+        localT.month,
+        localT.day,
+        localT.hour,
+      );
+      final nowHour = DateTime(
+        locTime.year,
+        locTime.month,
+        locTime.day,
+        locTime.hour,
+      );
+      if (snap.authorizesLocalHour(slotHour)) {
+        // Hodina v radarovom mokrom okne — suché % max 40.
+        radarApproach = math.min(
+          math.max(snap.approachChancePercent, 30),
+          40,
+        );
+      } else if (snap.approaching && snap.etaMinutes != null) {
+        // Rozmanitosť podľa vzdialenosti od ETA príchodu.
+        final hoursFromNow = slotHour.difference(nowHour).inHours;
+        final etaH = math.max(0, (snap.etaMinutes! / 60.0).round());
+        if (hoursFromNow >= 0 && hoursFromNow <= 8) {
+          final dist = (hoursFromNow - etaH).abs();
+          if (dist <= 0) {
+            radarApproach = 40;
+          } else if (dist == 1) {
+            radarApproach = 30;
+          } else if (dist == 2) {
+            radarApproach = 20;
+          }
+        }
+      }
+    }
+
     final skyFloor = hourlyStripSkyIconPercent(
       displayIcons[i],
       cloudCoverPercent: cloud,
     );
 
-    var pct = skyFloor;
+    var pct = _isDryCloudyStripSkyCode(displayIcons[i])
+        ? hourlyStripDryCloudyBasePercent(
+            iconCode: displayIcons[i],
+            cloudCoverPercent: cloud,
+            apiProbPercent: apiProb,
+            radarApproachPercent: radarApproach,
+          )
+        : skyFloor;
+
     if (decay > 0) {
       // Po zrážkovej ikone: 40 → 30 → 20.
-      pct = decay;
+      pct = math.max(pct, decay);
     }
     if (approach > 0) {
       pct = math.max(pct, approach);
     }
-    // Bežná suchá hodina bez dozvuku / prístupu — len obloha.
-    if (decay <= 0 && approach <= 0) {
-      pct = skyFloor;
-    }
 
-    storedProbs[i] = _roundPrecipProbabilityForDisplay(pct.clamp(skyFloor, 40));
+    if (_isDryCloudyStripSkyCode(displayIcons[i])) {
+      storedProbs[i] = hourlyStripDryCloudyPercentShown(
+        pct.clamp(20, 40),
+      );
+    } else {
+      storedProbs[i] = _roundPrecipProbabilityForDisplay(
+        pct.clamp(skyFloor, 40),
+      );
+    }
   }
 }
 
@@ -1251,8 +1354,8 @@ void alignHourlyStripThunderWithProbability({
 
 /// Kapsovanie hodín v pásme podľa denného maxima šance v danom kalendárnom dni.
 ///
-/// Pomáha udržať konzistenciu medzi hodinovým pásmom (24 h) a dennou kartou,
-/// najmä pri prechode cez polnoc.
+/// Len pre **vzdialené** mokré hodiny. Near-term (0–6 h) radarová istota
+/// (80–95 %) sa **nesmie** zabiť denným API maxom 50 %.
 void applyHourlyStripHorizonProbCaps({
   required List<int> storedProbs,
   required List<int> stripIndices,
@@ -1261,8 +1364,17 @@ void applyHourlyStripHorizonProbCaps({
   int? utcOffsetSeconds,
 }) {
   if (h.time.isEmpty) return;
+  final nowHour = DateTime(
+    locTime.year,
+    locTime.month,
+    locTime.day,
+    locTime.hour,
+  );
   final len = math.min(storedProbs.length, stripIndices.length);
   for (var i = 0; i < len; i++) {
+    // Suché % podľa oblohy/radaru (20–40) — nesahej.
+    if (storedProbs[i] < kMinPrecipProbPercent) continue;
+
     final idx = stripIndices[i];
     if (idx < 0 || idx >= h.time.length) continue;
     final t = DateTime.tryParse(h.time[idx]);
@@ -1270,6 +1382,16 @@ void applyHourlyStripHorizonProbCaps({
     final localT = utcOffsetSeconds != null
         ? t.add(Duration(seconds: utcOffsetSeconds))
         : t;
+    final slotHour = DateTime(
+      localT.year,
+      localT.month,
+      localT.day,
+      localT.hour,
+    );
+    final hoursAhead = slotHour.difference(nowHour).inHours;
+    // Blízke hodiny: radar / nowcast istota má prioritu pred API dayMax.
+    if (hoursAhead <= 6) continue;
+
     final dateStr = localT.toIso8601String().substring(0, 10);
     final dayMax = hourlyDayMaxPrecipProb(h, dateStr);
     if (dayMax <= 0) continue;
@@ -1279,6 +1401,87 @@ void applyHourlyStripHorizonProbCaps({
   }
   for (var i = 0; i < storedProbs.length; i++) {
     storedProbs[i] = _roundPrecipProbabilityForDisplay(storedProbs[i]);
+  }
+}
+
+/// Po všetkých clampoch znova nastav suché oblačné % (20/30/40 podľa ikony).
+/// Po zrážkovej ikone vždy max(…, 40 → 30 → 20) — neprepisuj dozvuk.
+void reapplyDryCloudyStripPercents({
+  required List<int> displayIcons,
+  required List<bool> showRainPrecip,
+  required List<int> storedProbs,
+  required List<int> stripIndices,
+  required HourlyForecast h,
+  RadarNowcastContext radarCtx = RadarNowcastContext.inactive,
+  DateTime? locTime,
+  int? utcOffsetSeconds,
+}) {
+  final now = locTime;
+  final wetIcon = List<bool>.generate(
+    displayIcons.length,
+    (i) => showRainPrecip[i] || _hourShowsPrecipIcon(displayIcons[i]),
+  );
+
+  for (var i = 0; i < displayIcons.length; i++) {
+    if (wetIcon[i]) continue;
+    if (!_isDryCloudyStripSkyCode(displayIcons[i])) continue;
+    if (storedProbs[i] >= kMinPrecipProbPercent) continue;
+
+    final idx = stripIndices[i];
+    final cloud = h.cloudCover != null && idx < h.cloudCover!.length
+        ? h.cloudCover![idx]
+        : null;
+    final apiProb = h.precipitationProbability != null &&
+            idx < h.precipitationProbability!.length
+        ? (h.precipitationProbability![idx] ?? 0)
+        : 0;
+
+    var radarApproach = 0;
+    if (now != null && radarCtx.eligible && idx < h.time.length) {
+      final parsed = DateTime.tryParse(h.time[idx]);
+      if (parsed != null) {
+        final localT = utcOffsetSeconds != null
+            ? parsed.add(Duration(seconds: utcOffsetSeconds))
+            : parsed;
+        final slotHour = DateTime(
+          localT.year,
+          localT.month,
+          localT.day,
+          localT.hour,
+        );
+        final snap = radarCtx.pinForecast;
+        if (snap.authorizesLocalHour(slotHour)) {
+          radarApproach = math.min(math.max(snap.approachChancePercent, 30), 40);
+        } else if (snap.approaching && snap.etaMinutes != null) {
+          final nowHour = DateTime(now.year, now.month, now.day, now.hour);
+          final hoursFromNow = slotHour.difference(nowHour).inHours;
+          final etaH = math.max(0, (snap.etaMinutes! / 60.0).round());
+          final dist = (hoursFromNow - etaH).abs();
+          if (hoursFromNow >= 0 && hoursFromNow <= 8) {
+            if (dist <= 0) {
+              radarApproach = 40;
+            } else if (dist == 1) {
+              radarApproach = 30;
+            } else if (dist == 2) {
+              radarApproach = 20;
+            }
+          }
+        }
+      }
+    }
+
+    final sinceRain = _hoursSinceLastRainInStrip(i, wetIcon);
+    final decay = _postRainDecayPercent(sinceRain);
+    final base = hourlyStripDryCloudyBasePercent(
+      iconCode: displayIcons[i],
+      cloudCoverPercent: cloud,
+      apiProbPercent: apiProb,
+      radarApproachPercent: radarApproach,
+    );
+    // Po dažďovej ikone: 1. suchá hodina = 40 % (nie 30 zo zamračeného).
+    storedProbs[i] = hourlyStripDryCloudyPercentShown(
+      math.max(base, decay).clamp(20, 40),
+    );
   }
 }
 
@@ -1334,7 +1537,7 @@ void clampNearTermStripPercentsWithoutRadar({
   // No-op: percentá a ikony idú z Open-Meteo; radar potvrdí neskôr pri pine.
 }
 
-/// Bez zrážkovej ikony — % pod 50, ale **nikdy 0** (zamračené ≥ 30, jasno ≥ 10).
+/// Bez zrážkovej ikony — % pod 50, ale **nikdy 0** (oblačno 20–40 podľa radaru, jasno ≥ 10).
 void clampDryHourlyStripPrecipPercents({
   required List<int> displayIcons,
   required List<bool> showRainPrecip,
@@ -1418,7 +1621,179 @@ int _radarLivePinIconCode({
   );
 }
 
-/// Near-term pás (~0–2 h): radar **doplní** mokré hodiny — modelovú predpoveď nemaže.
+/// % v 24 h páse z radaru — podľa **istoty / blízkosti**, NIE podľa mm/dBZ.
+/// Vždy po 10. **Nie vždy 90** — môže byť 70 / 80 podľa radaru.
+int radarStripCertaintyPercent({
+  required bool rainingNow,
+  required bool approaching,
+  required int hoursAhead,
+  required int minsToSlotStart,
+  int? etaMinutes,
+  int? endMinutes,
+  double? distanceKm,
+  int approachChancePercent = 0,
+  double pinUiDbz = 0,
+  double? motionSpeedKmH,
+}) {
+  final dist = distanceKm;
+  final onTop = rainingNow || (dist != null && dist < 12);
+  final departing = (motionSpeedKmH != null && motionSpeedKmH < -2) ||
+      (endMinutes != null && endMinutes < 22);
+  // Šanca z trajektórie/nowcastu (už po 10) — primárny signál pri príchode.
+  final radarChance = approachChancePercent > 0
+      ? _roundPrecipProbabilityForDisplay(approachChancePercent.clamp(0, 100))
+      : 0;
+
+  if (onTop) {
+    // Na pine: istota podľa sily echa + či odchádza — NIE mapovanie 100 → 90.
+    int cert;
+    if (departing) {
+      cert = pinUiDbz >= 35 ? 80 : 70;
+    } else if (pinUiDbz >= 40) {
+      cert = 90;
+    } else if (pinUiDbz >= 28) {
+      cert = 80;
+    } else if (pinUiDbz >= kRainViewerLegendMinDbz) {
+      cert = 70;
+    } else {
+      cert = 80;
+    }
+    if (hoursAhead >= 2) {
+      final hold = endMinutes ?? 40;
+      if (hold <= minsToSlotStart + 10) {
+        cert = math.min(cert, 60);
+      } else if (hold <= minsToSlotStart + 35) {
+        cert = math.min(cert, 70);
+      } else if (hoursAhead >= 3) {
+        cert = math.min(cert, 70);
+      } else {
+        cert = math.min(cert, math.max(70, cert - 10));
+      }
+    }
+    return _roundPrecipProbabilityForDisplay(cert.clamp(50, 90));
+  }
+
+  if (approaching || radarChance >= 50) {
+    // Príchod: % = radarová šanca, nie natvrdo 90.
+    var cert = radarChance >= 50 ? radarChance : 60;
+    if (cert > 90) cert = 90;
+
+    final eta = etaMinutes ?? 50;
+    if (eta > 55) {
+      cert = math.min(cert, 70);
+    } else if (eta > 35) {
+      cert = math.min(cert, 80);
+    }
+    if (dist != null) {
+      if (dist > 55) {
+        cert = math.min(cert, 70);
+      } else if (dist > 35) {
+        cert = math.min(cert, 80);
+      }
+    }
+    if (hoursAhead >= 2) cert = math.min(cert, math.max(50, cert - 10));
+    if (hoursAhead >= 3) cert = math.min(cert, math.max(50, cert - 10));
+    if (hoursAhead >= 4) cert = math.min(cert, 60);
+    return _roundPrecipProbabilityForDisplay(cert.clamp(50, 90));
+  }
+
+  // Autorizovaná mokrá hodina bez silného live signálu.
+  if (hoursAhead <= 1) return 70;
+  if (hoursAhead == 2) return 60;
+  return 50;
+}
+
+/// mm/h pre konkrétnu hodinu — len zo snímky blízkej tej hodine.
+/// **0** = žiadna spoľahlivá intenzita (NEkópiruj floor 0.1 na celý pás).
+double radarStripMmForHour({
+  required RadarNowcastContext radarCtx,
+  required RadarPinForecastSnapshot snap,
+  required DateTime slotHour,
+  required DateTime locTime,
+  required int hoursAhead,
+}) {
+  final tz = locTime.timeZoneOffset;
+  final slotMid = slotHour.add(const Duration(minutes: 30));
+  final slotMidUnix =
+      slotMid.toUtc().subtract(tz).millisecondsSinceEpoch ~/ 1000;
+
+  RadarFrameSample? best;
+  var bestDt = 1 << 30;
+  for (final f in radarCtx.nowcastHistory) {
+    final dt = (f.unix - slotMidUnix).abs();
+    if (dt < bestDt) {
+      bestDt = dt;
+      best = f;
+    }
+  }
+  if (best == null || bestDt > 40 * 60) {
+    for (final f in radarCtx.history) {
+      final dt = (f.unix - slotMidUnix).abs();
+      if (dt < bestDt) {
+        bestDt = dt;
+        best = f;
+      }
+    }
+  }
+
+  // Bez snímky v okolí ±35 min — nič nekópiruj z pinu na ďalšie hodiny.
+  if (best == null || bestDt > 35 * 60) return 0;
+
+  final center = best.dbz ?? 0.0;
+  final peak = best.innerPeakDbz ?? best.peakDbz ?? center;
+  final atPin = center >= kRainViewerLegendMinDbz;
+
+  double dbz;
+  if (atPin) {
+    // Intenzita NA PINE v tej snímke.
+    dbz = center;
+  } else if (snap.approaching && peak >= kRainViewerLegendMinDbz) {
+    // Príchod — konzervatívne, nie plný peak jadra.
+    dbz = rainViewerIntensityDbz(center: center, peak: peak, atPoint: false);
+  } else {
+    return 0;
+  }
+
+  if (dbz < kRainViewerLegendMinDbz) return 0;
+
+  final mm = radarLegendMmFromDbz(dbz);
+  if (mm < 0.05) return 0;
+  return mm.clamp(0.05, 12.0);
+}
+
+/// mm pre radarom autorizovanú hodinu — model > snímka hodiny > % (rozmanité), nikdy flat 0.1.
+double resolveRadarAuthorizedStripMm({
+  required double modelMm,
+  required double radarMm,
+  required int certaintyPercent,
+  required int hoursAhead,
+}) {
+  if (radarMm >= 0.05) {
+    return math.max(modelMm, radarMm).clamp(0.05, 12.0);
+  }
+  if (modelMm >= kMeaningfulPrecipMmPerHour) {
+    return modelMm;
+  }
+  // Bez snímky: mm podľa istoty hodiny (60→0.35, 70→0.6, …) + jemný rozptyl podľa času.
+  var fromProb = displayMmFromPrecipProbability(certaintyPercent);
+  if (hoursAhead >= 3) fromProb = math.max(0.15, fromProb * 0.75);
+  if (hoursAhead >= 5) fromProb = math.max(0.15, fromProb * 0.7);
+  // Rozlíš susedné hodiny so rovnakým % (inak vyzerá ako kópia).
+  final jitter = 1.0 + ((hoursAhead % 3) - 1) * 0.12;
+  return (fromProb * jitter).clamp(0.15, 8.0);
+}
+
+double rainingFallbackDbz(RadarPinForecastSnapshot snap) {
+  // Len pin — nie peak červenej bunky v diaľke.
+  if (snap.uiDbz >= kRainViewerLegendMinDbz) return snap.uiDbz;
+  if (snap.wetAtPinNow && snap.peakDbz >= kRainViewerLegendMinDbz) {
+    return math.min(snap.peakDbz, kRainViewerLegendDrizzleDbz + 5);
+  }
+  return kRainViewerLegendDrizzleDbz;
+}
+
+/// Near-term pás: radar **doplní** mokré hodiny podľa odhadu konca zrážok.
+/// Hero aj pás používajú rovnaký „prší teraz“ signál (live pin).
 void applyRadarPrecipEndToHourlyStrip({
   required List<int> displayIcons,
   required List<bool> showRainPrecip,
@@ -1433,9 +1808,11 @@ void applyRadarPrecipEndToHourlyStrip({
 }) {
   if (!radarCtx.eligible) return;
   final snap = radarCtx.pinForecast;
+  final live = radarLivePinUi(radarCtx);
+  final rainingNow = live.wetAtPin || snap.wetAtPinNow;
   if (snap.wetHourStartsMs.isEmpty &&
       !snap.clearEcmwfNearTerm &&
-      !snap.wetAtPinNow &&
+      !rainingNow &&
       !snap.approaching) {
     return;
   }
@@ -1446,6 +1823,17 @@ void applyRadarPrecipEndToHourlyStrip({
     locTime.day,
     locTime.hour,
   );
+
+  // Odhad konca: snapshot + minútový koniec z kontextu (dlhá bunka).
+  final holdMins = math.max(
+    snap.endMinutes ?? (rainingNow ? 55 : 0),
+    rainingNow ? 55 : 0,
+  );
+  final minuteEnd = radarCtx.stripRainMinuteEndAt(locTime);
+  final holdFromMinuteEnd = minuteEnd != null
+      ? minuteEnd.difference(locTime).inMinutes.clamp(0, 180)
+      : 0;
+  final effectiveHoldMins = math.max(holdMins, holdFromMinuteEnd);
 
   for (var i = 0; i < stripIndices.length; i++) {
     final idx = stripIndices[i];
@@ -1462,33 +1850,75 @@ void applyRadarPrecipEndToHourlyStrip({
     );
 
     final hoursAhead = slotHour.difference(nowHour).inHours;
-    final holdMins = snap.endMinutes ?? (snap.wetAtPinNow ? 35 : 0);
     final minsToSlotStart = slotHour.difference(locTime).inMinutes;
-    // Ďalšia hodina len ak okno zrážok do nej naozaj siaha (≥10 min).
-    final forceWetWhileRainingAtPin = snap.wetAtPinNow &&
-        hoursAhead >= 0 &&
-        hoursAhead <= 2 &&
-        holdMins > minsToSlotStart + 10;
+    final minsToSlotEnd = minsToSlotStart + 60;
 
-    if (snap.authorizesLocalHour(slotHour) || forceWetWhileRainingAtPin) {
+    // Mokrá hodina ak: autorizovaná, alebo dážď na pine ešte siaha do tej hodiny.
+    final overlapsRainWindow = rainingNow &&
+        hoursAhead >= 0 &&
+        hoursAhead <= 6 &&
+        effectiveHoldMins > minsToSlotStart + 5 &&
+        minsToSlotEnd > 0;
+
+  final approachingHitsHour = snap.approaching &&
+      hoursAhead >= 0 &&
+      hoursAhead <= 6 &&
+      (snap.etaMinutes == null ||
+          minsToSlotEnd > (snap.etaMinutes! - 10));
+
+    if (snap.authorizesLocalHour(slotHour) ||
+        overlapsRainWindow ||
+        approachingHitsHour) {
+      final radarMm = radarStripMmForHour(
+        radarCtx: radarCtx,
+        snap: snap,
+        slotHour: slotHour,
+        locTime: locTime,
+        hoursAhead: hoursAhead,
+      );
+      final certainty = radarStripCertaintyPercent(
+        rainingNow: rainingNow,
+        approaching: snap.approaching || approachingHitsHour,
+        hoursAhead: hoursAhead,
+        minsToSlotStart: minsToSlotStart,
+        etaMinutes: snap.etaMinutes,
+        endMinutes: effectiveHoldMins,
+        distanceKm: snap.distanceKmEstimate,
+        approachChancePercent: snap.approachChancePercent,
+        pinUiDbz: snap.uiDbz,
+        motionSpeedKmH: snap.motionSpeedKmH,
+      );
+      final mm = resolveRadarAuthorizedStripMm(
+        modelMm: precipMm[i],
+        radarMm: radarMm,
+        certaintyPercent: certainty,
+        hoursAhead: hoursAhead,
+      );
+      // Ikona podľa mm tej hodiny — nie jeden uiDbz na celý pás.
+      final iconDbz = radarMm >= 0.05
+          ? math.max(
+              kRainViewerLegendMinDbz,
+              // Spatná väzba dBZ≈mm: slabé mm → nižšia ikona.
+              mm >= 5
+                  ? kRainViewerLegendModerateRainDbz
+                  : (mm >= 1.2
+                      ? kRainViewerLegendLightRainDbz
+                      : (mm >= 0.35
+                          ? 30.0
+                          : kRainViewerLegendDrizzleDbz)),
+            )
+          : math.max(
+              kRainViewerLegendMinDbz,
+              (live.uiDbz > 0 ? live.uiDbz : snap.uiDbz) -
+                  4.0 * math.max(0, hoursAhead),
+            );
       final icon = _radarLivePinIconCode(
-        uiDbz: snap.uiDbz > 0 ? snap.uiDbz : kRainViewerLegendMinDbz,
-        rainViewer: snap.rainViewer,
+        uiDbz: iconDbz,
+        rainViewer: live.rainViewer || snap.rainViewer,
         tempC: h.temperature?[idx],
-        precipProb: storedProbs[i],
-        precipMm: precipMm[i],
+        precipProb: certainty,
+        precipMm: mm,
       );
-      // mm: radar len jemne doplní — neprepíše ECMWF na vysoké mm z dBZ.
-      final radarMmRaw = radarLegendMmFromDbz(
-        math.max(snap.uiDbz, kRainViewerLegendMinDbz),
-      );
-      final radarMmCapped = radarMmRaw.clamp(
-        kMeaningfulPrecipMmPerHour,
-        1.2,
-      );
-      final mm = precipMm[i] >= kMeaningfulPrecipMmPerHour
-          ? math.max(precipMm[i], math.min(radarMmCapped, precipMm[i] + 0.3))
-          : radarMmCapped;
       displayIcons[i] = hourlyStripPrecipIntensityIcon(
         baseCode: icon,
         precipMm: mm,
@@ -1496,19 +1926,13 @@ void applyRadarPrecipEndToHourlyStrip({
       );
       showRainPrecip[i] = true;
       precipMm[i] = mm;
-      final mathChance = snap.wetAtPinNow
-          ? math.max(snap.approachChancePercent, 70)
-          : math.max(snap.approachChancePercent, kMinPrecipProbPercent);
       storedProbs[i] = _roundPrecipProbabilityForDisplay(
-        math.max(
-          storedProbs[i],
-          math.max(kMinPrecipProbPercent, math.min(mathChance, 90)),
-        ),
+        math.max(storedProbs[i], certainty),
       );
       continue;
     }
 
-    // Modelová predpoveď ostáva — suchý radar ju nesmie vymazať (potvrdí až keď uvidí zrážky).
+    // Modelová predpoveď ostáva — suchý radar ju nesmie vymazať.
   }
 }
 
@@ -2691,17 +3115,17 @@ int _clampPrecipitationIconIntensity(
   return code;
 }
 
-/// Pravdepodobnosť zrážok v UI — po 10 %; **nikdy 0 %**.
-/// Jasno môže 5 %; inak min. 10 %.
+/// Pravdepodobnosť zrážok v UI — vždy po 10 %; **nikdy 0 % ani 5 %**.
+/// Jasno min. 10 %; polooblačno/zamračené suché: 20–40 podľa radaru.
 int _roundPrecipProbabilityForDisplay(int value) {
   if (value <= 0) return 10;
-  if (value < 8) return 5;
   if (value >= 100) return 100;
-  final rounded = ((value / 10.0).round() * 10).clamp(0, 100);
-  return rounded <= 0 ? 10 : rounded;
+  final rounded = ((value / 10.0).round() * 10).clamp(10, 100);
+  return rounded;
 }
 
-/// Minimálne % podľa zobrazenej oblohy — jasno 5–10, zamračené nikdy 0.
+/// Minimálne % podľa oblohy — jasno 10; polooblačno 20; zamračené 30
+/// (vyššie 40 podľa oblačnosti / API / radaru).
 int hourlyStripSkyIconPercent(int iconCode, {double? cloudCoverPercent}) {
   final sky = normalizeDisplayWeatherCode(
     _stripSkyCodeForPercent(iconCode, cloudCoverPercent: cloudCoverPercent),
@@ -2712,17 +3136,76 @@ int hourlyStripSkyIconPercent(int iconCode, {double? cloudCoverPercent}) {
     case 1:
       return 10; // Prevažne jasno
     case 2:
-      if (cloudCoverPercent != null && cloudCoverPercent < 55) {
-        return 20;
-      }
-      return 30; // Polooblačno
+      return 20; // Polooblačno
     case 3:
     case 45:
     case 48:
-      return 30; // Zamračené / hmla — nikdy 0
+      return 30; // Zamračené
     default:
       return 10;
   }
+}
+
+/// Suché polooblačno/zamračené v 24 h — len 20, 30 alebo 40.
+int hourlyStripDryCloudyPercentShown(int value) {
+  final rounded = _roundPrecipProbabilityForDisplay(value);
+  if (rounded <= 20) return 20;
+  if (rounded <= 30) return 30;
+  return 40;
+}
+
+/// Základ suchého % podľa ikony + oblačnosti + API (pod 50 %) + radaru.
+/// Polooblačno ≥ 20, zamračené ≥ 30, husté / blízky dážď → 40.
+int hourlyStripDryCloudyBasePercent({
+  required int iconCode,
+  double? cloudCoverPercent,
+  int apiProbPercent = 0,
+  int radarApproachPercent = 0,
+}) {
+  final sky = normalizeDisplayWeatherCode(
+    _stripSkyCodeForPercent(iconCode, cloudCoverPercent: cloudCoverPercent),
+  );
+
+  final overcast = sky == 3 || sky == 45 || sky == 48;
+  // Ikona: polooblačno 20, zamračené 30 — vždy rozdiel.
+  var base = overcast ? 30 : 20;
+
+  final cloud = cloudCoverPercent;
+  if (cloud != null) {
+    if (cloud >= 85) {
+      base = 40;
+    } else if (cloud >= 70) {
+      base = math.max(base, overcast ? 30 : 30);
+    } else if (cloud < 50 && !overcast) {
+      base = 20;
+    }
+  }
+
+  final api = apiProbPercent;
+  if (api >= 35) {
+    base = math.max(base, 40);
+  } else if (api >= 22) {
+    base = math.max(base, 30);
+  } else if (api >= 12 && !overcast) {
+    base = math.max(base, 20);
+  }
+
+  final radar = radarApproachPercent;
+  if (radar >= 40) {
+    base = math.max(base, 40);
+  } else if (radar >= 25) {
+    base = math.max(base, 30);
+  }
+
+  // Zamračené nikdy pod 30 (okrem cieľového 20 len pri polooblačno).
+  if (overcast) base = math.max(base, 30);
+
+  return hourlyStripDryCloudyPercentShown(base);
+}
+
+bool _isDryCloudyStripSkyCode(int iconCode) {
+  final sky = normalizeDisplayWeatherCode(iconCode);
+  return sky == 2 || sky == 3 || sky == 45 || sky == 48;
 }
 
 /// Koľko hodín od poslednej zrážkovej hodiny (ikona alebo stĺpec dažďa).
@@ -3005,16 +3488,13 @@ int hourlyPrecipProbabilityPercentShown(
 }
 
 /// Šanca zrážok pri oblačnosti bez dažďovej ikony — pre graf / denný riadok.
-/// Nikdy 0 % — jasno 10, zamračené 30.
+/// Nikdy 0 % — jasno 10; polooblačno/zamračené od 20 (radar môže 30/40 v páse).
 int skyPrecipChancePercentShown(int iconCode, {double? cloudCoverPercent}) {
   final code = normalizeDisplayWeatherCode(iconCode);
   if (cloudCoverPercent != null) {
-    if (cloudCoverPercent < 15) return 10;
-    if (cloudCoverPercent < 30) return 10;
     if (cloudCoverPercent < 50) return 10;
-    if (cloudCoverPercent < 65) return 20;
-    if (cloudCoverPercent < 80) return 30;
-    return 30;
+    if (cloudCoverPercent < 80) return 20; // polooblačno
+    return 30; // zamračené
   }
   switch (code) {
     case 0:
@@ -3025,7 +3505,7 @@ int skyPrecipChancePercentShown(int iconCode, {double? cloudCoverPercent}) {
     case 3:
     case 45:
     case 48:
-      return 30;
+      return 30; // zamračené default; pás môže 20–40
     default:
       return 10;
   }
@@ -3068,11 +3548,10 @@ int hourlyStripCloudBaselinePercent(int skyCode, {double? cloudCoverPercent}) {
     case 1:
       return 10;
     case 2:
-      return 20;
     case 3:
     case 45:
     case 48:
-      return 30;
+      return 20; // radar v páse môže zdvihnúť na 30/40
     default:
       return 0;
   }
@@ -3808,7 +4287,7 @@ int ecmwfWetHourDisplayProbPercent({
       displayIconCode,
       cloudCoverPercent: cloud,
     );
-    // Suchá ikona: pod 50 %, ale nikdy pod floor (zamračené 30, jasno 10).
+    // Suchá ikona: pod 50 %, ale nikdy pod floor (oblačno 20–40, jasno 10).
     displayProbPercent = displayProb >= kMinPrecipProbPercent
         ? skyFloor
         : math.max(displayProb, skyFloor);

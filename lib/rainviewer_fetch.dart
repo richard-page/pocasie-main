@@ -277,7 +277,7 @@ Future<List<RadarFrameSample>> fetchRainViewerFrameHistory(
   return samples.whereType<RadarFrameSample>().toList();
 }
 
-/// RainViewer nowcast — krátkodobá predpoveď pohybu zrážok (~2 h dopredu).
+/// RainViewer nowcast — pohyb zrážok (~2 h). Berieme **všetky** snímky API, nie len 5.
 Future<List<RadarFrameSample>> fetchRainViewerNowcastHistory(
   double lat,
   double lon,
@@ -285,15 +285,16 @@ Future<List<RadarFrameSample>> fetchRainViewerNowcastHistory(
   final meta = await _fetchRainViewerApiMeta();
   if (meta == null || meta.nowcastFrames.isEmpty) return const [];
 
-  const maxFrames = 5;
-  final tail = meta.nowcastFrames.length > maxFrames
-      ? meta.nowcastFrames.sublist(meta.nowcastFrames.length - maxFrames)
+  // Typicky ~12×10 min ≈ 2 h. Max 16 kvôli concurrency; od najbližšej snímky.
+  const maxFrames = 16;
+  final frames = meta.nowcastFrames.length > maxFrames
+      ? meta.nowcastFrames.sublist(0, maxFrames)
       : meta.nowcastFrames;
 
   final samples = await _mapRadarSamplesWithConcurrency<RadarFrameSample>(
-    tail.length,
+    frames.length,
     (i) async {
-      final entry = tail[i];
+      final entry = frames[i];
       final path = entry['path']?.toString();
       final time = entry['time'] is int
           ? entry['time'] as int
