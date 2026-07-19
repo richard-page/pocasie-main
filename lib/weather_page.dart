@@ -321,18 +321,25 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         currentCity?.lon,
       );
 
-  Future<void> _applySecondaryWeatherSignals({
+  Future<void> _applyRadarNowcastSignal({
     required GeoCity city,
     required int mySerial,
     required int radarSerial,
   }) async {
-    bool lightningNear = false;
-    RadarNowcastContext radarCtx = RadarNowcastContext.inactive;
-    try {
-      lightningNear = await lightningDetectedNear(city.lat, city.lon);
-    } catch (e) {
-      debugPrint('Lightning fetch failed: $e');
+    if (!radarNowcastActiveForCity(city)) {
+      if (!mounted || mySerial != _weatherFetchSerial) return;
+      if (radarSerial != _radarFetchSerial) return;
+      if (_radarNowcastContext.eligible) {
+        setState(() {
+          _radarNowcastContext = RadarNowcastContext.inactive;
+          _lastRadarContextUiApplyAt = DateTime.now();
+        });
+        _invalidateDisplayCaches();
+      }
+      return;
     }
+
+    RadarNowcastContext radarCtx = RadarNowcastContext.inactive;
     try {
       radarCtx = await _fetchRadarNowcastForCity(city);
     } catch (e) {
@@ -340,87 +347,97 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     }
     if (!mounted || mySerial != _weatherFetchSerial) return;
     if (radarSerial != _radarFetchSerial) return;
-    if (!_radarContextUiNeedsUpdate(radarCtx) &&
-        lightningNear == _lightningNearby) {
-      return;
-    }
+    if (!_radarContextUiNeedsUpdate(radarCtx)) return;
     setState(() {
-      _lightningNearby = lightningNear;
       _radarNowcastContext = radarCtx;
       _lastRadarContextUiApplyAt = DateTime.now();
     });
     _invalidateDisplayCaches();
   }
 
+  Future<void> _applyLightningSignal({
+    required GeoCity city,
+    required int mySerial,
+  }) async {
+    bool lightningNear = false;
+    try {
+      lightningNear = await lightningDetectedNear(city.lat, city.lon);
+    } catch (e) {
+      debugPrint('Lightning fetch failed: $e');
+    }
+    if (!mounted || mySerial != _weatherFetchSerial) return;
+    if (lightningNear == _lightningNearby) return;
+    setState(() => _lightningNearby = lightningNear);
+    _invalidateDisplayCaches();
+  }
+
+  /// Blesky + prípadný retry nowcastu (ak early kick ešte nedodal eligible).
   void _scheduleSecondaryWeatherSignals({
     required GeoCity city,
     required int mySerial,
     required int radarSerial,
   }) {
-    // Počkaj, kým sa UI ustáli — PNG radar + WebView naraz robili OOM na emulátore.
-    Future<void>.delayed(const Duration(seconds: 4), () {
-      if (!mounted || mySerial != _weatherFetchSerial) return;
-      unawaited(_applySecondaryWeatherSignals(
+    unawaited(_applyLightningSignal(city: city, mySerial: mySerial));
+    if (!_radarNowcastContext.eligible) {
+      unawaited(_applyRadarNowcastSignal(
         city: city,
         mySerial: mySerial,
         radarSerial: radarSerial,
       ));
-    });
+    }
+  }
+
+  /// Spusti nowcast už počas sťahovania OM — často hotový skôr / spolu s UI.
+  void _kickRadarNowcastEarly({
+    required GeoCity city,
+    required int mySerial,
+    required int radarSerial,
+  }) {
+    if (!radarNowcastActiveForCity(city)) return;
+    unawaited(_applyRadarNowcastSignal(
+      city: city,
+      mySerial: mySerial,
+      radarSerial: radarSerial,
+    ));
   }
 
   void _deferRadarSetup(GeoCity city, {bool forceReload = false}) {
-    // Pri zmene lokality vždy znova načítaj radar (inak bodka ostane na starom mieste).
+    // Pri zmene lokality precentruj (alebo reload) — bodka musí ísť na nové miesto.
     final cityChanged = _lastRadarCity == null ||
         (_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
         (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
         _lastRadarCity!.name != city.name;
     _pendingRadarForceReload = forceReload || cityChanged;
     if (!_supportsRadarForCity(city)) return;
-    // Hneď stiahni slovakia.geojson (~1 MB) — WebView to nestíha pri 10 s odklade.
+    // Hneď stiahni slovakia.geojson (~1 MB) — WebView to nestíha bez prefetchu.
     prefetchRadarMapAssets();
     _scheduleRadarWarmLoad(city);
   }
 
-  /// Spustí WebView load skoro (hranice sa sťahujú), UI panel až neskôr / po pageFinished.
+  /// Spustí WebView hneď; kým nie je karta, beží Offstage v plnej veľkosti (nie 1×1).
   void _scheduleRadarWarmLoad(GeoCity city) {
     if (!_supportsRadarForCity(city)) return;
+    _radarWarmLoadTimer?.cancel();
+    _radarWarmLoadTimer = null;
     if (_radarController != null) {
       final cityChanged = _lastRadarCity == null ||
           (_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
           (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
           _lastRadarCity!.name != city.name;
       if (_pendingRadarForceReload || cityChanged) {
+        final hardReload = _pendingRadarForceReload && !cityChanged;
+        _pendingRadarForceReload = false;
         _setupRadarController(
           city,
-          forceReload: true,
+          forceReload: hardReload,
+          preferRecenter: cityChanged && !hardReload,
         );
-        _pendingRadarForceReload = false;
       }
       return;
     }
-    if (_radarWarmLoadTimer != null) {
-      // Nová lokalita počas čakania — zruš starý timer a naplánuj znova.
-      _radarWarmLoadTimer?.cancel();
-      _radarWarmLoadTimer = null;
-    }
-    _radarWarmLoadTimer = Timer(const Duration(milliseconds: 500), () {
-      _radarWarmLoadTimer = null;
-      if (!mounted || currentCity == null) return;
-      if ((currentCity!.lat - city.lat).abs() > 0.0002 ||
-          (currentCity!.lon - city.lon).abs() > 0.0002) {
-        // Medzitým sa lokalita zmenila — načítaj aktuálnu.
-        _setupRadarController(
-          currentCity!,
-          forceReload: true,
-        );
-        _pendingRadarForceReload = false;
-        return;
-      }
-      // Načítať WebView ešte pred zobrazením panelu — stihnú sa hranice SK.
-      final force = _pendingRadarForceReload;
-      _pendingRadarForceReload = false;
-      _setupRadarController(city, forceReload: force);
-    });
+    final force = _pendingRadarForceReload;
+    _pendingRadarForceReload = false;
+    _setupRadarController(city, forceReload: force);
   }
 
   void _scheduleRadarMapUiIfNeeded(GeoCity city) {
@@ -433,35 +450,32 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
           (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
           _lastRadarCity!.name != city.name;
       if (_radarController == null || cityChanged || _pendingRadarForceReload) {
+        final hardReload = _pendingRadarForceReload && !cityChanged;
         _setupRadarController(
           city,
-          forceReload: cityChanged || _pendingRadarForceReload,
+          forceReload: hardReload || _radarController == null,
+          preferRecenter: cityChanged && _radarController != null && !hardReload,
         );
         _pendingRadarForceReload = false;
       }
       return;
     }
-    if (_radarMapUiTimer != null) {
-      _radarMapUiTimer?.cancel();
-      _radarMapUiTimer = null;
-    }
-    // Fallback ak pageFinished nestihne; hlavný reveal je v onPageFinished.
-    _radarMapUiTimer = Timer(const Duration(milliseconds: 4500), () {
-      _radarMapUiTimer = null;
-      if (!mounted || currentCity == null) return;
-      _revealRadarMapUi(currentCity!);
-    });
+    _revealRadarMapUi(city);
   }
 
   void _revealRadarMapUi(GeoCity city) {
     if (_radarMapUiReady) {
-      // Panel už beží — pri zmene mesta aj tak precentruj bodku.
       final cityChanged = _lastRadarCity == null ||
           (_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
           (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
           _lastRadarCity!.name != city.name;
       if (cityChanged || _pendingRadarForceReload) {
-        _setupRadarController(city, forceReload: true);
+        final hardReload = _pendingRadarForceReload && !cityChanged;
+        _setupRadarController(
+          city,
+          forceReload: hardReload,
+          preferRecenter: cityChanged && !hardReload,
+        );
         _pendingRadarForceReload = false;
       }
       return;
@@ -474,13 +488,31 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
         _lastRadarCity!.name != city.name;
     if (_radarController == null || cityChanged || _pendingRadarForceReload) {
+      final hardReload = _pendingRadarForceReload && !cityChanged;
       _setupRadarController(
         city,
-        forceReload: cityChanged || _pendingRadarForceReload,
+        forceReload: hardReload || _radarController == null,
+        preferRecenter: cityChanged && _radarController != null && !hardReload,
       );
     }
     _pendingRadarForceReload = false;
     if (mounted) setState(() {});
+    // Presun Offstage → karta: Mapbox potrebuje resize, inak ostane prázdny.
+    final ctrl = _radarController;
+    if (ctrl != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _radarController != ctrl) return;
+        unawaited(ctrl.runJavaScript('''
+          (function(){
+            try {
+              document.documentElement.classList.add('hide-ui');
+              if (typeof map !== 'undefined' && map && map.resize) map.resize();
+              window.dispatchEvent(new Event('resize'));
+            } catch (e) {}
+          })();
+        '''));
+      });
+    }
   }
 
   void _ensureRadarMapUiNow(GeoCity city, {bool forceReload = false}) {
@@ -495,15 +527,173 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     _pendingRadarForceReload = false;
   }
 
-  /// 1×1 Offstage host — WebView musí byť v strome, inak sa slovakia.geojson nenačíta.
+  void _markRadarContentReady() {
+    _radarContentReadyTimer?.cancel();
+    _radarContentReadyTimer = null;
+    if (!mounted) {
+      _radarContentReady = true;
+      _isRadarLoading = false;
+      _radarMapUiReady = true;
+      return;
+    }
+    if (_radarContentReady && !_isRadarLoading && _radarMapUiReady) return;
+    setState(() {
+      _radarContentReady = true;
+      _isRadarLoading = false;
+      _radarLoadFailed = false;
+      _radarMapUiReady = true;
+    });
+  }
+
+  /// Max čakanie na komplet radar — potom ukáž čo je (staršie zariadenia).
+  void _armRadarContentReadyFallback() {
+    _radarContentReadyTimer?.cancel();
+    _radarContentReadyTimer = Timer(const Duration(milliseconds: 4500), () {
+      _radarContentReadyTimer = null;
+      if (!mounted || _radarContentReady) return;
+      _markRadarContentReady();
+    });
+  }
+
+  /// Spinner kým mapa + hranice + zrážky; max ~4 s. Mapa v WebView skrytá, kým nie je ready.
+  static const String _kRadarReadyGateJs = r'''
+(function() {
+  try {
+    document.documentElement.classList.add('hide-ui');
+    document.documentElement.classList.remove('radar-layers-ready');
+    var chrome = document.getElementById('app-radar-chrome');
+    if (chrome) chrome.remove();
+    if (!document.getElementById('app-radar-gate')) {
+      var s = document.createElement('style');
+      s.id = 'app-radar-gate';
+      s.textContent =
+        'html.hide-ui .legend-panel,html.hide-ui .controls-wrapper,' +
+        'html.hide-ui .settings-btn,html.hide-ui .settings-menu,' +
+        'html.hide-ui #radarLegendImg{display:none!important;opacity:0!important;visibility:hidden!important;}' +
+        '#mapa{opacity:0!important;transition:none!important;}' +
+        'html.radar-layers-ready #mapa{opacity:1!important;}';
+      (document.head || document.documentElement).appendChild(s);
+    }
+    var loader = document.getElementById('loader-wrapper');
+    if (loader) {
+      loader.style.display = 'none';
+      loader.style.opacity = '0';
+      loader.style.visibility = 'hidden';
+    }
+    if (window.ukazLoader) window.ukazLoader = function(){};
+    if (window.skryLoader) window.skryLoader = function(){};
+
+    if (window.__radarReadyArmed) return;
+    window.__radarReadyArmed = true;
+    var done = false;
+    function finish() {
+      if (done) return;
+      done = true;
+      document.documentElement.classList.add('hide-ui');
+      document.documentElement.classList.add('radar-layers-ready');
+      try {
+        if (typeof map !== 'undefined' && map && map.resize) map.resize();
+      } catch (e) {}
+      try {
+        if (window.RadarReady && RadarReady.postMessage) RadarReady.postMessage('1');
+      } catch (e) {}
+    }
+    function sourceOk(id) {
+      try {
+        if (!map.getSource(id)) return false;
+        if (map.isSourceLoaded) return map.isSourceLoaded(id);
+        return true;
+      } catch (e) {
+        return !!map.getSource(id);
+      }
+    }
+    function layersReady() {
+      try {
+        if (typeof map === 'undefined' || !map) return false;
+        if (typeof mapLoaded !== 'undefined' && !mapLoaded) return false;
+        if (!sourceOk('sk-borders')) return false;
+        if (sourceOk('radar-source-0') || sourceOk('coverage-source')) return true;
+        return false;
+      } catch (e) { return false; }
+    }
+    var n = 0;
+    var t = setInterval(function() {
+      n++;
+      if (layersReady()) {
+        clearInterval(t);
+        // Krátky tick na vykreslenie — nie čakanie na idle (to na starých zariadeniach trvá dlho).
+        setTimeout(finish, 120);
+      } else if (n > 40) {
+        // ~4 s strop
+        clearInterval(t);
+        finish();
+      }
+    }, 100);
+  } catch (e) {
+    try {
+      document.documentElement.classList.add('radar-layers-ready');
+      if (window.RadarReady && RadarReady.postMessage) RadarReady.postMessage('1');
+    } catch (e2) {}
+  }
+})();
+''';
+
+  String _radarRecenterJs(GeoCity city) {
+    return '''
+(function() {
+  try {
+    document.documentElement.classList.add('hide-ui');
+    document.documentElement.classList.add('radar-layers-ready');
+    var lat = ${city.lat};
+    var lon = ${city.lon};
+    var z = (typeof requestedZoom !== 'undefined' && !isNaN(requestedZoom)) ? requestedZoom : 7;
+    if (typeof map !== 'undefined' && map) {
+      map.jumpTo({ center: [lon, lat], zoom: z });
+      map.resize();
+      if (typeof userMarker !== 'undefined' && userMarker) {
+        userMarker.setLngLat([lon, lat]);
+      } else if (typeof mapboxgl !== 'undefined') {
+        var el = document.createElement('div');
+        el.className = 'location-dot';
+        userMarker = new mapboxgl.Marker(el).setLngLat([lon, lat]).addTo(map);
+      }
+    }
+  } catch (e) {}
+})();
+''';
+  }
+
+  Future<void> _injectRadarReadyGate() async {
+    final ctrl = _radarController;
+    if (ctrl == null) return;
+    try {
+      await ctrl.runJavaScript(_kRadarReadyGateJs);
+    } catch (_) {}
+  }
+
+  Future<void> _recenterRadarOnCity(GeoCity city) async {
+    final ctrl = _radarController;
+    if (ctrl == null) return;
+    _lastRadarCity = city;
+    try {
+      await ctrl.runJavaScript(_radarRecenterJs(city));
+    } catch (_) {
+      if (!mounted) return;
+      _setupRadarController(city, forceReload: true);
+    }
+  }
+
+  /// Offstage host v plnej veľkosti karty — 1×1 lámalo Mapbox tiles / geojson timing.
   Widget _buildRadarWarmupHost() {
     if (_radarMapUiReady || _radarWebViewWidget == null) {
       return const SizedBox.shrink();
     }
+    final w = MediaQuery.sizeOf(context).width;
     return Offstage(
+      offstage: true,
       child: SizedBox(
-        width: 1,
-        height: 1,
+        width: w > 0 ? w : 360,
+        height: 220,
         child: _radarWebViewWidget!,
       ),
     );
@@ -538,8 +728,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   GeoCity? _lastRadarCity;
   bool _pendingRadarForceReload = false;
   bool _radarMapUiReady = false;
+  /// Mapa + geojson + zrážky pripravené (Flutter overlay sa skryje až potom).
+  bool _radarContentReady = false;
   Timer? _radarMapUiTimer;
   Timer? _radarWarmLoadTimer;
+  Timer? _radarContentReadyTimer;
   bool _isRadarFullscreen = false; 
   bool _isRadarReturning = false;
   bool _isRadarLoading = false;
@@ -669,6 +862,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     _radarConnectivityTimer?.cancel();
     _radarMapUiTimer?.cancel();
     _radarWarmLoadTimer?.cancel();
+    _radarContentReadyTimer?.cancel();
     VystrahyWebViewPreloader.instance.cancelScheduledWarmup();
     super.dispose();
   }
@@ -745,7 +939,12 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     }
   }
 
-  void _setupRadarController(GeoCity city, {bool forceReload = false}) {
+  void _setupRadarController(
+    GeoCity city, {
+    bool forceReload = false,
+    bool preferRecenter = false,
+    bool cacheBust = false,
+  }) {
     if (!_supportsRadarForCity(city)) {
       return;
     }
@@ -754,9 +953,20 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
         _lastRadarCity!.name != city.name;
 
+    // Zmena lokality: skôr jumpTo + marker — mapa/hranice/zrážky ostanú, bez blank reloadu.
+    if (_radarController != null &&
+        preferRecenter &&
+        hasCityChanged &&
+        !forceReload &&
+        _radarContentReady &&
+        !_radarLoadFailed) {
+      unawaited(_recenterRadarOnCity(city));
+      return;
+    }
+
     if (_radarController == null || hasCityChanged || forceReload) {
       _lastRadarCity = city;
-      final url = _buildRadarUrl(city);
+      final url = _buildRadarUrl(city, cacheBust: cacheBust);
 
       if (_radarController == null) {
         late final PlatformWebViewControllerCreationParams params;
@@ -768,59 +978,58 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         _radarController = WebViewController.fromPlatformCreationParams(params)
           ..setJavaScriptMode(JavaScriptMode.unrestricted)
           ..setBackgroundColor(kAmbientBlendColor)
+          ..addJavaScriptChannel(
+            'RadarReady',
+            onMessageReceived: (JavaScriptMessage message) {
+              _markRadarContentReady();
+            },
+          )
           ..setNavigationDelegate(
             NavigationDelegate(
               onPageStarted: (String url) {
                 _radarLoadTimeoutTimer?.cancel();
+                _radarContentReady = false;
                 if (mounted) {
                   setState(() {
                     _isRadarLoading = true;
                     _radarLoadFailed = false;
+                    _radarContentReady = false;
                   });
                 } else {
                   _isRadarLoading = true;
                   _radarLoadFailed = false;
                 }
+                _armRadarContentReadyFallback();
                 _radarLoadTimeoutTimer = Timer(const Duration(seconds: 12), () {
-                  if (!_isRadarLoading) return;
+                  if (!_isRadarLoading && _radarContentReady) return;
+                  if (_radarContentReady) return;
                   _handleRadarLoadFailure(autoRetry: true);
                 });
               },
               onPageFinished: (String url) {
                 _radarLoadTimeoutTimer?.cancel();
                 _radarAutoRetryCount = 0;
-                if (mounted) {
-                  setState(() {
-                    _isRadarLoading = false;
-                    _radarLoadFailed = false;
-                    _radarOffline = false;
-                  });
-                } else {
-                  _isRadarLoading = false;
-                  _radarLoadFailed = false;
-                  _radarOffline = false;
-                }
-                // Vzdialený radar HTML má vlastný loader; po načítaní ho vždy skryjeme.
-                unawaited(_radarController!.runJavaScript('''
-                  (function() {
-                    var loader = document.getElementById('loader-wrapper');
-                    if (loader) {
-                      loader.style.display = 'none';
-                      loader.style.opacity = '0';
-                      loader.style.visibility = 'hidden';
-                    }
-                    if (window.ukazLoader) window.ukazLoader = function(){};
-                    if (window.skryLoader) window.skryLoader = function(){};
-                  })();
-                '''));
+                _radarOffline = false;
+                // Gate čaká na mapa+hranice+zrážky; neoznačovať ready hneď po HTML.
+                unawaited(_injectRadarReadyGate());
                 if (mounted && _isRadarFullscreen) {
                   _radarController!.runJavaScript(
                       'if(window.setFullscreen) window.setFullscreen(true); else window.dispatchEvent(new Event("resize"));');
                 }
-                // Po warm loade ukáž panel hneď — hranice SK už bežia / sú hotové.
                 if (mounted && !_radarMapUiReady && currentCity != null) {
                   _revealRadarMapUi(currentCity!);
                 }
+                unawaited(_radarController!.runJavaScript('''
+                  (function(){
+                    try {
+                      document.documentElement.classList.add('hide-ui');
+                      if (typeof map !== 'undefined' && map && map.resize) {
+                        map.resize();
+                      }
+                      window.dispatchEvent(new Event('resize'));
+                    } catch (e) {}
+                  })();
+                '''));
               },
               onWebResourceError: (WebResourceError error) {
                 // Neobnovuj celý radar pri chybe čiastkového assetu (tile/img/js) —
@@ -848,25 +1057,33 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         setState(() {
           _isRadarLoading = true;
           _radarLoadFailed = false;
+          _radarContentReady = false;
         });
       } else {
         _isRadarLoading = true;
         _radarLoadFailed = false;
+        _radarContentReady = false;
       }
-      // Offstage host sa pripojí až po frame — load až potom, inak WebView nestiahne geojson.
+      _armRadarContentReadyFallback();
+      // Load po frame — WebView musí byť v strome (plná karta), inak Mapbox/geojson nestihnú.
       final loadUrl = url;
       final ctrl = _radarController!;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || _radarController != ctrl) return;
+        // Nový document = znova arm gate.
+        unawaited(ctrl.runJavaScript('window.__radarReadyArmed = false;').catchError((_) {}));
         ctrl.loadRequest(Uri.parse(loadUrl));
       });
     }
   }
 
-  String _buildRadarUrl(GeoCity city) => buildMeteoRadarUrl(city);
+  String _buildRadarUrl(GeoCity city, {bool cacheBust = false}) =>
+      buildMeteoRadarUrl(city, cacheBust: cacheBust);
 
   void _handleRadarLoadFailure({required bool autoRetry}) {
     _radarLoadTimeoutTimer?.cancel();
+    _radarContentReadyTimer?.cancel();
+    _radarContentReadyTimer = null;
     if (mounted) {
       setState(() {
         _isRadarLoading = false;
@@ -900,12 +1117,17 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         });
         return;
       }
-      final retryUrl = _buildRadarUrl(_lastRadarCity!);
+      final retryUrl = _buildRadarUrl(_lastRadarCity!, cacheBust: true);
       setState(() {
         _isRadarLoading = true;
         _radarLoadFailed = false;
         _radarOffline = false;
+        _radarContentReady = false;
       });
+      _armRadarContentReadyFallback();
+      unawaited(_radarController!
+          .runJavaScript('window.__radarReadyArmed = false;')
+          .catchError((_) {}));
       _radarController!.loadRequest(Uri.parse(retryUrl));
     });
   }
@@ -937,12 +1159,17 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         // Internet sa vrátil — automaticky obnov radar.
         _radarAutoRetryCount = 0;
         if (_radarController != null && _lastRadarCity != null) {
-          final retryUrl = _buildRadarUrl(_lastRadarCity!);
+          final retryUrl = _buildRadarUrl(_lastRadarCity!, cacheBust: true);
           setState(() {
             _isRadarLoading = true;
             _radarLoadFailed = false;
             _radarOffline = false;
+            _radarContentReady = false;
           });
+          _armRadarContentReadyFallback();
+          unawaited(_radarController!
+              .runJavaScript('window.__radarReadyArmed = false;')
+              .catchError((_) {}));
           _radarController!.loadRequest(Uri.parse(retryUrl));
         }
       }
@@ -964,12 +1191,17 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       });
       return;
     }
-    final retryUrl = _buildRadarUrl(_lastRadarCity!);
+    final retryUrl = _buildRadarUrl(_lastRadarCity!, cacheBust: true);
     setState(() {
       _isRadarLoading = true;
       _radarLoadFailed = false;
       _radarOffline = false;
+      _radarContentReady = false;
     });
+    _armRadarContentReadyFallback();
+    unawaited(_radarController!
+        .runJavaScript('window.__radarReadyArmed = false;')
+        .catchError((_) {}));
     _radarController!.loadRequest(Uri.parse(retryUrl));
   }
 
@@ -1391,15 +1623,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   }
 
   Future<RadarNowcastContext> _fetchRadarNowcastForCity(GeoCity city) async {
-    if (_radarController != null && !_radarLoadFailed) {
-      try {
-        final webCtx =
-            await fetchRadarNowcastViaWebView(_radarController!, city);
-        if (webCtx.eligible) return webCtx;
-      } catch (e) {
-        debugPrint('_fetchRadarNowcastForCity web: $e');
-      }
-    }
+    // Priamo RainViewer/Helkor API — WebView mapu nečakáme (iba by oneskorilo ikony).
     return fetchRadarNowcastContextForCity(city);
   }
 
@@ -1518,6 +1742,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       );
       final aqiFuture = _fetchAirQualityData(citySnap.lat, citySnap.lon, forceRefresh: false);
       final int radarSerial = ++_radarFetchSerial;
+      _kickRadarNowcastEarly(
+        city: citySnap,
+        mySerial: mySerial,
+        radarSerial: radarSerial,
+      );
 
       final data = await weatherFuture;
 
@@ -2633,7 +2862,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         _radarNowcastContext = RadarNowcastContext.inactive;
         resetRadarTrackerStabilizer();
         _invalidateDisplayCaches();
-        _radarMapUiReady = false;
+        // Radar panel neskryvať — precentruj/reload pod overlay, bez blank boxu.
         _radarMapUiTimer?.cancel();
         _radarMapUiTimer = null;
       }
@@ -2655,6 +2884,14 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 
     _deferRadarSetup(city, forceReload: wasOffline || locationChanged);
     _syncVystrahyPreloaderForCity(city);
+
+    // Nowcast hneď paralelne s OM — nie až po počasí + 4 s.
+    final int radarSerial = ++_radarFetchSerial;
+    _kickRadarNowcastEarly(
+      city: city,
+      mySerial: mySerial,
+      radarSerial: radarSerial,
+    );
 
     try {
       late WeatherData data;
@@ -2682,7 +2919,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         city.lon,
         forceRefresh: false,
       );
-      final int radarSerial = ++_radarFetchSerial;
 
       AirQualityData? aqiData;
       try {
@@ -4243,42 +4479,49 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                   ],
                 ),
               ),
-            if (_isRadarLoading && !_isRadarReturning && !_radarLoadFailed)
-              const Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.1,
-                      color: Color(0xFF7CC7FF),
-                    ),
-                  ),
-                  SizedBox(height: 10),
-                  Text(
-                    'Načítavam radar...',
-                    style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
             if (!_isRadarFullscreen &&
                 _radarWebViewWidget != null &&
                 _radarMapUiReady)
-              AnimatedOpacity(
-                opacity: _isRadarReturning ? 0.0 : 1.0,
-                duration: const Duration(milliseconds: 200),
-                child: IgnorePointer(
-                  child: _radarWebViewWidget!,
-                ),
+              IgnorePointer(
+                child: _radarWebViewWidget!,
               )
             else if (!_isRadarReturning)
-              // Pokiaľ warm load beží v Offstage, tu len placeholder farba.
               Container(color: kAmbientBlendColor),
+            // Plný overlay so spinnerom, kým nie je kompletný radar (mapa+hranice+zrážky).
+            if (!_isRadarReturning &&
+                !_radarLoadFailed &&
+                (_isRadarLoading ||
+                    !_radarContentReady ||
+                    _radarWebViewWidget == null))
+              const Positioned.fill(
+                child: ColoredBox(
+                  color: kAmbientBlendColor,
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.1,
+                            color: Color(0xFF7CC7FF),
+                          ),
+                        ),
+                        SizedBox(height: 10),
+                        Text(
+                          'Načítavam radar...',
+                          style: TextStyle(
+                            color: Colors.white70,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             Positioned.fill(
               child: GestureDetector(
                 onTap: () => unawaited(_openRadarFullscreen()),
@@ -4775,6 +5018,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       lightningNearby: _lightningNearby,
       lightningHourIndex: curIdx,
       utcOffsetSeconds: weatherData?.utcOffsetSeconds,
+      radarCtx: _radarNowcastContext,
+      locTime: locTime,
     );
     applyHourlyStripPrecipPercentRamp(
       displayIcons: displayIcons,
@@ -4844,6 +5089,19 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       locTime: locTime,
       slotHours: stripSlotHours,
     );
+    // Nowcast má posledné slovo — model po align/thunder nesmie nechať falošnú ikonu.
+    applyRadarPrecipEndToHourlyStrip(
+      displayIcons: displayIcons,
+      showRainPrecip: stripShowRainPrecip,
+      storedProbs: stripStoredProbs,
+      precipMm: stripPrecipMm,
+      stripIndices: stripIndices,
+      h: h,
+      radarCtx: _radarNowcastContext,
+      locTime: locTime,
+      utcOffsetSeconds: utcOff,
+      radarCoverageActive: radarCoverageActive,
+    );
     clampNearTermStripPercentsWithoutRadar(
       displayIcons: displayIcons,
       showRainPrecip: stripShowRainPrecip,
@@ -4871,6 +5129,12 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       storedProbs: stripStoredProbs,
       stripIndices: stripIndices,
       h: h,
+      rainHoursBeforeStrip: _openMeteoUiPrecipHoursBeforeStrip(
+        h: h,
+        firstStripDataIndex: stripIndices.isEmpty ? 0 : stripIndices.first,
+      ),
+      radarCtx: _radarNowcastContext,
+      locTime: locTime,
     );
 
     return SliverPadding(
@@ -5843,9 +6107,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         precipMm: math.max(0.5, showablePrecip.sumMm),
         precipProb: math.max(60, showablePrecip.maxProb),
       );
-      liveIcon = capPrecipIconByTrustedMm(
-        liveIcon,
-        trustedMm: math.max(rawApiDailyPrecip, effectiveDailyPrecipMm),
+      liveIcon = capRadarPrecipIconNoHeavy(
+        capPrecipIconByTrustedMm(
+          liveIcon,
+          trustedMm: math.max(rawApiDailyPrecip, effectiveDailyPrecipMm),
+        ),
       );
       final hour = locTime.hour;
       final livePart = (hour >= 6 && hour < 12)
@@ -6395,7 +6661,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
               ),
             ),
           ),
-          // Skrytý 1×1 WebView — radar (hranice SK) skôr, než je karta v strome.
+          // Skrytý WebView v plnej veľkosti karty — radar (mapa+hranice) skôr, než je karta v strome.
           if (_supportsRadarForCity(currentCity)) _buildRadarWarmupHost(),
           // Skrytý 1×1 WebView — prednačíta mapu výstrah na pozadí (po scheduleWarmup).
           if (_supportsVystrahyForCity(currentCity))

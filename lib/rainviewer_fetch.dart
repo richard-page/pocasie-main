@@ -104,15 +104,14 @@ bool rainViewerSnowLikely({
       uiDbz >= kRainViewerLegendMinDbz;
 }
 
+/// Max mierny dážď/sneh — radar nikdy nedá silnú ikonu (65 / 75).
 int wmoFromRainViewerDbz(double dbz, {required bool snow}) {
   if (snow) {
-    if (dbz >= kRainViewerLegendHeavySnowDbz) return 75;
     if (dbz >= kRainViewerLegendModerateSnowDbz) return 73;
     if (dbz >= kRainViewerLegendLightSnowDbz) return 71;
     if (dbz >= kRainViewerLegendMinDbz) return 51;
     return 51;
   }
-  if (dbz >= kRainViewerLegendHeavyRainDbz) return 65;
   if (dbz >= kRainViewerLegendModerateRainDbz) return 63;
   if (dbz >= kRainViewerLegendLightRainDbz) return 61;
   if (dbz >= kRainViewerLegendDrizzleDbz) return 53;

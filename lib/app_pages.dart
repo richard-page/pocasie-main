@@ -2923,8 +2923,20 @@ class _CitySearchPageState extends State<CitySearchPage> {
     if (r.statusCode != 200) return [];
     final data = json.decode(r.body);
     final raw = (data['results'] as List?) ?? [];
-    final filteredRaw = _filterGhostGeocodeRows(raw);
+    final filteredRaw = _filterGhostGeocodeRows(raw)
+        .where(_isSettlementGeocodeRow)
+        .toList();
     return filteredRaw.map((e) => GeoCity.fromGeoJson(e)).toList();
+  }
+
+  /// Len sídla (PPL*) — nie letiská (AIRP/AIRB), stanice, vrchy atď.
+  /// Inak sa v zozname opakuje napr. „Malacky“ ako mesto + letecká základňa.
+  bool _isSettlementGeocodeRow(Map<String, dynamic> e) {
+    final code = (e['feature_code'] ?? '').toString().trim().toUpperCase();
+    if (code.isEmpty) return true; // staršie / neúplné riadky necháme
+    if (code.startsWith('PPL')) return true; // PPL, PPLA, PPLA2, PPLC, PPLX…
+    if (code == 'STLMT') return true;
+    return false;
   }
 
   Future<List<GeoCity>> _searchNominatim(String q) async {
@@ -3003,6 +3015,16 @@ class _CitySearchPageState extends State<CitySearchPage> {
   }
 
   bool _nominatimRowIsPlace(Map<String, dynamic> item) {
+    final clazz = (item['class'] ?? '').toString();
+    final type = (item['type'] ?? '').toString();
+    // Letiská / základne majú často display name ako mesto → duplicita vo výsledkoch.
+    if (clazz == 'aeroway' ||
+        type == 'aerodrome' ||
+        type == 'military' ||
+        type.contains('airport')) {
+      return false;
+    }
+
     final addresstype = (item['addresstype'] ?? '').toString();
     const ok = {
       'city',
@@ -3015,7 +3037,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
       'administrative',
     };
     if (ok.contains(addresstype)) return true;
-    return (item['class'] ?? '').toString() == 'place';
+    return clazz == 'place';
   }
 
   void _onChanged() {
@@ -3049,17 +3071,17 @@ class _CitySearchPageState extends State<CitySearchPage> {
     ].join('|');
   }
 
-  /// Druhý stupeň deduplikácie pre API varianty typu `Plzeň` vs `Plzen`:
-  /// rovnaký názov (bez diakritiky), rovnaký kraj/štát a takmer rovnaké súradnice.
+  /// Druhý stupeň: rovnaký názov + krajina v blízkosti (~15 km) → jedna položka
+  /// (Open-Meteo + Nominatim, alebo mesto vs. „duch“ so slabšími dátami).
   List<GeoCity> _mergeNearDuplicateCities(List<GeoCity> input) {
-    const double maxLatDiff = 0.08; // ~9 km — rovnaké mesto z dvoch API
-    const double maxLonDiff = 0.08;
+    const double maxLatDiff = 0.14; // ~15 km
+    const double maxLonDiff = 0.14;
 
+    // Zoskup podľa názvu + štátu (admin1 môže líšiť: okres vs kraj, voj. obvod…).
     final Map<String, List<GeoCity>> groups = <String, List<GeoCity>>{};
     for (final c in input) {
       final key = [
         _normalizeSearchPart(c.name),
-        _normalizeAdminRegion(c.admin1),
         _normalizeSearchPart(c.countryCode),
       ].join('|');
       groups.putIfAbsent(key, () => <GeoCity>[]).add(c);
@@ -3067,26 +3089,25 @@ class _CitySearchPageState extends State<CitySearchPage> {
 
     final List<GeoCity> out = <GeoCity>[];
     for (final group in groups.values) {
-      GeoCity? selected;
+      final clusters = <GeoCity>[];
       for (final c in group) {
-        if (selected == null) {
-          selected = c;
-          continue;
+        var mergedIntoCluster = false;
+        for (var i = 0; i < clusters.length; i++) {
+          final selected = clusters[i];
+          final isNear = (selected.lat - c.lat).abs() <= maxLatDiff &&
+              (selected.lon - c.lon).abs() <= maxLonDiff;
+          if (!isNear) continue;
+          if (_preferSearchCity(c, selected)) {
+            clusters[i] = _enrichCityRegion(c, selected);
+          } else {
+            clusters[i] = _enrichCityRegion(selected, c);
+          }
+          mergedIntoCluster = true;
+          break;
         }
-        final isNear = (selected.lat - c.lat).abs() <= maxLatDiff &&
-            (selected.lon - c.lon).abs() <= maxLonDiff;
-        if (!isNear) {
-          out.add(c);
-          continue;
-        }
-
-        if (_preferSearchCity(c, selected)) {
-          selected = _enrichCityRegion(c, selected);
-        } else {
-          selected = _enrichCityRegion(selected, c);
-        }
+        if (!mergedIntoCluster) clusters.add(c);
       }
-      if (selected != null) out.add(selected);
+      out.addAll(clusters);
     }
     return out;
   }
@@ -3771,6 +3792,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     if (controller.platform is AndroidWebViewController) {
       final androidCtrl = controller.platform as AndroidWebViewController;
       await androidCtrl.setMixedContentMode(MixedContentMode.alwaysAllow);
+      await _disableVystrahyAndroidScrollbars(androidCtrl);
     }
 
     _controller = controller;
@@ -3781,9 +3803,24 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     );
   }
 
+  Future<void> _disableVystrahyAndroidScrollbars([
+    AndroidWebViewController? androidCtrl,
+  ]) async {
+    final ctrl = androidCtrl ??
+        (_controller?.platform is AndroidWebViewController
+            ? _controller!.platform as AndroidWebViewController
+            : null);
+    if (ctrl == null) return;
+    try {
+      await ctrl.setVerticalScrollBarEnabled(false);
+      await ctrl.setHorizontalScrollBarEnabled(false);
+    } catch (_) {}
+  }
+
   Future<void> _injectMapResize() async {
     final c = _controller;
     if (c == null) return;
+    await _disableVystrahyAndroidScrollbars();
     try {
       await c.runJavaScript(_kVystrahyMobileInjectJs);
     } catch (_) {}
@@ -4017,6 +4054,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   }
 
   void prepareForDisplay() {
+    unawaited(_disableVystrahyAndroidScrollbars());
     unawaited(scrollToTop());
     refreshMapLayout();
     unawaited(_injectLocationMarker());
@@ -4273,6 +4311,21 @@ const String _kVystrahyMobileInjectJs = r'''
   document.body.style.minHeight = '100%';
   document.body.style.webkitTextSizeAdjust = '100%';
   document.body.style.touchAction = 'manipulation';
+
+  // Skryť scrollbar pri scrollovaní (WebView + stránka).
+  (function hideScrollbars() {
+    var style = document.getElementById('pocasie-hide-scrollbar');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'pocasie-hide-scrollbar';
+      document.head.appendChild(style);
+    }
+    style.textContent =
+      'html,body{scrollbar-width:none!important;-ms-overflow-style:none!important;}' +
+      'html::-webkit-scrollbar,body::-webkit-scrollbar,' +
+      '*::-webkit-scrollbar{width:0!important;height:0!important;display:none!important;background:transparent!important;}' +
+      '.leaflet-container::-webkit-scrollbar{width:0!important;height:0!important;display:none!important;}';
+  })();
 
   function hookMapCapture() {
     if (!window.L || !L.Map || window.__pocasieMapProtoHooked) return;

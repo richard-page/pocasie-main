@@ -972,11 +972,19 @@ int _weatherIconCodeWithPrecipThreshold(
     );
     // Intenzita len ak po radare ostala zrážková ikona (nie keď bunka odišla).
     if (kPrecipitationCodes.contains(normalizeDisplayWeatherCode(code))) {
+      final radarActive =
+          radarCoverageActive || radarNowcast.eligible;
+      final fromRadar = radarLivePinUi(radarNowcast).wetAtPin;
       code = hourlyStripPrecipIntensityIcon(
         baseCode: code,
         precipMm: math.max(mm, slot.precipMm),
         tempC: h.temperature?[idx] ?? current?.temperature,
+        allowHeavy: !radarActive && !fromRadar,
       );
+      // Pri radare nikdy rain.svg / snow.svg — aj keď model hlási 65.
+      if (radarActive || fromRadar) {
+        code = capRadarPrecipIconNoHeavy(code);
+      }
     }
     return (code: code, hourIso: h.time[idx]);
   }
@@ -1028,11 +1036,18 @@ int _weatherIconCodeWithPrecipThreshold(
       radarCoverageActive: radarCoverageActive,
     );
     if (kPrecipitationCodes.contains(normalizeDisplayWeatherCode(code))) {
+      final radarActive =
+          radarCoverageActive || radarNowcast.eligible;
+      final fromRadar = radarLivePinUi(radarNowcast).wetAtPin;
       code = hourlyStripPrecipIntensityIcon(
         baseCode: code,
         precipMm: mm,
         tempC: current.temperature,
+        allowHeavy: !radarActive && !fromRadar,
       );
+      if (radarActive || fromRadar) {
+        code = capRadarPrecipIconNoHeavy(code);
+      }
     }
     final hourIso = current.time?.toIso8601String();
     return (code: code, hourIso: hourIso);
@@ -1202,6 +1217,8 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
     lightningNearby: lightningNearby,
     lightningHourIndex: curIdx,
     utcOffsetSeconds: utcOffsetSeconds,
+    radarCtx: radarNowcast,
+    locTime: locTime,
   );
   applyHourlyStripPrecipPercentRamp(
     displayIcons: displayIcons,
@@ -1213,6 +1230,18 @@ HourlyStripDisplayState? _hourlyStripFinalDisplayState(
     locTime: locTime,
     utcOffsetSeconds: utcOffsetSeconds,
     radarCtx: radarNowcast,
+  );
+  applyRadarPrecipEndToHourlyStrip(
+    displayIcons: displayIcons,
+    showRainPrecip: showRainPrecip,
+    storedProbs: storedProbs,
+    precipMm: precipMmList,
+    stripIndices: stripIndices,
+    h: h,
+    radarCtx: radarNowcast,
+    locTime: locTime,
+    utcOffsetSeconds: utcOffsetSeconds,
+    radarCoverageActive: radarCoverageActive,
   );
 
   final icons = <int, int>{};

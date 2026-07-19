@@ -141,9 +141,9 @@ class RadarFrameSample {
 enum RadarPrecipTrackerPhase { idle, loading, watching, active, incoming }
 
 const String kRadarTrackerCardTitle = 'Sledovač radaru';
-/// Horizont textu sledovača + pás 24 h — radar nowcast má zmysel cca do 4 h
-/// (RainViewer snímky ~2 h; 2–4 h = trajektória/ETA, ďalej už len model).
-const int kRadarTrackerHorizonHours = 4;
+/// Horizont textu sledovača + pás 24 h — radar nowcast má zmysel cca do 5 h
+/// (RainViewer snímky ~2 h; 2–5 h = trajektória/ETA, ďalej už len model).
+const int kRadarTrackerHorizonHours = 5;
 /// Alias — rovnaký strop pre zrážkové ikony v pásme 24 h.
 const int kRadarNowcastStripHorizonHours = kRadarTrackerHorizonHours;
 const String kRadarTrackerDryHorizonDetail =
@@ -1326,7 +1326,7 @@ RadarPinForecastSnapshot buildRadarPinForecastSnapshot({
   var nearTermEnd = windowEnd != null
       ? _flatHourFloor(locNow.add(Duration(minutes: windowEnd)))
           .add(const Duration(hours: 1))
-      : nowHour.add(const Duration(hours: 4));
+      : nowHour.add(const Duration(hours: kRadarTrackerHorizonHours));
   // Nowcast mokré hodiny (aj za medzerou) nesmú vypadnúť z filtra.
   if (lastNowcastWetHour != null) {
     final fromFrames = lastNowcastWetHour.add(const Duration(hours: 1));
@@ -1334,7 +1334,10 @@ RadarPinForecastSnapshot buildRadarPinForecastSnapshot({
   }
   // Dlhá bunka / multi-cell nowcast — až 6 h.
   final longHold = (endMins ?? 0) >= 70 || lastNowcastWetHour != null;
-  final hardCapHours = (wetAtPin && longHold) || lastNowcastWetHour != null ? 6 : 4;
+  final hardCapHours =
+      (wetAtPin && longHold) || lastNowcastWetHour != null
+          ? 6
+          : kRadarTrackerHorizonHours;
   final hardCap = nowHour.add(Duration(hours: hardCapHours));
   final cappedEnd = nearTermEnd.isAfter(hardCap) ? hardCap : nearTermEnd;
   // Inkluzívny koniec: hodina, ktorá sa ešte prekrýva s oknom, musí ostať.
@@ -1622,10 +1625,10 @@ class RadarNowcastContext {
     return nowHour.add(const Duration(hours: kRadarNowcastStripHorizonHours));
   }
 
-  /// Zrážková ikona v pásme podľa nowcastu (do 4 h):
+  /// Zrážková ikona v pásme podľa nowcastu (do 5 h):
   /// - aktuálna hodina = živý pin
   /// - v okne RV snímkov (~2 h) = len mokrý pixel na pine v tej hodine
-  /// - za snímkami do 4 h = trajektória (pinForecast)
+  /// - za snímkami do 5 h = trajektória (pinForecast)
   bool nowcastAuthorizesStripPrecipHour(DateTime slotHour, DateTime locNow) {
     final nowHour = _localHourFloor(locNow);
     final slot = _localHourFloor(slotHour);
@@ -1643,7 +1646,7 @@ class RadarNowcastContext {
       final cov = rainViewerNowcastCoverageEndExclusive(locNow);
       // V okne snímkov: suchá snímka = suchá hodina (nič nevymýšľať).
       if (cov != null && slot.isBefore(cov)) return false;
-      // 2) Za poslednou snímkou → do 4 h: ETA / pohyb bunky.
+      // 2) Za poslednou snímkou → do 5 h: ETA / pohyb bunky.
       return pinForecast.authorizesLocalHour(slot);
     }
 
