@@ -570,19 +570,17 @@ String buildVystrahyUserLocationMarkerJs(double lat, double lon) => '''
       } catch (e) {}
     }
     try {
-      if (typeof prerozdelBounndy === 'function') prerozdelBounndy();
-      else if (window.dispatchEvent) window.dispatchEvent(new Event('resize'));
+      if (window.__pocasieLeafletMap && window.__pocasieLeafletMap.invalidateSize) {
+        return window.__pocasieLeafletMap;
+      }
     } catch (e2) {}
-    if (window.__pocasieLeafletMap && window.__pocasieLeafletMap.invalidateSize) {
-      return window.__pocasieLeafletMap;
-    }
     return null;
   }
 
   function placePin(attempt) {
     var lm = findLeafletMap();
     if (!lm) {
-      if (attempt < 30) setTimeout(function() { placePin(attempt + 1); }, 200);
+      if (attempt < 12) setTimeout(function() { placePin(attempt + 1); }, 160);
       return;
     }
 

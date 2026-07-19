@@ -1,10 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- API 31+ (Android 12+) system splash — rovnaké pozadie ako Flutter načítavanie. -->
+    <!-- API 31+ system splash — len pozadie, bez ikony appky. -->
     <style name="LaunchTheme" parent="@android:style/Theme.Black.NoTitleBar">
         <item name="android:windowSplashScreenBackground">@color/launch_splash_bg</item>
-        <!-- Ikona ako pri Flutter splash (nie prázdne pozadie). -->
-        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_transparent_icon</item>
         <item name="android:windowSplashScreenIconBackgroundColor">@color/launch_splash_bg</item>
         <item name="android:windowBackground">@drawable/launch_background</item>
     </style>

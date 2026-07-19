@@ -43,8 +43,10 @@ part 'lightning_fetch.dart';
 part 'radar_nowcast_fetch.dart';
 part 'rainviewer_fetch.dart';
 
-final ValueNotifier<bool> _startupReadyNotifier = ValueNotifier<bool>(false);
 final ValueNotifier<bool> _showOnboardingNotifier = ValueNotifier<bool>(false);
+
+/// Pri minimalizácii skryť WebView (Android PlatformView inak snapshotne „štvorčeky“ cez celú appku).
+final ValueNotifier<bool> appRecentsCoverNotifier = ValueNotifier<bool>(false);
 
 class AppAmbientSnapshot {
   final int weatherCode;
@@ -166,6 +168,12 @@ void main() async {
   ]);
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 
+  // Onboarding pred runApp — bez splash a bez prebliknutia WeatherPage.
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    _showOnboardingNotifier.value = !(prefs.getBool(kOnboardingDoneKey) ?? false);
+  } catch (_) {}
+
   runApp(const WeatherApp());
 
   scheduler.SchedulerBinding.instance.addPostFrameCallback((_) async {
@@ -174,15 +182,6 @@ void main() async {
 }
 
 Future<void> _initServicesInBackground() async {
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    final showOnboarding = !(prefs.getBool(kOnboardingDoneKey) ?? false);
-    _showOnboardingNotifier.value = showOnboarding;
-    _startupReadyNotifier.value = true;
-  } catch (e) {
-    _startupReadyNotifier.value = true;
-  }
-
   unawaited(_initDeferredServices());
 }
 
@@ -235,8 +234,37 @@ enum WindUnit {
   }
 }
 
-class WeatherApp extends StatelessWidget {
+class WeatherApp extends StatefulWidget {
   const WeatherApp({super.key});
+
+  @override
+  State<WeatherApp> createState() => _WeatherAppState();
+}
+
+class _WeatherAppState extends State<WeatherApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final cover = state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused;
+    if (appRecentsCoverNotifier.value == cover) return;
+    appRecentsCoverNotifier.value = cover;
+    // Okamžitý rebuild — Android často robí snapshot ešte pred ďalším frame.
+    if (mounted) setState(() {});
+    WidgetsBinding.instance.scheduleFrame();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -290,9 +318,13 @@ class WeatherApp extends StatelessWidget {
             builder: (context, child) {
               if (child == null) return const SizedBox.shrink();
               return AnimatedBuilder(
-                animation: appAmbientSnapshot,
+                animation: Listenable.merge([
+                  appAmbientSnapshot,
+                  appRecentsCoverNotifier,
+                ]),
                 builder: (context, _) {
                   final snap = appAmbientSnapshot.value;
+                  final cover = appRecentsCoverNotifier.value;
                   return Stack(
                     clipBehavior: Clip.hardEdge,
                     fit: StackFit.expand,
@@ -305,29 +337,31 @@ class WeatherApp extends StatelessWidget {
                         ),
                       ),
                       Positioned.fill(child: child),
+                      // Celá appka — Flutter vrstva + WebView sú pri pause odpojené nižšie.
+                      if (cover)
+                        const Positioned.fill(
+                          child: ColoredBox(color: kAmbientBlendColor),
+                        ),
                     ],
                   );
                 },
               );
             },
-            home: LaunchSplashScreen(
-              readyListenable: _startupReadyNotifier,
-              child: ValueListenableBuilder<bool>(
-                valueListenable: _showOnboardingNotifier,
-                builder: (context, showOnboarding, _) {
-                  return DefaultSelectionStyle(
-                    selectionColor: theme.textSelectionTheme.selectionColor ??
-                        theme.colorScheme.primary.withValues(alpha: 0.40),
-                    cursorColor: theme.textSelectionTheme.cursorColor ??
-                        theme.colorScheme.primary,
-                    child: ScaffoldMessenger(
-                      child: showOnboarding
-                          ? const OnboardingPage()
-                          : const WeatherPage(),
-                    ),
-                  );
-                },
-              ),
+            home: ValueListenableBuilder<bool>(
+              valueListenable: _showOnboardingNotifier,
+              builder: (context, showOnboarding, _) {
+                return DefaultSelectionStyle(
+                  selectionColor: theme.textSelectionTheme.selectionColor ??
+                      theme.colorScheme.primary.withValues(alpha: 0.40),
+                  cursorColor: theme.textSelectionTheme.cursorColor ??
+                      theme.colorScheme.primary,
+                  child: ScaffoldMessenger(
+                    child: showOnboarding
+                        ? const OnboardingPage()
+                        : const WeatherPage(),
+                  ),
+                );
+              },
             ),
           ),
         ),

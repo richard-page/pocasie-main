@@ -6267,15 +6267,18 @@ Future<RadarNowcastContext> fetchRadarNowcastContextForCity(GeoCity city) async 
   }
 
   try {
-    var history = await fetchRainViewerFrameHistory(city.lat, city.lon);
+    // Past + nowcast naraz (predtým sekvenčne → oneskorené ikony).
+    final historyFuture = fetchRainViewerFrameHistory(city.lat, city.lon);
+    final nowcastFuture = fetchRainViewerNowcastHistory(city.lat, city.lon);
+    final results = await Future.wait<List<RadarFrameSample>>([
+      historyFuture,
+      nowcastFuture,
+    ]);
+    var history = results[0];
+    final nowcast = results[1];
     var fromRainViewer = history.isNotEmpty;
-    List<RadarFrameSample> nowcast = const [];
-    if (fromRainViewer) {
-      nowcast = await fetchRainViewerNowcastHistory(city.lat, city.lon);
-    }
 
     // Helkor len ako fallback keď RainViewer nemá snímky.
-    // Meteo Radar WebView ostáva na zobrazenie — nie na detekciu pinu.
     List<RadarFrameSample> helkor = const [];
     if (!fromRainViewer && radarCoverageForCity(city)) {
       helkor = await _fetchRadarFrameHistory(city.lat, city.lon).catchError(
@@ -6315,6 +6318,39 @@ Future<RadarNowcastContext> fetchRadarNowcastContextForCity(GeoCity city) async 
     return _radarNowcastCacheKey == key
         ? (_radarNowcastCache ?? RadarNowcastContext.inactive)
         : RadarNowcastContext.inactive;
+  }
+}
+
+/// Len posledná past snímka — rýchla zrážková ikona pri zmene mesta.
+Future<RadarNowcastContext> fetchRadarNowcastQuickPinContext(GeoCity city) async {
+  if (!rainViewerNowcastForCity(city)) {
+    return RadarNowcastContext.inactive;
+  }
+  try {
+    final meta = await _fetchRainViewerApiMeta();
+    if (meta == null || meta.pastFrames.isEmpty) {
+      return RadarNowcastContext.inactive;
+    }
+    final entry = meta.pastFrames.last;
+    final path = entry['path']?.toString();
+    final time = entry['time'] is int
+        ? entry['time'] as int
+        : int.tryParse('${entry['time']}') ?? 0;
+    if (path == null || path.isEmpty || time <= 0) {
+      return RadarNowcastContext.inactive;
+    }
+    final url = _rainViewerLatLonTileUrl(meta.host, path, city.lat, city.lon);
+    final sample = await _sampleRainViewerFrameFromUrl(url, city.lat, city.lon, time);
+    if (sample == null) return RadarNowcastContext.inactive;
+    return _contextFromHistory(
+      [sample],
+      fromRainViewer: true,
+      cityLat: city.lat,
+      cityLon: city.lon,
+    );
+  } catch (e) {
+    debugPrint('fetchRadarNowcastQuickPinContext: $e');
+    return RadarNowcastContext.inactive;
   }
 }
 

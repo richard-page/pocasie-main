@@ -3347,7 +3347,7 @@ class OfflineScreen extends StatelessWidget {
   }
 }
 
-class FullscreenRadarPage extends StatelessWidget {
+class FullscreenRadarPage extends StatefulWidget {
   final WebViewController controller;
 
   const FullscreenRadarPage({
@@ -3355,8 +3355,47 @@ class FullscreenRadarPage extends StatelessWidget {
     required this.controller,
   });
 
+  @override
+  State<FullscreenRadarPage> createState() => _FullscreenRadarPageState();
+}
+
+class _FullscreenRadarPageState extends State<FullscreenRadarPage>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    appRecentsCoverNotifier.addListener(_onRecentsCoverChanged);
+  }
+
+  @override
+  void dispose() {
+    appRecentsCoverNotifier.removeListener(_onRecentsCoverChanged);
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  void _onRecentsCoverChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(widget.controller.runJavaScript('''
+        (function(){
+          try {
+            if (typeof map !== 'undefined' && map && map.resize) map.resize();
+            window.dispatchEvent(new Event('resize'));
+          } catch (e) {}
+        })();
+      '''));
+    }
+  }
+
   void _closeRadar(BuildContext context) {
-    controller.runJavaScript('if(window.setFullscreen) window.setFullscreen(false);');
+    widget.controller
+        .runJavaScript('if(window.setFullscreen) window.setFullscreen(false);');
 
     Future.delayed(const Duration(milliseconds: 60), () {
       if (context.mounted) {
@@ -3375,9 +3414,9 @@ class FullscreenRadarPage extends StatelessWidget {
         }
       },
       child: Scaffold(
-        backgroundColor: Colors.transparent,
+        backgroundColor: kAmbientBlendColor,
         appBar: AppBar(
-          backgroundColor: Colors.transparent,
+          backgroundColor: kAmbientBlendColor,
           elevation: 0,
           title: const Text('Meteo Radar', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white)),
           centerTitle: true,
@@ -3527,106 +3566,23 @@ class FullscreenRadarPage extends StatelessWidget {
             ),
           ],
         ),
-        body: WebViewWidget(controller: controller),
+        body: appRecentsCoverNotifier.value
+            ? const ColoredBox(color: kAmbientBlendColor)
+            : WebViewWidget(controller: widget.controller),
       ),
     );
   }
 }
 
 
-class LaunchSplashScreen extends StatefulWidget {
-  final Widget child;
-  final ValueListenable<bool> readyListenable;
-
-  const LaunchSplashScreen({
-    super.key,
-    required this.child,
-    required this.readyListenable,
-  });
-
-  @override
-  State<LaunchSplashScreen> createState() => _LaunchSplashScreenState();
-}
-
-class _LaunchSplashScreenState extends State<LaunchSplashScreen> {
-  bool _showSplash = true;
-  bool _minTimeElapsed = false;
-  bool _maxTimeElapsed = false;
-  bool _hideScheduled = false;
-
-  @override
-  void initState() {
-    super.initState();
-    widget.readyListenable.addListener(_tryHideSplash);
-    _startMinDelay();
-    _startMaxDelay();
-  }
-
-  @override
-  void dispose() {
-    widget.readyListenable.removeListener(_tryHideSplash);
-    super.dispose();
-  }
-
-  Future<void> _startMinDelay() async {
-    await Future<void>.delayed(const Duration(milliseconds: 700));
-    _minTimeElapsed = true;
-    _tryHideSplash();
-  }
-
-  Future<void> _startMaxDelay() async {
-    await Future<void>.delayed(const Duration(seconds: 5));
-    _maxTimeElapsed = true;
-    _tryHideSplash();
-  }
-
-  void _tryHideSplash() {
-    if (!_showSplash) return;
-    if (!_minTimeElapsed) return;
-    if (!widget.readyListenable.value && !_maxTimeElapsed) return;
-    if (!mounted) return;
-    if (_hideScheduled) return;
-    _hideScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _hideScheduled = false;
-      if (!mounted || !_showSplash) return;
-      setState(() {
-        _showSplash = false;
-      });
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (!_showSplash) {
-      return widget.child;
-    }
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        widget.child,
-        const Positioned.fill(
-          child: _SplashScreenContent(),
-        ),
-      ],
-    );
-  }
-}
-
 class VystrahyWebViewPreloader extends ChangeNotifier {
   VystrahyWebViewPreloader._();
   static final VystrahyWebViewPreloader instance = VystrahyWebViewPreloader._();
 
   static const Color pageBg = kAmbientBlendColor;
-  static const List<int> _mapResizeInjectDelaysMs = [
-    0,
-    150,
-    400,
-    900,
-    2000,
-    5000,
-    10000,
-  ];
+  /// Krátke settle — dlhé 2/5/10 s injekty spôsobovali skákanie mapy.
+  static const List<int> _mapResizeInjectDelaysMs = [0, 140];
+  static const List<int> _mapResizeOpenDelaysMs = [0, 100];
 
   /// CDN / hosting assety — pred WebView, aby DNS + HTTP cache boli teplé.
   static const List<String> _prefetchAssetUrls = [
@@ -3642,6 +3598,8 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   bool _attachedToPage = false;
   bool _assetsPrefetchStarted = false;
   bool loaded = false;
+  /// HTML hotové + Leaflet `geoLayer` (okresy) nakreslené — nie len onPageFinished.
+  bool mapContentReady = false;
   bool loading = false;
   bool failed = false;
   /// Obnova pri už načítanej mape — bez bieleho/prázdneho refreshu celej stránky.
@@ -3650,6 +3608,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   bool _preferSoftNavigation = false;
   Timer? _loadTimeout;
   Timer? _scheduledWarmupTimer;
+  Timer? _okresyReadyPoll;
   final List<Timer> _mapResizeInjectTimers = [];
   double? _userLat;
   double? _userLon;
@@ -3657,7 +3616,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   WebViewController? get controller => _controller;
   bool get attachedToPage => _attachedToPage;
   bool get isReadyForInstantOpen =>
-      _controller != null && loaded && !failed;
+      _controller != null && loaded && mapContentReady && !failed;
 
   void _notifySafely() {
     final binding = WidgetsBinding.instance;
@@ -3689,16 +3648,70 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     );
   }
 
-  /// Oneskorený WebView warmup — po štarte appky / radare, nie naraz (OOM).
+  /// WebView warmup — HTTP prefetch hneď; WebView čo najskôr (okresy async po HTML).
   void scheduleWarmup({
-    Duration delay = const Duration(seconds: 4),
+    Duration delay = Duration.zero,
   }) {
     prefetchAssets();
     if (_controller != null || _warming) return;
     _scheduledWarmupTimer?.cancel();
+    if (delay <= Duration.zero) {
+      warmup();
+      return;
+    }
     _scheduledWarmupTimer = Timer(delay, () {
       warmup();
     });
+  }
+
+  void _markMapContentReady() {
+    if (mapContentReady) return;
+    mapContentReady = true;
+    _okresyReadyPoll?.cancel();
+    _okresyReadyPoll = null;
+    _notifySafely();
+  }
+
+  /// Čaká, kým Leaflet pridá `geoLayer` (okresy-hq.json) — pageFinished nestačí.
+  void startOkresyReadyWatch() {
+    _okresyReadyPoll?.cancel();
+    if (mapContentReady) return;
+    unawaited(_injectOkresyReadyWatchJs());
+    var tries = 0;
+    _okresyReadyPoll = Timer.periodic(const Duration(milliseconds: 100), (t) {
+      tries++;
+      if (mapContentReady || failed) {
+        t.cancel();
+        return;
+      }
+      if (tries > 150) {
+        t.cancel();
+        // Po ~15 s už nič nečakať — nech používateľ aspoň vidí čo je.
+        if (loaded && !failed) _markMapContentReady();
+        return;
+      }
+      unawaited(_pollOkresyReadyOnce());
+    });
+  }
+
+  Future<void> _injectOkresyReadyWatchJs() async {
+    final c = _controller;
+    if (c == null) return;
+    try {
+      await c.runJavaScript(_kVystrahyOkresyReadyWatchJs);
+    } catch (_) {}
+  }
+
+  Future<void> _pollOkresyReadyOnce() async {
+    final c = _controller;
+    if (c == null || mapContentReady) return;
+    try {
+      final raw = await c.runJavaScriptReturningResult(_kVystrahyOkresyReadyCheckJs);
+      final s = raw.toString();
+      if (s.contains('1') || s.contains('true')) {
+        _markMapContentReady();
+      }
+    } catch (_) {}
   }
 
   void cancelScheduledWarmup() {
@@ -3730,8 +3743,8 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     try {
       await c.runJavaScript(js);
     } catch (_) {}
-    // Po layoute mapy ešte raz — inak sa špendlík / zoom nestihne.
-    Future<void>.delayed(const Duration(milliseconds: 450), () async {
+    // Po layoute mapy ešte raz — bez opakovaného fitBounds (iba pin).
+    Future<void>.delayed(const Duration(milliseconds: 280), () async {
       if (_controller != c) return;
       if (_userLat != lat || _userLon != lon) return;
       try {
@@ -3752,14 +3765,20 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     _notifySafely();
   }
 
-  Widget buildWarmupHost() {
+  Widget buildWarmupHost(BuildContext context) {
     final c = _controller;
     if (c == null || _attachedToPage) return const SizedBox.shrink();
-    return const Offstage(
+    if (appRecentsCoverNotifier.value) return const SizedBox.shrink();
+    final size = MediaQuery.sizeOf(context);
+    // Teplá veľkosť blízka stránke — 1×1 nútilo Leaflet fitBounds pri otvorení.
+    final w = size.width > 0 ? size.width : 360.0;
+    final h = (size.height * 0.36).clamp(260.0, 420.0);
+    return Offstage(
+      offstage: true,
       child: SizedBox(
-        width: 1,
-        height: 1,
-        child: _VystrahyWarmupWebView(),
+        width: w,
+        height: h,
+        child: const _VystrahyWarmupWebView(),
       ),
     );
   }
@@ -3777,6 +3796,12 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     final controller = WebViewController.fromPlatformCreationParams(params)
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(pageBg)
+      ..addJavaScriptChannel(
+        'VystrahyReady',
+        onMessageReceived: (JavaScriptMessage message) {
+          _markMapContentReady();
+        },
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (_) => _onLoadStarted(soft: _preferSoftNavigation),
@@ -3824,15 +3849,19 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     try {
       await c.runJavaScript(_kVystrahyMobileInjectJs);
     } catch (_) {}
+    if (!mapContentReady) {
+      unawaited(_injectOkresyReadyWatchJs());
+    }
     await _injectLocationMarker();
   }
 
-  void _scheduleMapResizeInject() {
+  void _scheduleMapResizeInject({bool forOpen = false}) {
     for (final timer in _mapResizeInjectTimers) {
       timer.cancel();
     }
     _mapResizeInjectTimers.clear();
-    for (final delayMs in _mapResizeInjectDelaysMs) {
+    final delays = forOpen ? _mapResizeOpenDelaysMs : _mapResizeInjectDelaysMs;
+    for (final delayMs in delays) {
       _mapResizeInjectTimers.add(
         Timer(Duration(milliseconds: delayMs), () {
           unawaited(_injectMapResize());
@@ -3843,11 +3872,13 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
 
   void _onLoadStarted({bool soft = false}) {
     _loadTimeout?.cancel();
-    final keepVisible = soft && loaded;
+    _okresyReadyPoll?.cancel();
+    final keepVisible = soft && loaded && mapContentReady;
     loading = true;
     softReloading = keepVisible;
     if (!keepVisible) {
       loaded = false;
+      mapContentReady = false;
     }
     failed = false;
     _notifySafely();
@@ -3866,12 +3897,15 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     _warming = false;
     _notifySafely();
     _scheduleMapResizeInject();
+    // Okresy sa sťahujú async po pageFinished — sleduj geoLayer.
+    startOkresyReadyWatch();
   }
 
   void _onLoadFailed() {
     _loadTimeout?.cancel();
+    _okresyReadyPoll?.cancel();
     _preferSoftNavigation = false;
-    final keepMap = softReloading && loaded;
+    final keepMap = softReloading && loaded && mapContentReady;
     loading = false;
     softReloading = false;
     _warming = false;
@@ -4056,7 +4090,8 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   void prepareForDisplay() {
     unawaited(_disableVystrahyAndroidScrollbars());
     unawaited(scrollToTop());
-    refreshMapLayout();
+    // Len 1–2 settle po layoute stránky — nie 7× fitBounds.
+    _scheduleMapResizeInject(forOpen: true);
     unawaited(_injectLocationMarker());
   }
 }
@@ -4081,7 +4116,8 @@ class MeteoVystrahyPage extends StatefulWidget {
   State<MeteoVystrahyPage> createState() => _MeteoVystrahyPageState();
 }
 
-class _MeteoVystrahyPageState extends State<MeteoVystrahyPage> {
+class _MeteoVystrahyPageState extends State<MeteoVystrahyPage>
+    with WidgetsBindingObserver {
   static const Color _pageBg = VystrahyWebViewPreloader.pageBg;
   final VystrahyWebViewPreloader _preloader = VystrahyWebViewPreloader.instance;
   bool _pendingDisplayPrep = false;
@@ -4089,27 +4125,50 @@ class _MeteoVystrahyPageState extends State<MeteoVystrahyPage> {
   @override
   void initState() {
     super.initState();
-    _pendingDisplayPrep = !_preloader.loaded;
+    WidgetsBinding.instance.addObserver(this);
+    appRecentsCoverNotifier.addListener(_onRecentsCoverChanged);
+    _pendingDisplayPrep = !_preloader.mapContentReady;
     _preloader.updateUserLocation(widget.city.lat, widget.city.lon);
     _preloader.addListener(_onPreloaderChanged);
     _preloader.warmup();
+    if (!_preloader.mapContentReady) {
+      _preloader.startOkresyReadyWatch();
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _preloader.prepareForDisplay();
+      if (!mounted) return;
+      if (_preloader.mapContentReady) {
+        _preloader.prepareForDisplay();
+      }
     });
   }
 
   @override
   void dispose() {
+    appRecentsCoverNotifier.removeListener(_onRecentsCoverChanged);
+    WidgetsBinding.instance.removeObserver(this);
     _preloader.removeListener(_onPreloaderChanged);
     _preloader.markDetached();
     super.dispose();
   }
 
+  void _onRecentsCoverChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _preloader.prepareForDisplay();
+    }
+  }
+
   void _onPreloaderChanged() {
     if (!mounted) return;
-    if (_pendingDisplayPrep && _preloader.loaded) {
+    if (_pendingDisplayPrep && _preloader.mapContentReady) {
       _pendingDisplayPrep = false;
+      // Jedno settle po cold loade — nie druhá plná dávka fitBounds.
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
         _preloader.prepareForDisplay();
       });
     }
@@ -4214,7 +4273,7 @@ class _MeteoVystrahyPageState extends State<MeteoVystrahyPage> {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  if (controller != null)
+                  if (controller != null && !appRecentsCoverNotifier.value)
                     WebViewWidget(
                       controller: controller,
                       gestureRecognizers: {
@@ -4223,7 +4282,10 @@ class _MeteoVystrahyPageState extends State<MeteoVystrahyPage> {
                         ),
                       },
                     ),
-                  if (loading && !_preloader.loaded)
+                  if (appRecentsCoverNotifier.value)
+                    const ColoredBox(color: _pageBg),
+                  // Skryť prázdnu mapu s pinom, kým nie sú okresy (geoLayer).
+                  if (!failed && !_preloader.mapContentReady)
                     const ColoredBox(
                       color: _pageBg,
                       child: Center(
@@ -4237,7 +4299,7 @@ class _MeteoVystrahyPageState extends State<MeteoVystrahyPage> {
                         ),
                       ),
                     ),
-                  if (failed && !loading && !_preloader.loaded)
+                  if (failed && !loading && !_preloader.mapContentReady)
                     ColoredBox(
                       color: _pageBg,
                       child: Center(
@@ -4366,9 +4428,10 @@ const String _kVystrahyMobileInjectJs = r'''
   function resizeVystrahyMap() {
     var wrapper = document.getElementById('mapWrapper') || document.querySelector('.map-wrapper');
     var mapEl = document.getElementById('map');
+    var h = 320;
     if (wrapper && mapEl) {
       var viewportH = window.innerHeight || document.documentElement.clientHeight || 640;
-      var h = Math.round(Math.max(260, Math.min(420, viewportH * 0.36)));
+      h = Math.round(Math.max(260, Math.min(420, viewportH * 0.36)));
       wrapper.style.height = h + 'px';
       wrapper.style.minHeight = h + 'px';
       mapEl.style.position = 'absolute';
@@ -4383,21 +4446,27 @@ const String _kVystrahyMobileInjectJs = r'''
       window.dispatchEvent(new Event('resize'));
     }
     var lm = findLeafletMap(mapEl);
+    var sizeKey = Math.round(window.innerWidth || 0) + 'x' + h;
+    var sameSize = window.__pocasieVystrahySizeKey === sizeKey;
     if (lm && lm.invalidateSize) {
       try {
         lm.invalidateSize({ animate: false, pan: false });
       } catch (e1) {
         try { lm.invalidateSize(true); } catch (e2) {}
       }
-      try {
-        // Vždy celá SR — nepribližovať na lokalitu / okres.
-        if (typeof prerozdelBounndy === 'function') {
-          prerozdelBounndy();
-        } else if (lm.fitBounds) {
-          lm.fitBounds([[47.73, 16.83], [49.61, 22.58]], { animate: false, padding: [12, 12] });
-        }
-      } catch (e3) {}
-    } else if (typeof prerozdelBounndy === 'function') {
+      // fitBounds len pri zmene veľkosti — opakované volania mapu „skáču“.
+      if (!sameSize || !window.__pocasieVystrahyBoundsDone) {
+        try {
+          if (typeof prerozdelBounndy === 'function') {
+            prerozdelBounndy();
+          } else if (lm.fitBounds) {
+            lm.fitBounds([[47.73, 16.83], [49.61, 22.58]], { animate: false, padding: [12, 12] });
+          }
+          window.__pocasieVystrahyBoundsDone = true;
+          window.__pocasieVystrahySizeKey = sizeKey;
+        } catch (e3) {}
+      }
+    } else if (!sameSize && typeof prerozdelBounndy === 'function') {
       try { prerozdelBounndy(); } catch (e4) {}
       findLeafletMap(mapEl);
     }
@@ -4407,52 +4476,59 @@ const String _kVystrahyMobileInjectJs = r'''
 })();
 ''';
 
-class _SplashScreenContent extends StatelessWidget {
-  const _SplashScreenContent();
-
-  @override
-  Widget build(BuildContext context) {
-    return const ColoredBox(
-      color: kAmbientBlendColor,
-      child: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: EdgeInsets.symmetric(horizontal: 32),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                SizedBox(
-                  width: 130,
-                  height: 130,
-                  child: Image(
-                    image: AssetImage('assets/icon.png'),
-                    fit: BoxFit.contain,
-                  ),
-                ),
-                SizedBox(height: 56),
-                SizedBox(
-                  width: 42,
-                  height: 42,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 3.2,
-                    valueColor: AlwaysStoppedAnimation<Color>(kAppAccentBlue),
-                  ),
-                ),
-                SizedBox(height: 24),
-                Text(
-                  'Načítavajú sa dáta...',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
+/// Sleduje načítanie okresov (geoLayer) a hlási do Flutter cez VystrahyReady.
+const String _kVystrahyOkresyReadyWatchJs = r'''
+(function() {
+  if (window.__pocasieVystrahyOkresyWatching) return;
+  window.__pocasieVystrahyOkresyWatching = true;
+  function ready() {
+    try {
+      if (typeof geoLayer !== 'undefined' && geoLayer && geoLayer.getLayers &&
+          geoLayer.getLayers().length > 0) {
+        return true;
+      }
+      var n = document.querySelectorAll('.leaflet-overlay-pane path').length;
+      if (n > 30) return true;
+    } catch (e) {}
+    return false;
   }
-}
+  function notify() {
+    window.__pocasieVystrahyOkresyReady = true;
+    try {
+      if (window.VystrahyReady && VystrahyReady.postMessage) {
+        VystrahyReady.postMessage('okresy');
+      }
+    } catch (e2) {}
+  }
+  if (ready()) { notify(); return; }
+  var tries = 0;
+  var t = setInterval(function() {
+    tries++;
+    if (ready()) {
+      clearInterval(t);
+      notify();
+    } else if (tries > 150) {
+      clearInterval(t);
+    }
+  }, 100);
+})();
+''';
+
+const String _kVystrahyOkresyReadyCheckJs = r'''
+(function(){
+  try {
+    if (window.__pocasieVystrahyOkresyReady) return '1';
+    if (typeof geoLayer !== 'undefined' && geoLayer && geoLayer.getLayers &&
+        geoLayer.getLayers().length > 0) {
+      window.__pocasieVystrahyOkresyReady = true;
+      return '1';
+    }
+    var n = document.querySelectorAll('.leaflet-overlay-pane path').length;
+    if (n > 30) {
+      window.__pocasieVystrahyOkresyReady = true;
+      return '1';
+    }
+  } catch (e) {}
+  return '0';
+})()
+''';
