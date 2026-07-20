@@ -256,14 +256,13 @@ class _WeatherAppState extends State<WeatherApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    final cover = state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.hidden ||
-        state == AppLifecycleState.paused;
-    if (appRecentsCoverNotifier.value == cover) return;
-    appRecentsCoverNotifier.value = cover;
-    // Okamžitý rebuild — Android často robí snapshot ešte pred ďalším frame.
-    if (mounted) setState(() {});
-    WidgetsBinding.instance.scheduleFrame();
+    // WebView v recent apps NEskrývame — skrytie spôsobovalo prázdny radar
+    // v náhľade a krátke prebliknutie. PlatformView bleed riešime inde.
+    if (state == AppLifecycleState.resumed &&
+        appRecentsCoverNotifier.value) {
+      appRecentsCoverNotifier.value = false;
+      if (mounted) setState(() {});
+    }
   }
 
   @override
@@ -318,13 +317,9 @@ class _WeatherAppState extends State<WeatherApp> with WidgetsBindingObserver {
             builder: (context, child) {
               if (child == null) return const SizedBox.shrink();
               return AnimatedBuilder(
-                animation: Listenable.merge([
-                  appAmbientSnapshot,
-                  appRecentsCoverNotifier,
-                ]),
+                animation: appAmbientSnapshot,
                 builder: (context, _) {
                   final snap = appAmbientSnapshot.value;
-                  final cover = appRecentsCoverNotifier.value;
                   return Stack(
                     clipBehavior: Clip.hardEdge,
                     fit: StackFit.expand,
@@ -337,11 +332,6 @@ class _WeatherAppState extends State<WeatherApp> with WidgetsBindingObserver {
                         ),
                       ),
                       Positioned.fill(child: child),
-                      // Celá appka — Flutter vrstva + WebView sú pri pause odpojené nižšie.
-                      if (cover)
-                        const Positioned.fill(
-                          child: ColoredBox(color: kAmbientBlendColor),
-                        ),
                     ],
                   );
                 },

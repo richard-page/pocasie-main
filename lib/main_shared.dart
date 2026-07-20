@@ -1103,6 +1103,17 @@ void applyUnifiedHourlyStripPrecip({
     radarCtx: radarCtx,
     locTime: locTime,
   );
+  alignDryStripPercentsForMatchingIcons(
+    displayIcons: displayIcons,
+    showRainPrecip: showRainPrecip,
+    storedProbs: storedProbs,
+    stripIndices: stripIndices,
+    h: h,
+    rainHoursBeforeStrip: _openMeteoUiPrecipHoursBeforeStrip(
+      h: h,
+      firstStripDataIndex: stripIndices.isEmpty ? 0 : stripIndices.first,
+    ),
+  );
 }
 
 /// Po zrážkovej **ikone** (nie radar / holé mm): 40 → 30 → 20.
@@ -3355,7 +3366,13 @@ int hourlyStripDryHourPercentFromApi({
   }
 
   final cap = allowFortyNearRain ? 40 : 30;
-  return _roundPrecipProbabilityForDisplay(pct.clamp(10, cap));
+  final floor = sky == 0
+      ? 10
+      : hourlyStripSkyIconPercent(
+          iconCode ?? 0,
+          cloudCoverPercent: cloudCoverPercent,
+        );
+  return _roundPrecipProbabilityForDisplay(pct.clamp(floor, cap));
 }
 
 /// Čisté jasno — len WMO 0 (slnko / mesiac bez oblaku).
@@ -3389,19 +3406,7 @@ int _dryStripPercentWithNearbyRainCap({
   return _roundPrecipProbabilityForDisplay(out);
 }
 
-/// Striedaj 20↔30 (alebo 10↔20), aby sa to isté nelepilo 3+× za sebou.
-int _nextDifferentDryPercent(int current, int iconCode) {
-  if (_isClearStripSkyCode(iconCode)) return 10;
-  final sky = normalizeDisplayWeatherCode(iconCode);
-  if (sky == 1) {
-    return current >= 20 ? 10 : 20;
-  }
-  if (current >= 30) return 20;
-  if (current == 20) return 30;
-  return 20;
-}
-
-/// Suché %: max 30 bez zrážok; max **2 rovnaké** za sebou.
+/// Suché % z API — bez umelého striedania každé 2–3 hodiny.
 /// **Hneď po zrážkovej ikone = vždy 40 %** (nasledujúce okno).
 void diversifyRepetitiveDryStripPercents({
   required List<int> displayIcons,
@@ -3483,48 +3488,69 @@ void diversifyRepetitiveDryStripPercents({
     }
     storedProbs[i] = pct;
   }
+}
 
-  // 2) Max 2 rovnaké — 40 hneď po/pred zrážkou nestriedaj.
-  bool keepForty(int i) {
-    final until = _hoursUntilNextRainInStrip(i, wetIcon);
-    final since = _hoursSinceLastRainInStrip(
-      i,
-      wetIcon,
-      rainHoursBeforeStrip: rainBefore,
-    );
-    if (until != null && until <= 1) return true;
-    if (since != null && since == 1) return true;
-    if (i > 0 && wetIcon[i - 1]) return true;
-    return false;
-  }
-
-  for (var i = 2; i < n; i++) {
-    if (wetIcon[i]) continue;
-    if (storedProbs[i] >= kMinPrecipProbPercent) continue;
-    if (keepForty(i)) continue;
-    if (wetIcon[i - 1] || wetIcon[i - 2]) continue;
-    if (storedProbs[i] == storedProbs[i - 1] &&
-        storedProbs[i] == storedProbs[i - 2]) {
-      storedProbs[i] = _nextDifferentDryPercent(
-        storedProbs[i],
-        displayIcons[i],
-      );
-    }
-  }
+/// Rovnaká suchá ikona za sebou — plynulá postupka, žiadne skoky 20→10→20.
+void alignDryStripPercentsForMatchingIcons({
+  required List<int> displayIcons,
+  required List<bool> showRainPrecip,
+  required List<int> storedProbs,
+  required List<int> stripIndices,
+  required HourlyForecast h,
+  int rainHoursBeforeStrip = 0,
+}) {
+  final n = displayIcons.length;
+  if (n < 2) return;
+  final wetIcon = List<bool>.generate(
+    n,
+    (i) => showRainPrecip[i] || _hourShowsPrecipIcon(displayIcons[i]),
+  );
 
   for (var i = 1; i < n; i++) {
     if (wetIcon[i] || wetIcon[i - 1]) continue;
     if (storedProbs[i] >= kMinPrecipProbPercent) continue;
-    if (keepForty(i)) continue;
-    if (i >= 2 &&
-        !wetIcon[i - 2] &&
-        storedProbs[i - 1] == storedProbs[i - 2] &&
-        storedProbs[i] == storedProbs[i - 1]) {
-      storedProbs[i] = _nextDifferentDryPercent(
-        storedProbs[i - 1],
-        displayIcons[i],
-      );
+    if (storedProbs[i - 1] >= kMinPrecipProbPercent) continue;
+    if (normalizeDisplayWeatherCode(displayIcons[i]) !=
+        normalizeDisplayWeatherCode(displayIcons[i - 1])) {
+      continue;
     }
+
+    final since = _hoursSinceLastRainInStrip(
+      i,
+      wetIcon,
+      rainHoursBeforeStrip: rainHoursBeforeStrip,
+    );
+    final until = _hoursUntilNextRainInStrip(i, wetIcon);
+    // Rampy pred/po zrážke nechaj — tam má zmysel rásť/klesať.
+    if (since != null && since <= 3) continue;
+    if (until != null && until <= 3) continue;
+
+    final idx = stripIndices[i];
+    final cloud = h.cloudCover != null && idx < h.cloudCover!.length
+        ? h.cloudCover![idx]
+        : null;
+    final floor = hourlyStripSkyIconPercent(
+      displayIcons[i],
+      cloudCoverPercent: cloud,
+    );
+    final prev = storedProbs[i - 1];
+    var cur = storedProbs[i];
+    // Blíži sa zrážka — povoliť rast po +10/h.
+    if (until != null && until <= 3) {
+      if (cur > prev) cur = math.min(cur, prev + 10);
+      if (cur < prev) cur = math.max(cur, prev - 10);
+    } else {
+      // Po poklese neskákať späť hore (20→10→20).
+      if (cur > prev && i >= 2 && prev < storedProbs[i - 2]) {
+        cur = prev;
+      } else {
+        if (cur < prev) cur = math.max(cur, prev - 10);
+        if (cur > prev) cur = math.min(cur, prev + 10);
+      }
+    }
+    storedProbs[i] = _roundPrecipProbabilityForDisplay(
+      math.max(cur, floor).clamp(10, 40),
+    );
   }
 }
 
