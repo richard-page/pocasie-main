@@ -169,8 +169,23 @@ void main() async {
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 
   // Onboarding pred runApp — bez splash a bez prebliknutia WeatherPage.
+  // Android Auto Backup vie po reinstalli obnoviť SharedPreferences → onboarding by
+  // sa inak nespustil (clear data áno, odinštalovanie nie). Kontrolujeme firstInstallTime.
   try {
     final prefs = await SharedPreferences.getInstance();
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        final installMs = await const MethodChannel('sk.menopocasie.app/install')
+            .invokeMethod<int>('firstInstallTimeMs');
+        if (installMs != null) {
+          final stored = prefs.getInt(kAppInstallEpochKey);
+          if (stored != installMs) {
+            await prefs.setInt(kAppInstallEpochKey, installMs);
+            await prefs.remove(kOnboardingDoneKey);
+          }
+        }
+      } catch (_) {}
+    }
     _showOnboardingNotifier.value = !(prefs.getBool(kOnboardingDoneKey) ?? false);
   } catch (_) {}
 

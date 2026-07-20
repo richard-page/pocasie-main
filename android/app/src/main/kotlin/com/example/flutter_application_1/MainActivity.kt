@@ -1,14 +1,44 @@
 package sk.menopocasie.app
 
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import androidx.core.view.WindowCompat
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private var originalStatusBarColor: Int = Color.TRANSPARENT
     private var originalNavBarColor: Int = Color.TRANSPARENT
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "sk.menopocasie.app/install",
+        ).setMethodCallHandler { call, result ->
+            if (call.method == "firstInstallTimeMs") {
+                try {
+                    val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        packageManager.getPackageInfo(
+                            packageName,
+                            PackageManager.PackageInfoFlags.of(0),
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        packageManager.getPackageInfo(packageName, 0)
+                    }
+                    result.success(info.firstInstallTime)
+                } catch (e: Exception) {
+                    result.error("install_time", e.message, null)
+                }
+            } else {
+                result.notImplemented()
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

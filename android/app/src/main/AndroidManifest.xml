@@ -18,7 +18,10 @@
         android:name="${applicationName}"
         android:label="Meteo Počasie"
         android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="true"
+        android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules">
 
         <activity
             android:name=".MainActivity"

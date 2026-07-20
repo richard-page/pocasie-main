@@ -164,6 +164,8 @@ bool forecastDailyHorizonComplete(WeatherData? data) {
 const String kForecastModelKey = 'forecast_model_v1';
 
 const String kOnboardingDoneKey = 'onboarding_playstore_fix';
+/// Porovnanie s Android firstInstallTime — po reinstalli (aj s Auto Backup) znova onboarding.
+const String kAppInstallEpochKey = 'app_first_install_epoch_ms';
 
 const String kOpenMeteoForecastApi = 'https://api.open-meteo.com/v1/ecmwf';
 const String kOpenMeteoAttributionUrl = 'https://open-meteo.com/';

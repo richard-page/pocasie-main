@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 23–30: SharedPreferences sa po odinštalovaní/reinstalli nesmú obnoviť
+     z Auto Backup — inak onboarding (a lokalita) „prežijú“ reinstall. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="FlutterSharedPreferences.xml" />
+</full-backup-content>
