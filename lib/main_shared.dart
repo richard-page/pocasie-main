@@ -459,25 +459,29 @@ String buildMeteoRadarUrl(GeoCity city, {bool cacheBust = false}) {
 const String kMeteoRadarSlovakiaGeoJsonUrl =
     'http://cz1.helkor.eu:41152/radar/slovakia.geojson';
 
-const List<String> kMeteoRadarPrefetchUrls = [
-  kMeteoRadarSlovakiaGeoJsonUrl,
-  'http://cz1.helkor.eu:41152/radar/radar_history_cmax.json',
-  // Zahrnie aspoň jednu mapu / tile bootstrapping URL.
-  'http://cz1.helkor.eu:41152/radar/?lat=48.7&lon=19.5&zoom=7&hideUI=true',
-  'https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.js',
-  'https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.css',
-];
+List<String> meteoRadarPrefetchUrls({GeoCity? city}) {
+  final lat = city?.lat ?? 48.7;
+  final lon = city?.lon ?? 19.5;
+  return [
+    kMeteoRadarSlovakiaGeoJsonUrl,
+    'http://cz1.helkor.eu:41152/radar/radar_history_cmax.json',
+    // Rovnaká HTML URL ako WebView — DNS/TCP + disk cache pre danú lokalitu.
+    'http://cz1.helkor.eu:41152/radar/?lat=$lat&lon=$lon&zoom=7&hideUI=true',
+    'https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.js',
+    'https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.css',
+  ];
+}
 
 bool _radarMapAssetsPrefetchStarted = false;
 
 /// HTTP prefetch radaru (geojson + história + posledný CMAX frame) — ešte pred WebView.
-void prefetchRadarMapAssets() {
+void prefetchRadarMapAssets([GeoCity? city]) {
   if (_radarMapAssetsPrefetchStarted) return;
   _radarMapAssetsPrefetchStarted = true;
 
   unawaited(() async {
     await Future.wait(
-      kMeteoRadarPrefetchUrls.map((url) async {
+      meteoRadarPrefetchUrls(city: city).map((url) async {
         try {
           final r = await http
               .get(Uri.parse(url))
@@ -2277,10 +2281,13 @@ const double kMeaningfulPrecipMmPerHour = 0.1;
 /// Zrážková ikona a % v UI — iba od 50 % (dohoda).
 const int kMinPrecipProbPercent = 50;
 
-/// Minimálny súčet mm v úseku (ráno/večer/noc) na dažďovú ikonu — jedna stopa o polnoci nestačí.
+/// Minimálny súčet mm v úseku bez šance ≥50 % — jedna stopa o polnoci nestačí.
 const double kDayPartMinSumMmForWetIcon = 0.3;
 
-/// Či úsek dňa na karte má ukázať mokré ikony (nie jedna hodina s 0,1 mm pri 50 %).
+/// Či úsek dňa na karte má ukázať mokré ikony.
+///
+/// Musí sedieť s dennou kartou / pätičkou: ≥0,1 mm + ≥50 % (inak hlavná ikona
+/// dažďová a Ráno/Poobede/… stále suché).
 bool dayPartWetIconWarranted({
   required double partSumMm,
   required int maxProbPercent,
@@ -2290,12 +2297,83 @@ bool dayPartWetIconWarranted({
   if (wetHourCount >= 2) return true;
   if (partSumMm >= kDayPartMinSumMmForWetIcon) return true;
   if (maxHourMm >= kDayPartMinSumMmForWetIcon) return true;
+  // Rovnaký prah ako denná karta / pätička (0,2 mm @ 50 % → mrholenie v úseku).
+  if (maxProbPercent >= kMinPrecipProbPercent &&
+      (partSumMm >= kMeaningfulPrecipMmPerHour ||
+          maxHourMm >= kMeaningfulPrecipMmPerHour)) {
+    return true;
+  }
   if (wetHourCount >= 1 &&
       maxHourMm >= kMeaningfulPrecipMmPerHour &&
       maxProbPercent >= 70) {
     return true;
   }
   return false;
+}
+
+/// Keď denná ikona ukazuje zrážky, ale všetky úseky sú suché, doplní mokrú ikonu
+/// do úseku s najväčším úhrnom / šancou (ľahší vizuál podľa dennej ikony).
+void syncWetDayPartIconsWithDailyMain({
+  required int dailyMainIconCode,
+  required double dailyPrecipMm,
+  required int dailyPrecipProb,
+  required double snowfallCm,
+  required List<(String, Map<String, dynamic>)> parts,
+}) {
+  if (!dailyCardShowsWetPrecip(
+    trustedMm: dailyPrecipMm,
+    trustedProb: dailyPrecipProb,
+    snowfallCm: snowfallCm,
+  )) {
+    return;
+  }
+  final mainWet = kPrecipitationCodes.contains(
+    normalizeDisplayWeatherCode(dailyMainIconCode),
+  );
+  if (!mainWet) return;
+  if (!dayPartIconCodesAllDry(parts.map((e) => e.$2['iconCode'] as int?))) {
+    return;
+  }
+
+  Map<String, dynamic>? bestPart;
+  var bestKey = '';
+  var bestSum = -1.0;
+  var bestProb = -1;
+  for (final entry in parts) {
+    final part = entry.$2;
+    final sum = (part['partSumMm'] as num?)?.toDouble() ?? 0.0;
+    final maxMm = (part['partMaxMm'] as num?)?.toDouble() ?? 0.0;
+    final prob = (part['prob'] as int?) ?? 0;
+    final score = math.max(sum, maxMm);
+    if (score > bestSum || (score == bestSum && prob > bestProb)) {
+      bestSum = score;
+      bestProb = prob;
+      bestPart = part;
+      bestKey = entry.$1;
+    }
+  }
+  if (bestPart == null) return;
+
+  final wetCode = lightDailyPrecipVisualCode(
+    normalizeDisplayWeatherCode(dailyMainIconCode),
+  );
+  final forceDay = bestKey == 'morning' || bestKey == 'afternoon';
+  final forceNight = bestKey == 'night';
+  bestPart['iconCode'] = wetCode;
+  bestPart['icon'] = getWeatherIcon(
+    wetCode,
+    size: 38,
+    forceDay: forceDay,
+    forceNight: forceNight,
+  );
+  bestPart['partSumMm'] = math.max(
+    (bestPart['partSumMm'] as num?)?.toDouble() ?? 0.0,
+    math.max(dailyPrecipMm, kMeaningfulPrecipMmPerHour),
+  );
+  bestPart['prob'] = math.max(
+    (bestPart['prob'] as int?) ?? 0,
+    dailyPrecipProb,
+  );
 }
 
 /// Prístupová fáza v 24 h — max. 3 h pred skutočným ECMWF dažďom.

@@ -3365,11 +3365,16 @@ class OfflineScreen extends StatelessWidget {
 }
 
 class FullscreenRadarPage extends StatefulWidget {
+  /// Zdieľaný controller z náhľadu — bez druhého loadRequest / Mapbox cold startu.
+  final WebViewController? controller;
   final String initialUrl;
+  final bool contentAlreadyReady;
 
   const FullscreenRadarPage({
     super.key,
     required this.initialUrl,
+    this.controller,
+    this.contentAlreadyReady = false,
   });
 
   @override
@@ -3381,6 +3386,7 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
   WebViewController? _controller;
   Widget? _radarView;
   bool _surfaceReady = false;
+  bool _ownsController = false;
 
   @override
   void initState() {
@@ -3390,6 +3396,27 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
   }
 
   Future<void> _boot() async {
+    final shared = widget.controller;
+    if (shared != null) {
+      _ownsController = false;
+      _controller = shared;
+      _radarView = WebViewWidget(
+        controller: shared,
+        gestureRecognizers: {
+          Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
+        },
+      );
+      if (!mounted) return;
+      setState(() => _surfaceReady = true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        unawaited(_attachRadarSurface());
+      });
+      // Už načítané (alebo práve ťahá) v náhľade — žiadny druhý loadRequest.
+      return;
+    }
+
+    _ownsController = true;
     late final PlatformWebViewControllerCreationParams params;
     if (WebViewPlatform.instance is AndroidWebViewPlatform) {
       params = AndroidWebViewControllerCreationParams();
@@ -3413,12 +3440,18 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
       try {
         await androidCtrl.setMixedContentMode(MixedContentMode.alwaysAllow);
         await androidCtrl.setMediaPlaybackRequiresUserGesture(false);
+        await androidCtrl.setUseWideViewPort(true);
       } catch (_) {}
     }
 
     if (!mounted) return;
     _controller = controller;
-    _radarView = WebViewWidget(controller: controller);
+    _radarView = WebViewWidget(
+      controller: controller,
+      gestureRecognizers: {
+        Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
+      },
+    );
     setState(() => _surfaceReady = true);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -3445,6 +3478,19 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
 })();
 ''');
     } catch (_) {}
+    // Po zmene veľkosti ešte raz — Mapbox často potrebuje druhý resize.
+    await Future<void>.delayed(const Duration(milliseconds: 48));
+    if (!mounted || _controller != ctrl) return;
+    try {
+      await ctrl.runJavaScript(r'''
+(function(){
+  try {
+    if (typeof map !== 'undefined' && map && map.resize) map.resize();
+    window.dispatchEvent(new Event('resize'));
+  } catch (e) {}
+})();
+''');
+    } catch (_) {}
   }
 
   @override
@@ -3457,6 +3503,10 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
           'try{if(window.setFullscreen)window.setFullscreen(false);}catch(e){}',
         );
       } catch (_) {}
+    }
+    // Zdieľaný controller vlastní WeatherPage — nenič ho.
+    if (_ownsController) {
+      _controller = null;
     }
     super.dispose();
   }

@@ -64,14 +64,14 @@ class _Palette {
   static Color skyTop(WeatherAmbientKind kind, bool isDay) {
     if (isDay) {
       return switch (kind) {
-        WeatherAmbientKind.clear => const Color(0xFF3A6A9A),
-        WeatherAmbientKind.partlyCloudy => const Color(0xFF406FA0),
-        WeatherAmbientKind.cloudy => const Color(0xFF456888),
-        WeatherAmbientKind.fog => const Color(0xFF4A6A84),
-        WeatherAmbientKind.drizzle => const Color(0xFF3A648C),
-        WeatherAmbientKind.rain => const Color(0xFF345A80),
-        WeatherAmbientKind.snow => const Color(0xFF4E708C),
-        WeatherAmbientKind.thunder => const Color(0xFF2E4E78),
+        WeatherAmbientKind.clear => const Color(0xFF2A5278),
+        WeatherAmbientKind.partlyCloudy => const Color(0xFF2E5880),
+        WeatherAmbientKind.cloudy => const Color(0xFF32506A),
+        WeatherAmbientKind.fog => const Color(0xFF365270),
+        WeatherAmbientKind.drizzle => const Color(0xFF2A4E70),
+        WeatherAmbientKind.rain => const Color(0xFF244868),
+        WeatherAmbientKind.snow => const Color(0xFF3A5A72),
+        WeatherAmbientKind.thunder => const Color(0xFF223E60),
       };
     }
     // Noc = rovnaký canvas ako scroll (bez zlomu).
@@ -81,14 +81,14 @@ class _Palette {
   static Color skyUpper(WeatherAmbientKind kind, bool isDay) {
     if (isDay) {
       return switch (kind) {
-        WeatherAmbientKind.clear => const Color(0xFF346090),
-        WeatherAmbientKind.partlyCloudy => const Color(0xFF386696),
-        WeatherAmbientKind.cloudy => const Color(0xFF3E6080),
-        WeatherAmbientKind.fog => const Color(0xFF446480),
-        WeatherAmbientKind.drizzle => const Color(0xFF345C84),
-        WeatherAmbientKind.rain => const Color(0xFF2E5478),
-        WeatherAmbientKind.snow => const Color(0xFF466880),
-        WeatherAmbientKind.thunder => const Color(0xFF2A4870),
+        WeatherAmbientKind.clear => const Color(0xFF244870),
+        WeatherAmbientKind.partlyCloudy => const Color(0xFF284E76),
+        WeatherAmbientKind.cloudy => const Color(0xFF2E4A66),
+        WeatherAmbientKind.fog => const Color(0xFF324E68),
+        WeatherAmbientKind.drizzle => const Color(0xFF24466A),
+        WeatherAmbientKind.rain => const Color(0xFF204060),
+        WeatherAmbientKind.snow => const Color(0xFF325068),
+        WeatherAmbientKind.thunder => const Color(0xFF1E3A58),
       };
     }
     return kAmbientBlendColor;
@@ -97,7 +97,7 @@ class _Palette {
   static Color skyLower(WeatherAmbientKind kind, bool isDay) {
     if (isDay) {
       // Spodok ambientu = canvas → plynulý prechod do scroll oblasti.
-      return Color.lerp(kAmbientBlendColor, const Color(0xFF2E5880), 0.35)!;
+      return Color.lerp(kAmbientBlendColor, const Color(0xFF1E4060), 0.28)!;
     }
     return kAmbientBlendColor;
   }
@@ -133,8 +133,8 @@ class _Palette {
 
     final gradient = [top, upper, lower, nearBody, floor];
     if (isDay) {
-      // Len jemné stlmenie — canvas má sedieť so scrollom, nie byť čierny pás.
-      const dimToBlack = 0.04;
+      // Jemné stlmenie — hlbší canvas, stále plynulý prechod do scrollu.
+      const dimToBlack = 0.10;
       final adjusted = <Color>[
         Color.lerp(
           Color.lerp(gradient[0], gradient[1], 0.45)!,
@@ -158,9 +158,9 @@ class _Palette {
         blendColor,
       ];
     }
-    // Noc – rovnaký canvas ako UI, mierne nadvihnutý.
-    const nightLift = 0.12;
-    const nightTint = Color(0xFF7A92B0);
+    // Noc – rovnaký canvas ako UI, len veľmi mierne nadvihnutý.
+    const nightLift = 0.06;
+    const nightTint = Color(0xFF5A7088);
     final lifted = gradient
         .map((c) => Color.lerp(c, nightTint, nightLift)!)
         .toList(growable: false);

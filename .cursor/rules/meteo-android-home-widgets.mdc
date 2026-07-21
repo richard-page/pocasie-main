@@ -8,7 +8,7 @@ alwaysApply: false
 
 ## Vzhľad
 
-- Základ: farba karty v appke `kAppCardNavy` (`#243850`) — drawable `meteo_widget_bg` (gradient + border `#3A5674`, radius 20 dp).
+- Základ: farba karty v appke `kAppCardNavy` (`#162434`) — drawable `meteo_widget_bg` (gradient + border `#2A3E56`, radius 20 dp).
 - Layout ako hero karta: **teplota + Pocitovo vľavo**, **ikona + popis vpravo**; Plus má dole panel Vietor / Východ·západ / Vlhkosť (`meteo_widget_hero_glass_info`).
 - Texty: biele a svetlosedé; dôležité čísla bold.
 - Ikony počasia: `SvgPicture` / bitmapy z existujúcich `assets/*.svg` (kódy WMO), nie nové miesta na „odhad“ ikon.
