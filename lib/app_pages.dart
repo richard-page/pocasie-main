@@ -3496,15 +3496,8 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    final ctrl = _controller;
-    if (ctrl != null) {
-      try {
-        ctrl.runJavaScript(
-          'try{if(window.setFullscreen)window.setFullscreen(false);}catch(e){}',
-        );
-      } catch (_) {}
-    }
-    // Zdieľaný controller vlastní WeatherPage — nenič ho.
+    // Nevolaj setFullscreen/resize tu — pri pop by to posunulo kameru ešte pred
+    // remountom do náhľadu (krátky teleport). WeatherPage to spraví s jumpTo.
     if (_ownsController) {
       _controller = null;
     }

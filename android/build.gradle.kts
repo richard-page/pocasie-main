@@ -19,6 +19,48 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+// Pluginy s mandatory javac "Note: unchecked" (-nowarn nestačí).
+// Pred compile doplní @SuppressWarnings do ich Java zdrojov v pub-cache.
+subprojects {
+    fun Project.patchPluginJavaUncheckedNotes() {
+        if (name != "android_intent_plus" && name != "onesignal_flutter") return
+        tasks.withType<JavaCompile>().configureEach {
+            doFirst {
+                val javaSources = source.filter { it.isFile && it.extension == "java" }
+                for (target in javaSources) {
+                    val original = target.readText()
+                    if (original.contains("@SuppressWarnings(\"unchecked\")") ||
+                        original.contains("@SuppressWarnings({\"unchecked\"") ||
+                        original.contains("\"unchecked\"")) {
+                        continue
+                    }
+                    val looksUnchecked =
+                        original.contains("(Map<") ||
+                            original.contains("(ArrayList") ||
+                            original.contains("(List<") ||
+                            original.contains("(HashMap")
+                    if (!looksUnchecked) continue
+
+                    val classMatch = Regex(
+                        """(?m)^((?:public\s+|final\s+|abstract\s+)*)(class|interface)\s+""",
+                    ).find(original) ?: continue
+                    val insertAt = classMatch.range.first
+                    val patched =
+                        original.substring(0, insertAt) +
+                            "@SuppressWarnings({\"unchecked\", \"rawtypes\"})\n" +
+                            original.substring(insertAt)
+                    target.writeText(patched)
+                }
+            }
+        }
+    }
+    if (state.executed) {
+        patchPluginJavaUncheckedNotes()
+    } else {
+        afterEvaluate { patchPluginJavaUncheckedNotes() }
+    }
+}
+
 // Plugins disagree on JVM level (home_widget hardcodes Java/Kotlin 1.8; glance needs ≥11).
 // Override AFTER each plugin's own android{} block. Skip :app (already finalized).
 subprojects {

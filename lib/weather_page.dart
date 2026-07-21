@@ -689,6 +689,43 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
 ''';
   }
 
+  /// Návrat z fullscreen — najprv jumpTo na bodku, až potom resize (inak krátky teleport).
+  String _radarReturnFromFullscreenJs(GeoCity city) {
+    return '''
+(function() {
+  try {
+    document.documentElement.classList.add('hide-ui');
+    document.documentElement.classList.remove('radar-layers-ready');
+    var lat = ${city.lat};
+    var lon = ${city.lon};
+    var z = (typeof requestedZoom !== 'undefined' && !isNaN(requestedZoom)) ? requestedZoom : 7;
+    function pin() {
+      if (typeof map === 'undefined' || !map) return;
+      map.jumpTo({ center: [lon, lat], zoom: z });
+      if (typeof userMarker !== 'undefined' && userMarker) {
+        userMarker.setLngLat([lon, lat]);
+      } else if (typeof mapboxgl !== 'undefined') {
+        var el = document.createElement('div');
+        el.className = 'location-dot';
+        userMarker = new mapboxgl.Marker(el).setLngLat([lon, lat]).addTo(map);
+      }
+    }
+    if (window.setFullscreen) window.setFullscreen(false);
+    pin();
+    if (typeof map !== 'undefined' && map && map.resize) map.resize();
+    pin();
+    requestAnimationFrame(function() {
+      try {
+        if (typeof map !== 'undefined' && map && map.resize) map.resize();
+        pin();
+        document.documentElement.classList.add('radar-layers-ready');
+      } catch (e2) {}
+    });
+  } catch (e) {}
+})();
+''';
+  }
+
   Future<void> _injectRadarReadyGate() async {
     final ctrl = _radarController;
     if (ctrl == null) return;
@@ -827,7 +864,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       ),
     );
     if (!mounted) return;
-    // Nový WebViewWidget na tom istom controlleri — starý Element bol odpojený pri fullscreen.
+    // Zakryť náhľad počas remountu — inak vidno krátky teleport (stred mapy / AT).
     if (_radarController != null) {
       _radarWebViewWidget = RepaintBoundary(
         child: WebViewWidget(
@@ -838,22 +875,22 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         ),
       );
     }
-    setState(() => _isRadarFullscreen = false);
+    setState(() {
+      _isRadarFullscreen = false;
+      _isRadarReturning = true;
+    });
     await WidgetsBinding.instance.endOfFrame;
     await WidgetsBinding.instance.endOfFrame;
-    if (!mounted || _radarController != ctrl) return;
-    _revealRadarMapLayers();
-    unawaited(ctrl.runJavaScript(r'''
-(function(){
-  try {
-    document.documentElement.classList.add('hide-ui');
-    document.documentElement.classList.add('radar-layers-ready');
-    if (window.setFullscreen) window.setFullscreen(false);
-    if (typeof map !== 'undefined' && map && map.resize) map.resize();
-    window.dispatchEvent(new Event('resize'));
-  } catch (e) {}
-})();
-'''));
+    if (!mounted || _radarController != ctrl) {
+      _isRadarReturning = false;
+      return;
+    }
+    try {
+      await ctrl.runJavaScript(_radarReturnFromFullscreenJs(city));
+    } catch (_) {}
+    await Future<void>.delayed(const Duration(milliseconds: 64));
+    if (!mounted) return;
+    setState(() => _isRadarReturning = false);
   }
 
   bool _isLoadingWebcams = false;
@@ -877,7 +914,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   Timer? _radarWarmLoadTimer;
   Timer? _radarContentReadyTimer;
   bool _isRadarFullscreen = false;
-  final bool _isRadarReturning = false;
+  bool _isRadarReturning = false;
   bool _isRadarLoading = false;
   bool _radarLoadFailed = false;
   bool _radarOffline = false;
@@ -4670,15 +4707,6 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         child: Stack(
           alignment: Alignment.center,
           children: [
-            if (_isRadarReturning)
-              const Text(
-                'Prebieha načítavanie radaru...',
-                style: TextStyle(
-                  color: Colors.white70,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
             if (_radarLoadFailed && !_isRadarReturning)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -4737,6 +4765,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
               IgnorePointer(child: _radarWebViewWidget!)
             else if (!_isRadarReturning)
               Container(color: kAmbientBlendColor),
+            // Zakryť remount po fullscreen — jumpTo/resize beží pod overlayom.
+            if (_isRadarReturning)
+              const Positioned.fill(
+                child: ColoredBox(color: kAmbientBlendColor),
+              ),
             // Statický text — žiadny progress bar (pri WebView sa animácie sekajú).
             if (!_isRadarReturning &&
                 !_radarLoadFailed &&

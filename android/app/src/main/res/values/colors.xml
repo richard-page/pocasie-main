@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Rovnaká ako Flutter kAmbientBlendColor (splash / načítavanie). -->
-    <color name="launch_splash_bg">#0E1826</color>
+    <color name="launch_splash_bg">#172438</color>
     <color name="notification_accent">#2196F3</color>
 </resources>
