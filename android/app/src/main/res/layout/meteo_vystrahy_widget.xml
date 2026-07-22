@@ -83,8 +83,8 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="3dp"
                 android:ellipsize="end"
-                android:maxLines="2"
-                android:text="Búrka (2. st.) · Dážď (1. st.)"
+                android:maxLines="5"
+                android:text="Búrky · Platí do dnes 23:59"
                 android:textColor="#EBFFFFFF"
                 android:textSize="12sp"
                 android:textStyle="bold"
@@ -97,11 +97,11 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
                 android:ellipsize="end"
-                android:maxLines="2"
+                android:maxLines="3"
                 android:text="Práve platí vo vašom okrese"
                 android:textColor="#E6FFFFFF"
                 android:textSize="12sp"
-                tools:text="Najskôr zajtra 10:00 (o 23 h)" />
+                tools:text="Od dnes 14:00 do 18:00 (o 2 h)" />
         </LinearLayout>
 
         <TextView

@@ -3459,7 +3459,10 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
     if (shared != null) {
       _ownsController = false;
       _controller = shared;
-      _radarView = buildMeteoRadarWebView(controller: shared);
+      _radarView = buildMeteoRadarWebView(
+        controller: shared,
+        hybridComposition: true,
+      );
       if (!mounted) return;
       setState(() => _surfaceReady = true);
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -3500,7 +3503,10 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
 
     if (!mounted) return;
     _controller = controller;
-    _radarView = buildMeteoRadarWebView(controller: controller);
+    _radarView = buildMeteoRadarWebView(
+      controller: controller,
+      hybridComposition: true,
+    );
     setState(() => _surfaceReady = true);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -3961,6 +3967,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       return;
     }
     _scheduledWarmupTimer = Timer(delay, () {
+      if (_controller != null || _warming) return;
       warmup();
     });
   }

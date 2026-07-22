@@ -569,39 +569,42 @@ String buildMeteoRadarPinCityJs({
 ''';
 }
 
-/// Plynulejšie posúvanie Mapbox radaru — skryť drahé blur/hranice počas drag.
+/// Počas panovania: nepinuj kameru. Hranice SK ostávajú vždy viditeľné.
 const String kMeteoRadarPanPerfJs = r'''
 (function() {
   try {
-    if (window.__appRadarPanPerf) return;
+    if (window.__appRadarPanPerfV2) return;
     if (typeof map === 'undefined' || !map || typeof map.on !== 'function') return;
+    window.__appRadarPanPerfV2 = true;
     window.__appRadarPanPerf = true;
-    var heavy = [
+    var borderIds = [
       'sk-borders-glow', 'ro-borders-glow',
       'sk-borders-layer', 'ro-borders-layer'
     ];
-    var endTimer = null;
-    function setHeavy(vis) {
-      for (var i = 0; i < heavy.length; i++) {
+    function restoreBorders() {
+      for (var i = 0; i < borderIds.length; i++) {
         try {
-          if (map.getLayer(heavy[i])) {
-            map.setLayoutProperty(heavy[i], 'visibility', vis);
+          if (map.getLayer(borderIds[i])) {
+            map.setLayoutProperty(borderIds[i], 'visibility', 'visible');
           }
         } catch (eL) {}
       }
     }
+    restoreBorders();
+    var endTimer = null;
     function onMoveStart() {
       window.__appRadarUserInteracting = true;
       if (endTimer) { clearTimeout(endTimer); endTimer = null; }
-      setHeavy('none');
+      // Ak stará verzia schovala hranice, hneď ich vráť.
+      requestAnimationFrame(restoreBorders);
     }
     function onMoveEnd() {
       if (endTimer) clearTimeout(endTimer);
       endTimer = setTimeout(function() {
         endTimer = null;
         window.__appRadarUserInteracting = false;
-        setHeavy('visible');
-      }, 120);
+        restoreBorders();
+      }, 130);
     }
     map.on('movestart', onMoveStart);
     map.on('zoomstart', onMoveStart);
@@ -616,9 +619,10 @@ const String kMeteoRadarPanPerfJs = r'''
 })();
 ''';
 
-/// Android: Hybrid Composition — Texture/SurfaceView robí Mapbox pan sekavý.
+/// Radar WebView. Hybrid Composition len vo fullscreen — v scrolle Texture (inak sa UI seká).
 Widget buildMeteoRadarWebView({
   required WebViewController controller,
+  bool hybridComposition = false,
   Set<Factory<OneSequenceGestureRecognizer>>? gestureRecognizers,
 }) {
   final gestures = gestureRecognizers ??
@@ -629,7 +633,7 @@ Widget buildMeteoRadarWebView({
     return WebViewWidget.fromPlatformCreationParams(
       params: AndroidWebViewWidgetCreationParams(
         controller: controller.platform,
-        displayWithHybridComposition: true,
+        displayWithHybridComposition: hybridComposition,
         gestureRecognizers: gestures,
       ),
     );
@@ -847,26 +851,65 @@ String _formatVystrahyRelativeDurationSk(Duration diff) {
   return 'o chvíľu';
 }
 
-String formatVystrahyTimingLine({
-  required DateTime now,
-  DateTime? startAt,
-  required bool isActiveNow,
-}) {
-  if (isActiveNow) return 'Práve platí vo vašom okrese';
-  if (startAt == null) return '';
-  final time =
-      '${startAt.hour.toString().padLeft(2, '0')}:${startAt.minute.toString().padLeft(2, '0')}';
-  final rel = _formatVystrahyRelativeDurationSk(startAt.difference(now));
+String _formatVystrahyClock(DateTime at) =>
+    '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+
+String _formatVystrahyDayWord(DateTime now, DateTime at) {
   final today = DateTime(now.year, now.month, now.day);
-  final startDay = DateTime(startAt.year, startAt.month, startAt.day);
-  final dayDiff = startDay.difference(today).inDays;
-  final dayWord = switch (dayDiff) {
+  final day = DateTime(at.year, at.month, at.day);
+  final dayDiff = day.difference(today).inDays;
+  return switch (dayDiff) {
     0 => 'dnes',
     1 => 'zajtra',
     2 => 'pozajtra',
-    _ => '${startAt.day}.${startAt.month}.',
+    _ => '${at.day}.${at.month}.',
   };
-  return 'Začína $dayWord $time ($rel)';
+}
+
+String _formatVystrahyDayTime(DateTime now, DateTime at) =>
+    '${_formatVystrahyDayWord(now, at)} ${_formatVystrahyClock(at)}';
+
+/// Jedna info-riadok: kedy výstraha začína a kedy končí.
+String formatVystrahyTimingLine({
+  required DateTime now,
+  DateTime? startAt,
+  DateTime? endAt,
+  required bool isActiveNow,
+}) {
+  String? rangeLabel() {
+    if (startAt == null && endAt == null) return null;
+    if (startAt != null && endAt != null) {
+      final startLabel = _formatVystrahyDayTime(now, startAt);
+      final sameDay = startAt.year == endAt.year &&
+          startAt.month == endAt.month &&
+          startAt.day == endAt.day;
+      if (sameDay) {
+        return 'Od $startLabel do ${_formatVystrahyClock(endAt)}';
+      }
+      return 'Od $startLabel do ${_formatVystrahyDayTime(now, endAt)}';
+    }
+    if (startAt != null) {
+      return 'Od ${_formatVystrahyDayTime(now, startAt)}';
+    }
+    return 'Do ${_formatVystrahyDayTime(now, endAt!)}';
+  }
+
+  if (isActiveNow) {
+    final range = rangeLabel();
+    if (range != null) return range;
+    return 'Práve platí vo vašom okrese';
+  }
+
+  if (startAt == null) {
+    if (endAt != null) return 'Do ${_formatVystrahyDayTime(now, endAt)}';
+    return '';
+  }
+
+  final startLabel = _formatVystrahyDayTime(now, startAt);
+  final rel = _formatVystrahyRelativeDurationSk(startAt.difference(now));
+  final range = rangeLabel();
+  if (range != null) return '$range ($rel)';
+  return 'Začína $startLabel ($rel)';
 }
 
 class VystrahyWarningItem {
@@ -875,6 +918,7 @@ class VystrahyWarningItem {
     required this.jav,
     this.javId,
     this.startAt,
+    this.endAt,
     this.isActiveNow = false,
   });
 
@@ -882,15 +926,29 @@ class VystrahyWarningItem {
   final String jav;
   final String? javId;
   final DateTime? startAt;
+  final DateTime? endAt;
   final bool isActiveNow;
 
   bool get isValid => rank >= 1 && jav.isNotEmpty;
 
   String levelLine(String okres) => '$rank. stupeň • okres $okres';
 
+  /// Jedna výstraha: „Búrky · do dnes 23:59“ / „Dážď · od zajtra 08:00 do 18:00“.
+  String scheduleLine(DateTime now) {
+    final when = formatVystrahyTimingLine(
+      now: now,
+      startAt: startAt,
+      endAt: endAt,
+      isActiveNow: isActiveNow,
+    );
+    if (when.isEmpty) return '$jav · $rank. st.';
+    return '$jav · $when';
+  }
+
   String timingLine(DateTime now) => formatVystrahyTimingLine(
         now: now,
         startAt: startAt,
+        endAt: endAt,
         isActiveNow: isActiveNow,
       );
 
@@ -905,6 +963,7 @@ class VystrahyWarningItem {
     final jav = (map['jav'] as String?)?.trim() ?? '';
     if (rank < 1 || jav.isEmpty) return null;
     final od = (map['od'] as String?)?.trim() ?? '';
+    final doUntil = (map['do'] as String?)?.trim() ?? '';
     final javIdRaw = (map['javId'] as String?)?.trim();
     return VystrahyWarningItem(
       rank: rank,
@@ -913,6 +972,7 @@ class VystrahyWarningItem {
           ? javIdRaw
           : resolveVystrahyJavId(jav),
       startAt: parseVystrahySkDateTime(od),
+      endAt: parseVystrahySkDateTime(doUntil),
       isActiveNow: map['active'] == true,
     );
   }
@@ -924,11 +984,12 @@ class VystrahyWarningItem {
         other.jav == jav &&
         other.javId == javId &&
         other.startAt == startAt &&
+        other.endAt == endAt &&
         other.isActiveNow == isActiveNow;
   }
 
   @override
-  int get hashCode => Object.hash(rank, jav, javId, startAt, isActiveNow);
+  int get hashCode => Object.hash(rank, jav, javId, startAt, endAt, isActiveNow);
 }
 
 class VystrahyActiveNotice {
@@ -993,28 +1054,24 @@ class VystrahyActiveNotice {
         .join(' · ');
   }
 
-  String multiTimingSummary(DateTime now) {
-    final list = visibleItems;
-    if (list.isEmpty) return '';
-    final activeCount = list.where((item) => item.isActiveNow).length;
-    if (activeCount == list.length) {
-      return 'Práve platia vo vašom okrese';
-    }
-    if (activeCount > 0) {
-      final upcoming = list.length - activeCount;
-      return '$activeCount platí · $upcoming ${upcoming == 1 ? 'nadchádza' : 'nadchádzajú'}';
-    }
-    final upcoming = list
-        .where((item) => item.startAt != null)
-        .toList()
-      ..sort((a, b) => a.startAt!.compareTo(b.startAt!));
-    if (upcoming.isEmpty) return 'Ťuknite pre detail na mape';
-    final first = upcoming.first.timingLine(now);
-    if (first.startsWith('Začína ')) {
-      return 'Najskôr ${first.substring('Začína '.length)}';
-    }
-    return first;
+  /// Prehľadný zoznam: každý jav na vlastnom riadku s od–do.
+  String multiScheduleLines(DateTime now) {
+    final list = [...visibleItems]..sort((a, b) {
+        if (a.isActiveNow != b.isActiveNow) {
+          return a.isActiveNow ? -1 : 1;
+        }
+        if (b.rank != a.rank) return b.rank.compareTo(a.rank);
+        final aStart = a.startAt;
+        final bStart = b.startAt;
+        if (aStart == null && bStart == null) return 0;
+        if (aStart == null) return 1;
+        if (bStart == null) return -1;
+        return aStart.compareTo(bStart);
+      });
+    return list.map((item) => item.scheduleLine(now)).join('\n');
   }
+
+  String multiTimingSummary(DateTime now) => multiScheduleLines(now);
 
   static VystrahyActiveNotice? fromJsJson(String raw) {
     final trimmed = raw.trim();
@@ -1083,10 +1140,9 @@ Future<void> syncVystrahyHomeWidgetFromNotice(
       levelLine: single
           ? notice.visibleItems.first.levelLine(notice.okres)
           : notice.multiLevelOkresLine(),
-      typesLine: single ? '' : notice.multiTypesLine(),
-      timing: single
-          ? notice.visibleItems.first.timingLine(now)
-          : notice.multiTimingSummary(now),
+      // Viac výstrah: každý jav + od–do na vlastnom riadku (nie „2 platí · 1 nadchádza“).
+      typesLine: single ? '' : notice.multiScheduleLines(now),
+      timing: single ? notice.visibleItems.first.timingLine(now) : '',
       okres: notice.okres,
       rank: notice.rank,
       javId: primary?.javId ?? primary?.jav ?? '',

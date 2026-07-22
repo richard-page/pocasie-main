@@ -191,37 +191,91 @@ class VystrahyWidgetSnapshot {
 
   String typesLine() {
     if (items.length <= 1) return '';
-    return items.map((i) => '${i.jav} (${i.rank}. st.)').join(' · ');
+    return scheduleLines(DateTime.now());
   }
 
   String timingLine(DateTime now) {
     if (items.isEmpty) return '';
     if (items.length == 1) {
-      final item = items.first;
-      if (item.isActiveNow) return 'Práve platí vo vašom okrese';
-      final start = item.od;
-      if (start == null) return '';
-      return _formatStart(now, start);
+      return _formatItemTiming(now, items.first);
     }
-    final active = items.where((i) => i.isActiveNow).length;
-    if (active == items.length) return 'Práve platia vo vašom okrese';
-    if (active > 0) {
-      final upcoming = items.length - active;
-      return '$active platí · $upcoming ${upcoming == 1 ? 'nadchádza' : 'nadchádzajú'}';
-    }
-    final upcoming = items.where((i) => i.od != null).toList()
-      ..sort((a, b) => a.od!.compareTo(b.od!));
-    if (upcoming.isEmpty) return 'Ťuknite pre detail na mape';
-    final first = _formatStart(now, upcoming.first.od!);
-    if (first.startsWith('Začína ')) {
-      return 'Najskôr ${first.substring('Začína '.length)}';
-    }
-    return first;
+    // Viac výstrah: rozpis je v typesLine (každý jav + od–do).
+    return '';
   }
 
-  static String _formatStart(DateTime now, DateTime startAt) {
-    final time =
-        '${startAt.hour.toString().padLeft(2, '0')}:${startAt.minute.toString().padLeft(2, '0')}';
+  String scheduleLines([DateTime? now]) {
+    final at = now ?? DateTime.now();
+    final list = [...items]..sort((a, b) {
+        if (a.isActiveNow != b.isActiveNow) {
+          return a.isActiveNow ? -1 : 1;
+        }
+        if (b.rank != a.rank) return b.rank.compareTo(a.rank);
+        final aOd = a.od;
+        final bOd = b.od;
+        if (aOd == null && bOd == null) return 0;
+        if (aOd == null) return 1;
+        if (bOd == null) return -1;
+        return aOd.compareTo(bOd);
+      });
+    return list.map((item) => _formatItemSchedule(at, item)).join('\n');
+  }
+
+  static String _clock(DateTime at) =>
+      '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+
+  static String _dayWord(DateTime now, DateTime at) {
+    final today = DateTime(now.year, now.month, now.day);
+    final day = DateTime(at.year, at.month, at.day);
+    final dayDiff = day.difference(today).inDays;
+    return switch (dayDiff) {
+      0 => 'dnes',
+      1 => 'zajtra',
+      2 => 'pozajtra',
+      _ => '${at.day}.${at.month}.',
+    };
+  }
+
+  static String _dayTime(DateTime now, DateTime at) =>
+      '${_dayWord(now, at)} ${_clock(at)}';
+
+  static String _formatItemSchedule(DateTime now, VystrahyWidgetItem item) {
+    final when = _formatItemTiming(now, item);
+    if (when.isEmpty) return '${item.jav} · ${item.rank}. st.';
+    return '${item.jav} · $when';
+  }
+
+  static String _formatItemTiming(DateTime now, VystrahyWidgetItem item) {
+    final startAt = item.od;
+    final endAt = item.doUntil;
+
+    String? rangeLabel() {
+      if (startAt == null && endAt == null) return null;
+      if (startAt != null && endAt != null) {
+        final startLabel = _dayTime(now, startAt);
+        final sameDay = startAt.year == endAt.year &&
+            startAt.month == endAt.month &&
+            startAt.day == endAt.day;
+        if (sameDay) {
+          return 'Od $startLabel do ${_clock(endAt)}';
+        }
+        return 'Od $startLabel do ${_dayTime(now, endAt)}';
+      }
+      if (startAt != null) return 'Od ${_dayTime(now, startAt)}';
+      return 'Do ${_dayTime(now, endAt!)}';
+    }
+
+    if (item.isActiveNow) {
+      final range = rangeLabel();
+      if (range != null) return range;
+      return 'Práve platí';
+    }
+
+    if (startAt == null) {
+      if (endAt != null) return 'Do ${_dayTime(now, endAt)}';
+      return '';
+    }
+
+    final startLabel = _dayTime(now, startAt);
     var diff = startAt.difference(now);
     if (diff.isNegative) diff = Duration.zero;
     final totalMinutes = diff.inMinutes;
@@ -234,16 +288,9 @@ class VystrahyWidgetSnapshot {
             : minutes > 0
                 ? 'o $minutes min'
                 : 'o chvíľu';
-    final today = DateTime(now.year, now.month, now.day);
-    final startDay = DateTime(startAt.year, startAt.month, startAt.day);
-    final dayDiff = startDay.difference(today).inDays;
-    final dayWord = switch (dayDiff) {
-      0 => 'dnes',
-      1 => 'zajtra',
-      2 => 'pozajtra',
-      _ => '${startAt.day}.${startAt.month}.',
-    };
-    return 'Začína $dayWord $time ($rel)';
+    final range = rangeLabel();
+    if (range != null) return '$range ($rel)';
+    return 'Začína $startLabel ($rel)';
   }
 }
 
