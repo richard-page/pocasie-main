@@ -151,8 +151,54 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
   Future<void> _setWidgetPreset(int minutes) async {
     await SettingsManager.setHomeWidgetUpdateIntervalMinutes(minutes);
     await rescheduleAndroidHomeWidgetPeriodicWork();
+    // Okamžite prekresli widgety (počasie + výstrahy), aby interval neostal len „na papieri“.
+    unawaited(_kickHomeWidgetsRefresh());
     if (!mounted) return;
     setState(() => _widgetUpdateMinutes = minutes);
+  }
+
+  Future<void> _kickHomeWidgetsRefresh() async {
+    try {
+      final last = await SettingsManager.getLastLocation();
+      if (last == null) return;
+      final dbase = await fetchVystrahyDbaseMap();
+      if (dbase != null && cityEligibleForVystrahy(last)) {
+        final okres = matchVystrahyOkresName(
+          cityName: last.name,
+          admin1: last.admin1,
+          admin2: last.admin2,
+        );
+        if (okres != null) {
+          final snap = buildVystrahySnapshotForOkres(dbase, okres);
+          if (snap != null && snap.hasWarning) {
+            final primary = snap.primary;
+            await VystrahyHomeWidget.update(
+              hasWarning: true,
+              title: snap.countTitleSk(),
+              levelLine: snap.levelLine(),
+              typesLine: snap.typesLine(),
+              timing: snap.timingLine(DateTime.now()),
+              okres: snap.okres,
+              rank: snap.maxRank,
+              javId: primary.jav,
+            );
+          } else {
+            await VystrahyHomeWidget.clear(okres: okres);
+          }
+        }
+      } else {
+        await VystrahyHomeWidget.clear(showMapHint: false);
+      }
+      // WorkManager úloha aj hneď — počasie widget.
+      await Workmanager().registerOneOffTask(
+        'sk.menopocasie.widget_oneoff_${DateTime.now().millisecondsSinceEpoch}',
+        'sk.menopocasie.widgetRefresh',
+        constraints: Constraints(networkType: NetworkType.connected),
+        existingWorkPolicy: ExistingWorkPolicy.replace,
+      );
+    } catch (e) {
+      debugPrint('_kickHomeWidgetsRefresh: $e');
+    }
   }
 
   String _fmtTime(TimeOfDay t) {
@@ -277,6 +323,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
         _selectedWindUnit = unit;
       });
     }
+    // Widgety (vietor) majú použiť novú jednotku hneď.
+    unawaited(_kickHomeWidgetsRefresh());
   }
 
   Future<void> _saveMyLocationEnabled(bool value) async {
@@ -423,7 +471,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                                 ),
                                 const SizedBox(height: 8),
                                 Text(
-                                  'Keď je táto funkcia zapnutá, aplikácia pri spustení a po potiahnutí nadol automaticky získa vašu aktuálnu GPS polohu. Ak je vypnutá, používa sa iba posledná vybraná poloha.',
+                                  'Keď je táto funkcia zapnutá, aplikácia pri spustení automaticky získa vašu aktuálnu GPS polohu. Ak je vypnutá, používa sa iba posledná vybraná poloha.',
                                   style: _chartCaptionStyle(size: 14).copyWith(
                                     color: _kChartTextSecondary,
                                     height: 1.4,
@@ -2691,7 +2739,9 @@ class _CitySearchPageState extends State<CitySearchPage> {
     final bool showEmptyState = _c.text.isEmpty && _searchHistory.isEmpty;
     final bool showResults = _c.text.isNotEmpty;
 
-    return ForecastSubpageScaffold(
+    return ColoredBox(
+      color: kAmbientBlendColor,
+      child: ForecastSubpageScaffold(
       title: 'Vyhľadávanie miest',
       wrapBodyInGlass: false,
       resizeToAvoidBottomInset: false,
@@ -2798,6 +2848,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
             ),
           ),
         ],
+      ),
       ),
     );
   }
@@ -3369,12 +3420,20 @@ class FullscreenRadarPage extends StatefulWidget {
   final WebViewController? controller;
   final String initialUrl;
   final bool contentAlreadyReady;
+  /// Dlaždice už načítané vo full veľkosti pred push.
+  final bool tilesPreloaded;
+  /// Kam pinovať kameru po setFullscreen/resize (inak Helkor skočí na celú SR).
+  final double? pinLat;
+  final double? pinLon;
 
   const FullscreenRadarPage({
     super.key,
     required this.initialUrl,
     this.controller,
     this.contentAlreadyReady = false,
+    this.tilesPreloaded = false,
+    this.pinLat,
+    this.pinLon,
   });
 
   @override
@@ -3400,12 +3459,7 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
     if (shared != null) {
       _ownsController = false;
       _controller = shared;
-      _radarView = WebViewWidget(
-        controller: shared,
-        gestureRecognizers: {
-          Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
-        },
-      );
+      _radarView = buildMeteoRadarWebView(controller: shared);
       if (!mounted) return;
       setState(() => _surfaceReady = true);
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -3446,12 +3500,7 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
 
     if (!mounted) return;
     _controller = controller;
-    _radarView = WebViewWidget(
-      controller: controller,
-      gestureRecognizers: {
-        Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
-      },
-    );
+    _radarView = buildMeteoRadarWebView(controller: controller);
     setState(() => _surfaceReady = true);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -3463,33 +3512,99 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
   Future<void> _attachRadarSurface() async {
     final ctrl = _controller;
     if (ctrl == null || !mounted) return;
+    final soft = widget.tilesPreloaded;
+    final lat = widget.pinLat;
+    final lon = widget.pinLon;
+    final hasPin = lat != null && lon != null;
     try {
-      await ctrl.runJavaScript(r'''
+      if (hasPin) {
+        await ctrl.runJavaScript(buildMeteoRadarPinCityJs(
+          lat: lat,
+          lon: lon,
+          fullscreen: true,
+          removeChrome: true,
+          hideLayersUntilPinned: !soft,
+        ));
+      } else {
+        await ctrl.runJavaScript('''
 (function(){
   try {
     document.documentElement.classList.add('hide-ui');
-    document.documentElement.classList.add('radar-layers-ready');
+    ${soft ? '' : "document.documentElement.classList.remove('radar-layers-ready');"}
     var chrome = document.getElementById('app-radar-chrome');
     if (chrome) chrome.remove();
+    if (window.setFullscreen) window.setFullscreen(true);
     if (typeof map !== 'undefined' && map && map.resize) map.resize();
     window.dispatchEvent(new Event('resize'));
-    if (window.setFullscreen) window.setFullscreen(true);
+    ${soft ? "document.documentElement.classList.add('radar-layers-ready');" : ''}
   } catch (e) {}
 })();
 ''');
+      }
+      await ctrl.runJavaScript(kMeteoRadarPanPerfJs);
     } catch (_) {}
-    // Po zmene veľkosti ešte raz — Mapbox často potrebuje druhý resize.
-    await Future<void>.delayed(const Duration(milliseconds: 48));
-    if (!mounted || _controller != ctrl) return;
-    try {
-      await ctrl.runJavaScript(r'''
+    if (soft) {
+      // Dlaždice už vo full veľkosti — druhý pin po resize (setFullscreen inak nechá SR).
+      await Future<void>.delayed(const Duration(milliseconds: 32));
+      if (!mounted || _controller != ctrl) return;
+      try {
+        if (hasPin) {
+          await ctrl.runJavaScript(buildMeteoRadarPinCityJs(
+            lat: lat,
+            lon: lon,
+            fullscreen: true,
+          ));
+        } else {
+          await ctrl.runJavaScript(r'''
 (function(){
   try {
     if (typeof map !== 'undefined' && map && map.resize) map.resize();
-    window.dispatchEvent(new Event('resize'));
+    document.documentElement.classList.add('radar-layers-ready');
   } catch (e) {}
 })();
 ''');
+        }
+      } catch (_) {}
+      return;
+    }
+    // Cold path — počkaj na dlaždice pred odhalením mapy.
+    await Future<void>.delayed(const Duration(milliseconds: 48));
+    if (!mounted || _controller != ctrl) return;
+    for (var i = 0; i < 24; i++) {
+      if (!mounted || _controller != ctrl) return;
+      try {
+        final raw = await ctrl.runJavaScriptReturningResult(r'''
+(function(){
+  try {
+    if (typeof map === 'undefined' || !map) return '0';
+    if (typeof map.areTilesLoaded === 'function') return map.areTilesLoaded() ? '1' : '0';
+    if (typeof map.loaded === 'function') return map.loaded() ? '1' : '0';
+    return '1';
+  } catch (e) { return '0'; }
+})()
+''');
+        if (raw.toString().contains('1')) break;
+      } catch (_) {}
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    if (!mounted || _controller != ctrl) return;
+    try {
+      if (hasPin) {
+        await ctrl.runJavaScript(buildMeteoRadarPinCityJs(
+          lat: lat,
+          lon: lon,
+          fullscreen: true,
+        ));
+      } else {
+        await ctrl.runJavaScript(r'''
+(function(){
+  try {
+    if (typeof map !== 'undefined' && map && map.resize) map.resize();
+    document.documentElement.classList.add('radar-layers-ready');
+  } catch (e) {}
+})();
+''');
+      }
     } catch (_) {}
   }
 
@@ -3517,8 +3632,172 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
     }
   }
 
+  Widget _radarChromeButton({
+    required IconData icon,
+    required VoidCallback onTap,
+    EdgeInsetsGeometry margin = const EdgeInsets.all(8),
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 40,
+        height: 40,
+        margin: margin,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: kAppCardNavy,
+          border: Border.all(color: kAppCardNavyBorder),
+        ),
+        child: Center(child: Icon(icon, size: 20, color: Colors.white)),
+      ),
+    );
+  }
+
+  void _showRadarSourceInfo(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return Center(
+          child: Material(
+            type: MaterialType.transparency,
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 24),
+              decoration: BoxDecoration(
+                color: kAmbientBlendColor,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: kAppCardNavyBorder),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(20.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.info_outline, size: 48, color: _kChartLineBlue),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Zdroj dát',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Radarové dáta sú spracované z otvorených dát SHMÚ (SK), ČHMÚ (CZ), IMGW (PL), DWD (DE) a ANM (RO).',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.white70,
+                        height: 1.4,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Blesky: EUMETSAT',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.white70,
+                        height: 1.4,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    GestureDetector(
+                      onTap: () => launchUrl(Uri.parse('https://www.eumetsat.int')),
+                      child: const Text(
+                        'https://www.eumetsat.int',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: _kChartLineBlue,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: kAppCardNavy,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              elevation: 0,
+                              shadowColor: Colors.transparent,
+                              surfaceTintColor: Colors.transparent,
+                              splashFactory: NoSplash.splashFactory,
+                            ).copyWith(
+                              overlayColor: WidgetStateProperty.all(Colors.transparent),
+                            ),
+                            child: const Text(
+                              'Zavrieť',
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: () {
+                              openUrl('https://www.shmu.sk');
+                              Navigator.of(context).pop();
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: _kChartLineBlue,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              elevation: 0,
+                              shadowColor: Colors.transparent,
+                              surfaceTintColor: Colors.transparent,
+                              splashFactory: NoSplash.splashFactory,
+                            ).copyWith(
+                              overlayColor: WidgetStateProperty.all(Colors.transparent),
+                            ),
+                            child: const Text(
+                              'Web SHMÚ',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final mapBody = !_surfaceReady || _radarView == null
+        ? const ColoredBox(
+            color: kAmbientBlendColor,
+            child: Center(
+              child: Text(
+                'Načítavam radar...',
+                style: TextStyle(color: Colors.white70, fontSize: 14),
+              ),
+            ),
+          )
+        : _radarView!;
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -3526,175 +3805,67 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
           _closeRadar(context);
         }
       },
-      child: Scaffold(
-        backgroundColor: kAmbientBlendColor,
-        appBar: AppBar(
-          backgroundColor: kAmbientBlendColor,
-          elevation: 0,
-          title: const Text('Meteo Radar', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white)),
-          centerTitle: true,
-          leading: GestureDetector(
-            onTap: () => _closeRadar(context),
-            child: Container(
-              width: 36,
-              height: 36,
-              margin: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: const Color.fromRGBO(255, 255, 255, 0.1),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Center(child: Icon(Icons.arrow_back, size: 22, color: Colors.white)),
-            ),
-          ),
-          actions: [
-            GestureDetector(
-              onTap: () {
-                showDialog(
-                  context: context,
-                  builder: (BuildContext context) {
-                    return Center(
-                      child: Material(
-                        type: MaterialType.transparency,
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 24),
-                          decoration: BoxDecoration(
-                            color: kAmbientBlendColor,
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(20.0),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.info_outline, size: 48, color: _kChartLineBlue),
-                                const SizedBox(height: 16),
-                                const Text(
-                                  'Zdroj dát',
-                                  style: TextStyle(
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                const Text(
-                                  'Radarové dáta sú spracované z otvorených dát SHMÚ (SK), ČHMÚ (CZ), IMGW (PL), DWD (DE) a ANM (RO).',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.white70,
-                                    height: 1.4,
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                const Text(
-                                  'Blesky: EUMETSAT',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.white70,
-                                    height: 1.4,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                GestureDetector(
-                                  onTap: () => launchUrl(Uri.parse('https://www.eumetsat.int')),
-                                  child: const Text(
-                                    'https://www.eumetsat.int',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      fontSize: 14,
-                                      color: _kChartLineBlue,
-                                      decoration: TextDecoration.underline,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 24),
-                                Row(
-                                  children: [
-                                    Expanded(
-                                      child: ElevatedButton(
-                                        onPressed: () => Navigator.of(context).pop(),
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: kAmbientBlendColor,
-                                          padding: const EdgeInsets.symmetric(vertical: 12),
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(10),
-                                          ),
-                                          elevation: 0,
-                                          shadowColor: Colors.transparent,
-                                          surfaceTintColor: Colors.transparent,
-                                          splashFactory: NoSplash.splashFactory,
-                                        ).copyWith(
-                                          overlayColor: WidgetStateProperty.all(Colors.transparent),
-                                        ),
-                                        child: const Text('Zavrieť', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: ElevatedButton(
-                                        onPressed: () {
-                                          openUrl('https://www.shmu.sk');
-                                          Navigator.of(context).pop();
-                                        },
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: _kChartLineBlue,
-                                          padding: const EdgeInsets.symmetric(vertical: 12),
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(10),
-                                          ),
-                                          elevation: 0,
-                                          shadowColor: Colors.transparent,
-                                          surfaceTintColor: Colors.transparent,
-                                          splashFactory: NoSplash.splashFactory,
-                                        ).copyWith(
-                                          overlayColor: WidgetStateProperty.all(Colors.transparent),
-                                        ),
-                                        child: const Text('Web SHMÚ', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                );
-              },
-              child: Container(
-                width: 36,
-                height: 36,
-                margin: const EdgeInsets.only(top: 8, bottom: 8, right: 12, left: 4),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
-                ),
-                child: const Center(child: Icon(Icons.info_outline, size: 20, color: Colors.white)),
-              ),
-            ),
-          ],
+      child: AnnotatedRegion<SystemUiOverlayStyle>(
+        value: const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness: Brightness.light,
+          statusBarBrightness: Brightness.dark,
         ),
-        body: !_surfaceReady || _radarView == null
-            ? const ColoredBox(
-                color: kAmbientBlendColor,
-                child: Center(
-                  child: Text(
-                    'Načítavam radar...',
-                    style: TextStyle(color: Colors.white70, fontSize: 14),
+        child: Scaffold(
+          backgroundColor: kAmbientBlendColor,
+          extendBodyBehindAppBar: true,
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            scrolledUnderElevation: 0,
+            forceMaterialTransparency: true,
+            foregroundColor: Colors.white,
+            centerTitle: true,
+            automaticallyImplyLeading: false,
+            leadingWidth: 56,
+            leading: _radarChromeButton(
+              icon: Icons.arrow_back_rounded,
+              onTap: () => _closeRadar(context),
+            ),
+            title: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: kAppCardNavyElevated.withValues(alpha: 0.92),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: kAppCardNavyBorder),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.25),
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
                   ),
+                ],
+              ),
+              child: const Text(
+                'Meteo Radar',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                  letterSpacing: 0.2,
                 ),
-              )
-            : _radarView!,
+              ),
+            ),
+            actions: [
+              _radarChromeButton(
+                icon: Icons.info_outline_rounded,
+                onTap: () => _showRadarSourceInfo(context),
+                margin: const EdgeInsets.only(top: 8, bottom: 8, right: 8, left: 4),
+              ),
+            ],
+          ),
+          body: mapBody,
+        ),
       ),
     );
   }
 }
-
 
 class VystrahyWebViewPreloader extends ChangeNotifier {
   VystrahyWebViewPreloader._();
@@ -3715,6 +3886,9 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css',
   ];
 
+  static const String _kReadVystrahyNoticeJs =
+      '(function(){try{var n=window.__pocasieVystrahyNotice;if(!n)return"";return JSON.stringify(n);}catch(e){return"";}})()';
+
   WebViewController? _controller;
   bool _warming = false;
   bool _attachedToPage = false;
@@ -3728,9 +3902,12 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   bool softReloading = false;
   /// Ďalší `onPageStarted` má nechať mapu viditeľnú (soft navigácia).
   bool _preferSoftNavigation = false;
+  /// Aktívna výstraha v okrese používateľa (null = nič nezobrazovať).
+  VystrahyActiveNotice? activeWarningNotice;
   Timer? _loadTimeout;
   Timer? _scheduledWarmupTimer;
   Timer? _okresyReadyPoll;
+  Timer? _warningRankRecheckTimer;
   final List<Timer> _mapResizeInjectTimers = [];
   double? _userLat;
   double? _userLon;
@@ -3739,6 +3916,8 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   bool get attachedToPage => _attachedToPage;
   bool get isReadyForInstantOpen =>
       _controller != null && loaded && mapContentReady && !failed;
+  bool get hasActiveWarningNotice => activeWarningNotice?.shouldShow == true;
+  int get activeWarningRank => activeWarningNotice?.rank ?? 0;
 
   void _notifySafely() {
     final binding = WidgetsBinding.instance;
@@ -3792,6 +3971,69 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     _okresyReadyPoll?.cancel();
     _okresyReadyPoll = null;
     _notifySafely();
+    unawaited(refreshActiveWarningNotice());
+  }
+
+  void clearActiveWarning({bool showMapHint = false}) {
+    _warningRankRecheckTimer?.cancel();
+    _warningRankRecheckTimer = null;
+    if (activeWarningNotice == null) {
+      unawaited(syncVystrahyHomeWidgetFromNotice(
+        null,
+        showMapHint: showMapHint,
+      ));
+      return;
+    }
+    activeWarningNotice = null;
+    _notifySafely();
+    unawaited(syncVystrahyHomeWidgetFromNotice(
+      null,
+      showMapHint: showMapHint,
+    ));
+  }
+
+  void _setActiveWarningNotice(VystrahyActiveNotice? notice) {
+    if (activeWarningNotice == notice) return;
+    activeWarningNotice = notice;
+    _notifySafely();
+    unawaited(
+      syncVystrahyHomeWidgetFromNotice(
+        notice,
+        fallbackOkres: notice?.okres,
+      ),
+    );
+  }
+
+  Future<void> _syncActiveWarningNoticeFromJs() async {
+    final c = _controller;
+    if (c == null) return;
+    try {
+      final raw = await c.runJavaScriptReturningResult(_kReadVystrahyNoticeJs);
+      var text = raw.toString().trim();
+      if (text.startsWith('"') && text.endsWith('"') && text.length >= 2) {
+        text = text.substring(1, text.length - 1);
+        text = text.replaceAll(r'\"', '"').replaceAll(r'\\', r'\');
+      }
+      _setActiveWarningNotice(VystrahyActiveNotice.fromJsJson(text));
+    } catch (_) {}
+  }
+
+  /// Po mape / zmene lokality: výstraha pre okres pinu (banner na domove).
+  Future<void> refreshActiveWarningNotice({bool scheduleRecheck = true}) async {
+    final lat = _userLat;
+    final lon = _userLon;
+    final c = _controller;
+    if (lat == null || lon == null || c == null || !mapContentReady) {
+      return;
+    }
+    await _injectLocationMarker(scheduleRetry: false);
+    await _syncActiveWarningNoticeFromJs();
+    if (!scheduleRecheck) return;
+    _warningRankRecheckTimer?.cancel();
+    _warningRankRecheckTimer =
+        Timer(const Duration(milliseconds: 450), () {
+      unawaited(refreshActiveWarningNotice(scheduleRecheck: false));
+    });
   }
 
   /// Čaká, kým Leaflet pridá `geoLayer` (okresy-hq.json) — pageFinished nestačí.
@@ -3850,10 +4092,16 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   }
 
   void updateUserLocation(double lat, double lon, {bool inject = true}) {
-    if (!coordsWithinSlovakiaVystrahyExtent(lat, lon)) return;
+    if (!coordsWithinSlovakiaVystrahyExtent(lat, lon)) {
+      clearActiveWarning();
+      return;
+    }
     _userLat = lat;
     _userLon = lon;
-    if (inject) {
+    if (!inject) return;
+    if (mapContentReady) {
+      unawaited(refreshActiveWarningNotice());
+    } else {
       unawaited(_injectLocationMarker());
     }
   }
@@ -3866,6 +4114,9 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     final js = buildVystrahyUserLocationMarkerJs(lat, lon);
     try {
       await c.runJavaScript(js);
+      if (mapContentReady) {
+        await _syncActiveWarningNoticeFromJs();
+      }
     } catch (_) {}
     if (!scheduleRetry) return;
     // Po layoute mapy ešte raz — bez opakovaného fitBounds (iba pin).
@@ -3874,6 +4125,9 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       if (_userLat != lat || _userLon != lon) return;
       try {
         await c.runJavaScript(js);
+        if (mapContentReady) {
+          await _syncActiveWarningNoticeFromJs();
+        }
       } catch (_) {}
     });
   }
@@ -4179,12 +4433,15 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   }
 
   /// Obnoví výstrahy bez blanku / full-screen načítania (mapa ostane).
-  Future<void> reload() async {
-    final c = _controller;
+  Future<void> reload({Duration timeout = const Duration(seconds: 12)}) async {
+    var c = _controller;
     if (c == null) {
       _warming = false;
       await _ensureController();
-      return;
+      final ready = await waitUntilReady(timeout: timeout);
+      if (!ready) return;
+      c = _controller;
+      if (c == null) return;
     }
 
     // Už hotová mapa: len tichá obnova dát + spinner v ikone.
@@ -4195,6 +4452,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       softReloading = false;
       _notifySafely();
       if (ok) {
+        await refreshActiveWarningNotice(scheduleRecheck: false);
         _scheduleMapResizeInject();
         return;
       }
@@ -4205,6 +4463,8 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
         _vystrahyRequestUri(),
         headers: _vystrahyNoCacheHeaders,
       );
+      await waitUntilReady(timeout: timeout);
+      await refreshActiveWarningNotice(scheduleRecheck: false);
       return;
     }
 
@@ -4213,6 +4473,28 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       _vystrahyRequestUri(),
       headers: _vystrahyNoCacheHeaders,
     );
+    await waitUntilReady(timeout: timeout);
+    await refreshActiveWarningNotice(scheduleRecheck: false);
+  }
+
+  /// Pull-to-refresh na domove — načíta nové výstrahy a aktualizuje banner.
+  Future<void> refreshForHomePull(
+    double lat,
+    double lon, {
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    if (!coordsWithinSlovakiaVystrahyExtent(lat, lon)) {
+      clearActiveWarning();
+      return;
+    }
+    _userLat = lat;
+    _userLon = lon;
+    prefetchAssets();
+    if (_controller == null) {
+      final ready = await waitUntilReady(timeout: timeout);
+      if (!ready) return;
+    }
+    await reload(timeout: timeout);
   }
 
   void refreshMapLayout() => _scheduleMapResizeInject();

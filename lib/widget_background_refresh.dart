@@ -8,6 +8,8 @@ import 'package:workmanager/workmanager.dart';
 import 'package:pocasie/openmeteo_widget_fetch.dart';
 import 'package:pocasie/weather_home_widget.dart';
 import 'package:pocasie/weather_labels_sk.dart';
+import 'package:pocasie/vystrahy_home_widget.dart';
+import 'package:pocasie/vystrahy_widget_fetch.dart';
 
 const String _kLastLocationKey = 'last_location_v7';
 const String _kWindUnitKey = 'wind_unit_v1';
@@ -170,6 +172,56 @@ Future<void> _refreshHomeWidgetInBackground() async {
     sun: sun,
     humidity: humidity,
     isOffline: false,
+  );
+
+  await _refreshVystrahyWidgetInBackground(
+    cityName: name,
+    admin1: city['admin1'] as String?,
+    admin2: city['admin2'] as String?,
+    countryCode: city['countryCode'] as String? ?? city['country_code'] as String?,
+    lat: lat,
+    lon: lon,
+  );
+}
+
+Future<void> _refreshVystrahyWidgetInBackground({
+  required String cityName,
+  String? admin1,
+  String? admin2,
+  String? countryCode,
+  required double lat,
+  required double lon,
+}) async {
+  final cc = (countryCode ?? '').toUpperCase().trim();
+  final inSkExtent = lat >= 47.73 && lat <= 49.61 && lon >= 16.83 && lon <= 22.58;
+  if ((cc.isNotEmpty && cc != 'SK') || !inSkExtent) {
+    await VystrahyHomeWidget.clear(showMapHint: false);
+    return;
+  }
+
+  final snap = await fetchVystrahySnapshotForCity(
+    cityName: cityName,
+    admin1: admin1,
+    admin2: admin2,
+  );
+  if (snap == null) {
+    await VystrahyHomeWidget.clear(showMapHint: true);
+    return;
+  }
+  if (!snap.hasWarning) {
+    await VystrahyHomeWidget.clear(okres: snap.okres, showMapHint: true);
+    return;
+  }
+  final primary = snap.primary;
+  await VystrahyHomeWidget.update(
+    hasWarning: true,
+    title: snap.countTitleSk(),
+    levelLine: snap.levelLine(),
+    typesLine: snap.typesLine(),
+    timing: snap.timingLine(DateTime.now()),
+    okres: snap.okres,
+    rank: snap.maxRank,
+    javId: primary.jav,
   );
 }
 

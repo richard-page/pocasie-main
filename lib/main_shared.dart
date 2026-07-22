@@ -447,12 +447,197 @@ const double kAlertHeavySnowDailyCmThreshold = 10.0;
 const String kAlertDefaultsOffMigrationKey = 'alert_defaults_off_migration_v1';
 const String kLocationPermissionPromptShownKey = 'location_permission_prompt_shown_v1';
 
+/// Predvolený zoom náhľadu / fullscreen radaru (mestská úroveň — nie celá SR).
+const double kMeteoRadarCityZoom = 7;
+
 String buildMeteoRadarUrl(GeoCity city, {bool cacheBust = false}) {
   final base =
-      'http://cz1.helkor.eu:41152/radar/?lat=${city.lat}&lon=${city.lon}&zoom=7&hideUI=true';
+      'http://cz1.helkor.eu:41152/radar/?lat=${city.lat}&lon=${city.lon}&zoom=${kMeteoRadarCityZoom.toStringAsFixed(0)}&hideUI=true';
   // Cache-bust len pri manuálnom retry — inak WebView znova sťahuje slovakia.geojson.
   if (!cacheBust) return base;
   return '$base&_cb=${DateTime.now().millisecondsSinceEpoch}';
+}
+
+/// Pin Mapbox kamery na mesto.
+///
+/// Helkor pri resize späť do náhľadu (`innerHeight <= 380`) v `requestAnimationFrame`
+/// volá `jumpTo(mapCenter, requestedZoom)` z **const pri loade URL** — nie z aktuálneho
+/// mesta. Preto pin musíme zopakovať až po ich rAF, inak po panovaní vo full radare
+/// náhľad skočí na starý stred (často celá SR ~19.6, 48.7).
+///
+/// [fullscreen]: `true` / `false` / `null` = nemeniteľ režim, len pin + resize.
+/// [aggressiveRepin]: oneskorené pinny po Helkor resize (len návrat z fullscreen).
+String buildMeteoRadarPinCityJs({
+  required double lat,
+  required double lon,
+  bool? fullscreen,
+  bool removeChrome = false,
+  bool hideLayersUntilPinned = false,
+  bool aggressiveRepin = false,
+}) {
+  final fs = fullscreen == null
+      ? ''
+      : '''
+    if (window.setFullscreen) {
+      try { window.setFullscreen(${fullscreen ? 'true' : 'false'}); } catch (eF) {}
+    }''';
+  final chrome = removeChrome
+      ? '''
+    var chrome = document.getElementById('app-radar-chrome');
+    if (chrome) chrome.remove();'''
+      : '';
+  final hideLayers = hideLayersUntilPinned
+      ? "document.documentElement.classList.remove('radar-layers-ready');"
+      : '';
+  final deferredPins = aggressiveRepin
+      ? '''
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() {
+        pin();
+        setTimeout(pin, 0);
+        setTimeout(pin, 48);
+        setTimeout(pin, 120);
+        setTimeout(pin, 280);
+      });
+    });'''
+      : '''
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() { pin(); });
+    });''';
+  return '''
+(function() {
+  try {
+    document.documentElement.classList.add('hide-ui');
+    $hideLayers
+    $chrome
+    var lat = $lat;
+    var lon = $lon;
+    var z = $kMeteoRadarCityZoom;
+    window.__appRadarHome = { lat: lat, lon: lon, zoom: z };
+    function pin() {
+      if (window.__appRadarUserInteracting) return false;
+      if (typeof map === 'undefined' || !map || typeof map.jumpTo !== 'function') {
+        return false;
+      }
+      map.jumpTo({ center: [lon, lat], zoom: z });
+      if (typeof userMarker !== 'undefined' && userMarker) {
+        userMarker.setLngLat([lon, lat]);
+      } else if (typeof mapboxgl !== 'undefined') {
+        var el = document.createElement('div');
+        el.className = 'location-dot';
+        userMarker = new mapboxgl.Marker(el).setLngLat([lon, lat]).addTo(map);
+      }
+      try { window.requestedZoom = z; } catch (eZ) {}
+      try { window.requestedLat = lat; window.requestedLon = lon; } catch (eL) {}
+      return true;
+    }
+    if (!window.__appRadarHomeHooked) {
+      window.__appRadarHomeHooked = true;
+      window.addEventListener('resize', function() {
+        if (window.__appRadarUserInteracting) return;
+        requestAnimationFrame(function() {
+          requestAnimationFrame(function() {
+            if (window.__appRadarUserInteracting) return;
+            var h = window.__appRadarHome;
+            if (!h || typeof map === 'undefined' || !map) return;
+            // Po Helkorovom widget-reset jumpTo — vždy naše aktuálne mesto.
+            if (window.innerHeight <= 400) {
+              try {
+                map.jumpTo({ center: [h.lon, h.lat], zoom: h.zoom });
+                if (typeof userMarker !== 'undefined' && userMarker) {
+                  userMarker.setLngLat([h.lon, h.lat]);
+                }
+              } catch (eH) {}
+            }
+          });
+        });
+      });
+    }
+    $fs
+    var ok = pin();
+    try { if (map && map.resize) map.resize(); } catch (eR) {}
+    ok = pin() || ok;
+    try { window.dispatchEvent(new Event('resize')); } catch (eD) {}
+    ok = pin() || ok;
+    $deferredPins
+    document.documentElement.classList.add('radar-layers-ready');
+    return ok ? '1' : '0';
+  } catch (e) {
+    return '0';
+  }
+})();
+''';
+}
+
+/// Plynulejšie posúvanie Mapbox radaru — skryť drahé blur/hranice počas drag.
+const String kMeteoRadarPanPerfJs = r'''
+(function() {
+  try {
+    if (window.__appRadarPanPerf) return;
+    if (typeof map === 'undefined' || !map || typeof map.on !== 'function') return;
+    window.__appRadarPanPerf = true;
+    var heavy = [
+      'sk-borders-glow', 'ro-borders-glow',
+      'sk-borders-layer', 'ro-borders-layer'
+    ];
+    var endTimer = null;
+    function setHeavy(vis) {
+      for (var i = 0; i < heavy.length; i++) {
+        try {
+          if (map.getLayer(heavy[i])) {
+            map.setLayoutProperty(heavy[i], 'visibility', vis);
+          }
+        } catch (eL) {}
+      }
+    }
+    function onMoveStart() {
+      window.__appRadarUserInteracting = true;
+      if (endTimer) { clearTimeout(endTimer); endTimer = null; }
+      setHeavy('none');
+    }
+    function onMoveEnd() {
+      if (endTimer) clearTimeout(endTimer);
+      endTimer = setTimeout(function() {
+        endTimer = null;
+        window.__appRadarUserInteracting = false;
+        setHeavy('visible');
+      }, 120);
+    }
+    map.on('movestart', onMoveStart);
+    map.on('zoomstart', onMoveStart);
+    map.on('moveend', onMoveEnd);
+    map.on('zoomend', onMoveEnd);
+    try {
+      if (map.dragPan && map.dragPan.enable) map.dragPan.enable();
+      if (map.touchZoomRotate && map.touchZoomRotate.enable) map.touchZoomRotate.enable();
+      if (map.touchZoomRotate.disableRotation) map.touchZoomRotate.disableRotation();
+    } catch (eD) {}
+  } catch (e) {}
+})();
+''';
+
+/// Android: Hybrid Composition — Texture/SurfaceView robí Mapbox pan sekavý.
+Widget buildMeteoRadarWebView({
+  required WebViewController controller,
+  Set<Factory<OneSequenceGestureRecognizer>>? gestureRecognizers,
+}) {
+  final gestures = gestureRecognizers ??
+      <Factory<OneSequenceGestureRecognizer>>{
+        Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
+      };
+  if (WebViewPlatform.instance is AndroidWebViewPlatform) {
+    return WebViewWidget.fromPlatformCreationParams(
+      params: AndroidWebViewWidgetCreationParams(
+        controller: controller.platform,
+        displayWithHybridComposition: true,
+        gestureRecognizers: gestures,
+      ),
+    );
+  }
+  return WebViewWidget(
+    controller: controller,
+    gestureRecognizers: gestures,
+  );
 }
 
 /// Hranice SK na Helkor radare (~1 MB) — prednačítať pri štarte, inak nestihnú.
@@ -535,6 +720,382 @@ bool cityEligibleForVystrahy(GeoCity city) {
   return coordsWithinSlovakiaVystrahyExtent(city.lat, city.lon);
 }
 
+/// Stupeň výstrahy (1–3) podľa Helkor mapy.
+Color vystrahyLevelAccentColor(int level) {
+  return switch (level) {
+    1 => const Color(0xFFFACC15),
+    2 => const Color(0xFFF97316),
+    3 => const Color(0xFFEF4444),
+    _ => const Color(0xFF42A5F5),
+  };
+}
+
+Color vystrahyRankAccentColor(int rank) => vystrahyLevelAccentColor(rank);
+
+/// Rovnaké ikony ako `javy` v `vystrahy.php` (Font Awesome 6).
+class VystrahyJavDef {
+  const VystrahyJavDef(this.id, this.icon);
+  final String id;
+  final FaIconData icon;
+}
+
+const List<VystrahyJavDef> kVystrahyJavy = [
+  VystrahyJavDef('Búrka', FontAwesomeIcons.cloudBolt),
+  VystrahyJavDef('Dážď', FontAwesomeIcons.cloudShowersHeavy),
+  VystrahyJavDef('Vietor', FontAwesomeIcons.wind),
+  VystrahyJavDef('Poľadovica', FontAwesomeIcons.icicles),
+  VystrahyJavDef('Vysoká teplota', FontAwesomeIcons.temperatureHigh),
+  VystrahyJavDef('Nízka teplota', FontAwesomeIcons.temperatureLow),
+  VystrahyJavDef('Hmla', FontAwesomeIcons.smog),
+  VystrahyJavDef('Snehové jazyky', FontAwesomeIcons.snowflake),
+];
+
+String? resolveVystrahyJavId(String jav) {
+  final raw = jav.trim();
+  if (raw.isEmpty) return null;
+  for (final def in kVystrahyJavy) {
+    if (def.id == raw) return def.id;
+  }
+  final lower = _normalizeVystrahyJavKey(raw);
+  for (final def in kVystrahyJavy) {
+    final idLower = _normalizeVystrahyJavKey(def.id);
+    if (lower == idLower) return def.id;
+    if (lower.startsWith(idLower) || idLower.startsWith(lower)) {
+      return def.id;
+    }
+  }
+  if (lower.contains('burk') || lower.contains('búrk')) return 'Búrka';
+  if (lower.contains('daz') || lower.contains('dáž')) return 'Dážď';
+  if (lower.contains('vietor')) return 'Vietor';
+  if (lower.contains('polad') || lower.contains('poľad')) return 'Poľadovica';
+  if (lower.contains('vysoka') && lower.contains('teplota')) {
+    return 'Vysoká teplota';
+  }
+  if (lower.contains('nizka') && lower.contains('teplota')) {
+    return 'Nízka teplota';
+  }
+  if (lower.contains('hmla')) return 'Hmla';
+  if (lower.contains('sneh')) return 'Snehové jazyky';
+  return null;
+}
+
+String _normalizeVystrahyJavKey(String value) {
+  return value
+      .toLowerCase()
+      .replaceAll('á', 'a')
+      .replaceAll('ä', 'a')
+      .replaceAll('č', 'c')
+      .replaceAll('ď', 'd')
+      .replaceAll('é', 'e')
+      .replaceAll('í', 'i')
+      .replaceAll('ĺ', 'l')
+      .replaceAll('ľ', 'l')
+      .replaceAll('ň', 'n')
+      .replaceAll('ó', 'o')
+      .replaceAll('ô', 'o')
+      .replaceAll('ŕ', 'r')
+      .replaceAll('š', 's')
+      .replaceAll('ť', 't')
+      .replaceAll('ú', 'u')
+      .replaceAll('ý', 'y')
+      .replaceAll('ž', 'z');
+}
+
+FaIconData vystrahyJavIconForId(String? javId) {
+  if (javId == null || javId.isEmpty) {
+    return FontAwesomeIcons.triangleExclamation;
+  }
+  for (final def in kVystrahyJavy) {
+    if (def.id == javId) return def.icon;
+  }
+  return vystrahyJavIcon(javId);
+}
+
+FaIconData vystrahyJavIcon(String jav) {
+  final id = resolveVystrahyJavId(jav);
+  if (id != null) {
+    for (final def in kVystrahyJavy) {
+      if (def.id == id) return def.icon;
+    }
+  }
+  return FontAwesomeIcons.triangleExclamation;
+}
+
+DateTime? parseVystrahySkDateTime(String raw) {
+  final cleaned = raw.replaceAll(',', ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+  final m = RegExp(
+    r'^(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{4})\s*(\d{1,2})\s*:\s*(\d{1,2})',
+  ).firstMatch(cleaned);
+  if (m == null) return null;
+  return DateTime(
+    int.parse(m.group(3)!),
+    int.parse(m.group(2)!),
+    int.parse(m.group(1)!),
+    int.parse(m.group(4)!),
+    int.parse(m.group(5)!),
+  );
+}
+
+String _formatVystrahyRelativeDurationSk(Duration diff) {
+  if (diff.isNegative) diff = Duration.zero;
+  final totalMinutes = diff.inMinutes;
+  final hours = totalMinutes ~/ 60;
+  final minutes = totalMinutes % 60;
+  if (hours > 0 && minutes > 0) return 'o $hours h $minutes min';
+  if (hours > 0) return 'o $hours h';
+  if (minutes > 0) return 'o $minutes min';
+  return 'o chvíľu';
+}
+
+String formatVystrahyTimingLine({
+  required DateTime now,
+  DateTime? startAt,
+  required bool isActiveNow,
+}) {
+  if (isActiveNow) return 'Práve platí vo vašom okrese';
+  if (startAt == null) return '';
+  final time =
+      '${startAt.hour.toString().padLeft(2, '0')}:${startAt.minute.toString().padLeft(2, '0')}';
+  final rel = _formatVystrahyRelativeDurationSk(startAt.difference(now));
+  final today = DateTime(now.year, now.month, now.day);
+  final startDay = DateTime(startAt.year, startAt.month, startAt.day);
+  final dayDiff = startDay.difference(today).inDays;
+  final dayWord = switch (dayDiff) {
+    0 => 'dnes',
+    1 => 'zajtra',
+    2 => 'pozajtra',
+    _ => '${startAt.day}.${startAt.month}.',
+  };
+  return 'Začína $dayWord $time ($rel)';
+}
+
+class VystrahyWarningItem {
+  const VystrahyWarningItem({
+    required this.rank,
+    required this.jav,
+    this.javId,
+    this.startAt,
+    this.isActiveNow = false,
+  });
+
+  final int rank;
+  final String jav;
+  final String? javId;
+  final DateTime? startAt;
+  final bool isActiveNow;
+
+  bool get isValid => rank >= 1 && jav.isNotEmpty;
+
+  String levelLine(String okres) => '$rank. stupeň • okres $okres';
+
+  String timingLine(DateTime now) => formatVystrahyTimingLine(
+        now: now,
+        startAt: startAt,
+        isActiveNow: isActiveNow,
+      );
+
+  Color get accentColor => vystrahyLevelAccentColor(rank);
+
+  FaIconData get icon => vystrahyJavIconForId(javId ?? resolveVystrahyJavId(jav));
+
+  static VystrahyWarningItem? fromMap(Map<String, dynamic> map) {
+    final rank = (map['rank'] as num?)?.toInt() ??
+        (map['uroven'] as num?)?.toInt() ??
+        0;
+    final jav = (map['jav'] as String?)?.trim() ?? '';
+    if (rank < 1 || jav.isEmpty) return null;
+    final od = (map['od'] as String?)?.trim() ?? '';
+    final javIdRaw = (map['javId'] as String?)?.trim();
+    return VystrahyWarningItem(
+      rank: rank,
+      jav: jav,
+      javId: javIdRaw?.isNotEmpty == true
+          ? javIdRaw
+          : resolveVystrahyJavId(jav),
+      startAt: parseVystrahySkDateTime(od),
+      isActiveNow: map['active'] == true,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return other is VystrahyWarningItem &&
+        other.rank == rank &&
+        other.jav == jav &&
+        other.javId == javId &&
+        other.startAt == startAt &&
+        other.isActiveNow == isActiveNow;
+  }
+
+  @override
+  int get hashCode => Object.hash(rank, jav, javId, startAt, isActiveNow);
+}
+
+class VystrahyActiveNotice {
+  const VystrahyActiveNotice({
+    required this.okres,
+    required this.items,
+  });
+
+  final String okres;
+  final List<VystrahyWarningItem> items;
+
+  int get rank =>
+      items.fold(0, (max, item) => item.rank > max ? item.rank : max);
+
+  bool get shouldShow =>
+      okres.isNotEmpty && items.any((item) => item.isValid);
+
+  List<VystrahyWarningItem> get visibleItems =>
+      items.where((item) => item.isValid).toList(growable: false);
+
+  Color get accentColor => vystrahyLevelAccentColor(rank);
+
+  FaIconData get icon => visibleItems.isNotEmpty
+      ? visibleItems.first.icon
+      : FontAwesomeIcons.triangleExclamation;
+
+  VystrahyWarningItem? get primaryItem {
+    final list = visibleItems;
+    if (list.isEmpty) return null;
+    final sorted = [...list]..sort((a, b) {
+        if (a.isActiveNow != b.isActiveNow) {
+          return a.isActiveNow ? -1 : 1;
+        }
+        if (b.rank != a.rank) return b.rank.compareTo(a.rank);
+        final aStart = a.startAt;
+        final bStart = b.startAt;
+        if (aStart == null) return 1;
+        if (bStart == null) return -1;
+        return aStart.compareTo(bStart);
+      });
+    return sorted.first;
+  }
+
+  String countTitleSk() {
+    final n = visibleItems.length;
+    return switch (n) {
+      1 => visibleItems.first.jav,
+      2 || 3 || 4 => '$n výstrahy',
+      _ => '$n výstrah',
+    };
+  }
+
+  String multiLevelOkresLine() {
+    // Bez „až“ — pri 1. stupni pôsobí divne; pri viacerých stačí najvyšší stupeň.
+    if (rank <= 1) return '1. stupeň • okres $okres';
+    return 'najvyšší $rank. stupeň • okres $okres';
+  }
+
+  String multiTypesLine() {
+    return visibleItems
+        .map((item) => '${item.jav} (${item.rank}. st.)')
+        .join(' · ');
+  }
+
+  String multiTimingSummary(DateTime now) {
+    final list = visibleItems;
+    if (list.isEmpty) return '';
+    final activeCount = list.where((item) => item.isActiveNow).length;
+    if (activeCount == list.length) {
+      return 'Práve platia vo vašom okrese';
+    }
+    if (activeCount > 0) {
+      final upcoming = list.length - activeCount;
+      return '$activeCount platí · $upcoming ${upcoming == 1 ? 'nadchádza' : 'nadchádzajú'}';
+    }
+    final upcoming = list
+        .where((item) => item.startAt != null)
+        .toList()
+      ..sort((a, b) => a.startAt!.compareTo(b.startAt!));
+    if (upcoming.isEmpty) return 'Ťuknite pre detail na mape';
+    final first = upcoming.first.timingLine(now);
+    if (first.startsWith('Začína ')) {
+      return 'Najskôr ${first.substring('Začína '.length)}';
+    }
+    return first;
+  }
+
+  static VystrahyActiveNotice? fromJsJson(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty || trimmed == 'null' || trimmed == '""') return null;
+    try {
+      final decoded = json.decode(trimmed);
+      if (decoded is! Map) return null;
+      final map = Map<String, dynamic>.from(decoded);
+      final okres = (map['okres'] as String?)?.trim() ?? '';
+      if (okres.isEmpty) return null;
+
+      final rawItems = map['items'];
+      if (rawItems is List) {
+        final items = rawItems
+            .whereType<Map>()
+            .map((e) => VystrahyWarningItem.fromMap(Map<String, dynamic>.from(e)))
+            .whereType<VystrahyWarningItem>()
+            .toList(growable: false);
+        if (items.isEmpty) return null;
+        return VystrahyActiveNotice(okres: okres, items: items);
+      }
+
+      final legacy = VystrahyWarningItem.fromMap(map);
+      if (legacy == null) return null;
+      return VystrahyActiveNotice(okres: okres, items: [legacy]);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (other is! VystrahyActiveNotice) return false;
+    if (other.okres != okres || other.items.length != items.length) {
+      return false;
+    }
+    for (var i = 0; i < items.length; i++) {
+      if (items[i] != other.items[i]) return false;
+    }
+    return true;
+  }
+
+  @override
+  int get hashCode => Object.hash(okres, Object.hashAll(items));
+}
+
+Future<void> syncVystrahyHomeWidgetFromNotice(
+  VystrahyActiveNotice? notice, {
+  String? fallbackOkres,
+  bool showMapHint = true,
+}) async {
+  try {
+    if (notice == null || !notice.shouldShow) {
+      await VystrahyHomeWidget.clear(
+        okres: fallbackOkres ?? '',
+        showMapHint: showMapHint,
+      );
+      return;
+    }
+    final primary = notice.primaryItem;
+    final now = DateTime.now();
+    final single = notice.visibleItems.length == 1;
+    await VystrahyHomeWidget.update(
+      hasWarning: true,
+      title: single ? notice.visibleItems.first.jav : notice.countTitleSk(),
+      levelLine: single
+          ? notice.visibleItems.first.levelLine(notice.okres)
+          : notice.multiLevelOkresLine(),
+      typesLine: single ? '' : notice.multiTypesLine(),
+      timing: single
+          ? notice.visibleItems.first.timingLine(now)
+          : notice.multiTimingSummary(now),
+      okres: notice.okres,
+      rank: notice.rank,
+      javId: primary?.javId ?? primary?.jav ?? '',
+    );
+  } catch (e) {
+    debugPrint('syncVystrahyHomeWidgetFromNotice: $e');
+  }
+}
+
 String buildVystrahyUserLocationMarkerJs(double lat, double lon) => '''
 (function() {
   var lat = $lat;
@@ -542,6 +1103,8 @@ String buildVystrahyUserLocationMarkerJs(double lat, double lon) => '''
   if (!window.L) return;
   window.__pocasieUserLat = lat;
   window.__pocasieUserLon = lon;
+  window.__pocasieVystrahyRank = 0;
+  window.__pocasieVystrahyNotice = null;
 
   function hookMapCapture() {
     if (!L.Map || window.__pocasieMapProtoHooked) return;
@@ -605,19 +1168,22 @@ String buildVystrahyUserLocationMarkerJs(double lat, double lon) => '''
       '4': '#E53935'
     };
     var pinColor = palette['1'];
+    var bestRank = 0;
+    var bestNotice = null;
     try {
       var pt = L.latLng(lat, lon);
       var allowed = {};
       Object.keys(palette).forEach(function(k) { allowed[palette[k].toLowerCase()] = palette[k]; });
       allowed['#1565c0'] = palette['1'];
-      var bestRank = 0;
       var rankOf = {};
       Object.keys(palette).forEach(function(k) { rankOf[palette[k].toLowerCase()] = parseInt(k, 10); });
+      var okresId = null;
       lm.eachLayer(function(layer) {
         if (!layer || typeof layer.eachLayer !== 'function') return;
         layer.eachLayer(function(sub) {
           try {
             if (!sub.feature || !sub.getBounds || !sub.getBounds().contains(pt)) return;
+            if (sub.feature._bezpecneId) okresId = sub.feature._bezpecneId;
             var c = sub.options && sub.options.fillColor;
             if (!c) return;
             var key = String(c).toLowerCase();
@@ -630,7 +1196,74 @@ String buildVystrahyUserLocationMarkerJs(double lat, double lon) => '''
           } catch (e4) {}
         });
       });
+
+      function parseOd(s) {
+        if (typeof parseSKDate === 'function') return parseSKDate(s);
+        if (!s) return null;
+        var c = String(s).replace(/,/g, ' ').replace(/\\s+/g, ' ').trim();
+        var m = c.match(/^(\\d{1,2})\\s*\\.\\s*(\\d{1,2})\\s*\\.\\s*(\\d{4})\\s*(\\d{1,2})\\s*:\\s*(\\d{1,2})/);
+        return m ? new Date(parseInt(m[3], 10), parseInt(m[2], 10) - 1, parseInt(m[1], 10), parseInt(m[4], 10), parseInt(m[5], 10)) : null;
+      }
+
+      function resolveJavId(jav) {
+        var raw = String(jav || '').trim();
+        if (!raw) return '';
+        if (typeof javy !== 'undefined' && Array.isArray(javy)) {
+          for (var j = 0; j < javy.length; j++) {
+            if (javy[j].id === raw) return javy[j].id;
+          }
+          var lower = raw.toLowerCase();
+          for (var k = 0; k < javy.length; k++) {
+            var id = String(javy[k].id || '');
+            var idLower = id.toLowerCase();
+            if (lower === idLower || lower.indexOf(idLower) === 0 || idLower.indexOf(lower) === 0) {
+              return javy[k].id;
+            }
+          }
+        }
+        return raw;
+      }
+
+      if (okresId && typeof dbase !== 'undefined' && Array.isArray(dbase[okresId])) {
+        var now = new Date();
+        var notices = [];
+        dbase[okresId].forEach(function(i) {
+          if (!i) return;
+          var od = parseOd(i.od);
+          var do_ = parseOd(i.do);
+          if (!do_ || do_ <= now) return;
+          var u = parseInt(i.uroven, 10) || 0;
+          if (u < 1) return;
+          var active = od && od <= now;
+          if (u > bestRank) bestRank = u;
+          notices.push({
+            jav: i.jav || '',
+            javId: resolveJavId(i.jav),
+            uroven: u,
+            rank: u,
+            od: i.od || '',
+            do: i.do || '',
+            active: active
+          });
+        });
+        notices.sort(function(a, b) {
+          if (a.active !== b.active) return a.active ? -1 : 1;
+          if (b.uroven !== a.uroven) return b.uroven - a.uroven;
+          var aod = parseOd(a.od) || new Date(8640000000000000);
+          var bod = parseOd(b.od) || new Date(8640000000000000);
+          return aod - bod;
+        });
+        if (notices.length > 0) {
+          bestNotice = {
+            okres: okresId,
+            rank: bestRank,
+            items: notices
+          };
+        }
+      }
     } catch (e5) {}
+    window.__pocasieVystrahyRank = bestRank;
+    window.__pocasieVystrahyNotice = bestNotice;
 
     var styleEl = document.getElementById('pocasie-user-pin-style');
     if (styleEl) styleEl.remove();
