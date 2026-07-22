@@ -49,6 +49,10 @@ part 'rainviewer_fetch.dart';
 
 final ValueNotifier<bool> _showOnboardingNotifier = ValueNotifier<bool>(false);
 
+/// Po onboardingu — WeatherPage ako home (nie push cez OnboardingPage).
+GeoCity? _bootWeatherInitialCity;
+bool _bootDeferRadarWarmup = false;
+
 /// Pri minimalizácii skryť WebView (Android PlatformView inak snapshotne „štvorčeky“ cez celú appku).
 final ValueNotifier<bool> appRecentsCoverNotifier = ValueNotifier<bool>(false);
 
@@ -367,7 +371,10 @@ class _WeatherAppState extends State<WeatherApp> with WidgetsBindingObserver {
                   child: ScaffoldMessenger(
                     child: showOnboarding
                         ? const OnboardingPage()
-                        : const WeatherPage(),
+                        : WeatherPage(
+                            initialCity: _bootWeatherInitialCity,
+                            deferRadarWarmup: _bootDeferRadarWarmup,
+                          ),
                   ),
                 );
               },

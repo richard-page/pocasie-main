@@ -1293,11 +1293,43 @@ class OnboardingPage extends StatefulWidget {
   State<OnboardingPage> createState() => _OnboardingPageState();
 }
 
-class _OnboardingPageState extends State<OnboardingPage> {
+class _OnboardingPageState extends State<OnboardingPage>
+    with WidgetsBindingObserver {
   bool _busy = false;
   bool _checkingInternet = false;
   bool _checkingManual = false;
   bool _isOffline = false;
+  bool _awaitingLocationSettings = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _awaitingLocationSettings) {
+      _awaitingLocationSettings = false;
+      if (!_busy && mounted) {
+        unawaited(_continueWithLocation());
+      }
+    }
+  }
+
+  PageRoute<T> _onboardingRoute<T>(Widget page) {
+    return PageRouteBuilder<T>(
+      pageBuilder: (_, __, ___) => page,
+      transitionDuration: Duration.zero,
+      reverseTransitionDuration: Duration.zero,
+    );
+  }
 
   Future<void> _checkInternetAndContinue() async {
     setState(() {
@@ -1332,6 +1364,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
         // ignore: use_build_context_synchronously
         final turnOn = await showLocationAccuracyDialog(context);
         if (turnOn == true) {
+          _awaitingLocationSettings = true;
           await Geolocator.openLocationSettings();
         }
         return;
@@ -1342,34 +1375,68 @@ class _OnboardingPageState extends State<OnboardingPage> {
         perm = await Geolocator.requestPermission();
         await SettingsManager.setLocationPermissionPromptShown(true);
       }
-      if (perm == LocationPermission.deniedForever ||
-          (perm != LocationPermission.always && perm != LocationPermission.whileInUse)) {
+      if (perm == LocationPermission.deniedForever) {
+        if (mounted) setState(() => _busy = false);
+        await _chooseLocationManually();
+        return;
+      }
+      if (perm != LocationPermission.always &&
+          perm != LocationPermission.whileInUse) {
+        // Prvé odmietnutie — skús manuálny výber, nie „navždy“.
         if (mounted) setState(() => _busy = false);
         await _chooseLocationManually();
         return;
       }
 
       Position? pos = await Geolocator.getLastKnownPosition()
-          .timeout(const Duration(milliseconds: 500), onTimeout: () => null);
-      pos ??= await Geolocator.getCurrentPosition(
+          .timeout(const Duration(milliseconds: 800), onTimeout: () => null);
+      try {
+        pos ??= await Geolocator.getCurrentPosition(
           locationSettings: const LocationSettings(
-              accuracy: LocationAccuracy.lowest, timeLimit: Duration(seconds: 10)));
+            accuracy: LocationAccuracy.low,
+            timeLimit: Duration(seconds: 15),
+          ),
+        );
+      } catch (_) {
+        pos ??= await Geolocator.getLastKnownPosition();
+      }
+
+      if (pos == null) {
+        if (mounted) setState(() => _busy = false);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Polohu sa nepodarilo získať. Vyberte mesto manuálne.'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        await _chooseLocationManually();
+        return;
+      }
 
       final city = await reverseGeocode(
         pos.latitude,
         pos.longitude,
         resolveTimezone: false,
       );
-      if (!mounted || city == null) {
-        if (!mounted) return;
+      if (!mounted) return;
+      if (city == null) {
         setState(() => _busy = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Lokalitu sa nepodarilo určiť. Vyberte mesto manuálne.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        await _chooseLocationManually();
         return;
       }
 
       if (mounted) {
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(
-            builder: (_) => NotificationPermissionPage(
+          _onboardingRoute(
+            NotificationPermissionPage(
               city: city,
               myLocationEnabled: true,
             ),
@@ -1377,7 +1444,15 @@ class _OnboardingPageState extends State<OnboardingPage> {
         );
       }
     } catch (e) {
-      if (mounted) setState(() => _busy = false);
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Polohu sa nepodarilo získať. Vyberte mesto manuálne.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      await _chooseLocationManually();
     }
   }
 
@@ -1389,13 +1464,14 @@ class _OnboardingPageState extends State<OnboardingPage> {
       // Nevoláme `hasInternetConnection()` pred vyhľadávaním — DNS/proxy často vráti falošné „offline“
       // a používateľ potom vôbec neuvidí výber mesta; samotné API pri výpadku aj tak zlyhá.
       // ignore: use_build_context_synchronously
-      final city = await Navigator.of(context)
-          .push<GeoCity>(MaterialPageRoute(builder: (_) => const CitySearchPage()));
+      final city = await Navigator.of(context).push<GeoCity>(
+        _onboardingRoute(const CitySearchPage()),
+      );
       if (!mounted || city == null) return;
 
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) => NotificationPermissionPage(
+        _onboardingRoute(
+          NotificationPermissionPage(
             city: city,
             myLocationEnabled: false,
           ),
@@ -1604,11 +1680,22 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
       city: city,
       myLocationEnabled: myLocationEnabled,
     );
+    _bootWeatherInitialCity = city;
+    _bootDeferRadarWarmup = true;
+    _showOnboardingNotifier.value = false;
     if (!mounted) return;
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(
-        builder: (_) => WeatherPage(initialCity: city),
+    // Po pushReplacement NotificationPermissionPage už nie sme pod
+    // ValueListenableBuilder — musíme explicitne ísť na WeatherPage.
+    Navigator.of(context).pushAndRemoveUntil(
+      PageRouteBuilder<void>(
+        pageBuilder: (_, __, ___) => WeatherPage(
+          initialCity: city,
+          deferRadarWarmup: true,
+        ),
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
       ),
+      (_) => false,
     );
   }
 
@@ -1619,23 +1706,44 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
     });
 
     try {
-      final permissionResult = await OneSignal.Notifications.requestPermission(true);
-      await SettingsManager.setSystemNotificationsEnabled(permissionResult);
+      var granted = false;
+      // false = žiadny anglický OneSignal dialóg; vlastný SK návod nižšie.
+      // Timeout — canRequest/requestPermission vie visieť a nechať „Spracovávam…“.
+      try {
+        final canRequest = await OneSignal.Notifications.canRequest()
+            .timeout(const Duration(seconds: 6), onTimeout: () => true);
+        if (canRequest) {
+          granted = await OneSignal.Notifications.requestPermission(false)
+              .timeout(const Duration(seconds: 12), onTimeout: () => false);
+        }
+      } catch (_) {
+        granted = false;
+      }
+      await SettingsManager.setSystemNotificationsEnabled(granted);
 
-      await _completeOnboardingAndNavigate(city: widget.city, myLocationEnabled: widget.myLocationEnabled);
+      if (!granted) {
+        if (mounted) setState(() => _isAllowing = false);
+        if (mounted) _showNotificationSettingsHintDialog();
+        return;
+      }
 
-      // Neblokuj vstup do appky pomalšími systémovými/SDK operáciami.
+      await _completeOnboardingAndNavigate(
+        city: widget.city,
+        myLocationEnabled: widget.myLocationEnabled,
+      );
+
       unawaited(Future<void>(() async {
         OneSignal.User.addTags({
           "city": widget.city.name,
-          "notifications_enabled": permissionResult ? "true" : "false"
+          "notifications_enabled": "true",
         });
       }));
     } catch (e) {
       await SettingsManager.setSystemNotificationsEnabled(false);
-      await _completeOnboardingAndNavigate(city: widget.city, myLocationEnabled: widget.myLocationEnabled);
+      if (mounted) setState(() => _isAllowing = false);
+      if (mounted) _showNotificationSettingsHintDialog();
     } finally {
-      if (mounted) {
+      if (mounted && _isAllowing) {
         setState(() {
           _isAllowing = false;
         });

@@ -267,7 +267,13 @@ int _dailyMainIconSkyTextCode(WeatherData data, int dayIndex, {bool lightningNea
 
 class WeatherPage extends StatefulWidget {
   final GeoCity? initialCity;
-  const WeatherPage({super.key, this.initialCity});
+  /// Po onboardingu — nespúšťaj radar WebView hneď (PlatformView flash).
+  final bool deferRadarWarmup;
+  const WeatherPage({
+    super.key,
+    this.initialCity,
+    this.deferRadarWarmup = false,
+  });
   @override
   State<WeatherPage> createState() => _WeatherPageState();
 }
@@ -1250,7 +1256,18 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       currentCity = widget.initialCity;
       if (_supportsRadarForCity(widget.initialCity)) {
         prefetchRadarMapAssets(widget.initialCity);
-        _deferRadarSetup(widget.initialCity!);
+        if (widget.deferRadarWarmup) {
+          // HTTP prefetch hneď; WebView až keď je domov stabilný (inak Android flash).
+          Future<void>.delayed(const Duration(milliseconds: 900), () {
+            if (!mounted) return;
+            final city = currentCity;
+            if (city != null && _supportsRadarForCity(city)) {
+              _deferRadarSetup(city);
+            }
+          });
+        } else {
+          _deferRadarSetup(widget.initialCity!);
+        }
       }
       // Výstrahy: HTTP hneď + WebView čoskoro (nesmie čakať na celý radar).
       if (_supportsVystrahyForCity(widget.initialCity)) {
