@@ -42,3 +42,46 @@ BoxDecoration appSurfaceDecoration({
         : null,
   );
 }
+
+/// Info dialógy (peľ, radar, kamera…) — jedna farba pozadia / accent / tlačidiel.
+BoxDecoration appInfoDialogDecoration({double radius = 20}) {
+  return BoxDecoration(
+    color: kAmbientBlendColor,
+    borderRadius: BorderRadius.circular(radius),
+    border: const Border.fromBorderSide(
+      BorderSide(color: kAppCardNavyBorder, width: 1),
+    ),
+  );
+}
+
+ButtonStyle appInfoDialogCloseButtonStyle() {
+  return ElevatedButton.styleFrom(
+    backgroundColor: kAppCardNavy,
+    foregroundColor: Colors.white70,
+    padding: const EdgeInsets.symmetric(vertical: 12),
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(10),
+      side: const BorderSide(color: kAppCardNavyBorder),
+    ),
+    elevation: 0,
+    shadowColor: Colors.transparent,
+    surfaceTintColor: Colors.transparent,
+    splashFactory: NoSplash.splashFactory,
+  ).copyWith(
+    overlayColor: WidgetStateProperty.all(Colors.transparent),
+  );
+}
+
+/// Ikona v kruhu — rovnaký vzhľad vo všetkých info dialógoch.
+Widget appInfoDialogIcon(IconData icon) {
+  return Container(
+    width: 48,
+    height: 48,
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      border: Border.all(color: kAppAccentBlue, width: 2.5),
+    ),
+    alignment: Alignment.center,
+    child: Icon(icon, size: 26, color: kAppAccentBlue),
+  );
+}

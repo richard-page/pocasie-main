@@ -1081,22 +1081,19 @@ class _WebcamDetailPageState extends State<_WebcamDetailPage> {
             type: MaterialType.transparency,
             child: Container(
               margin: const EdgeInsets.symmetric(horizontal: 24),
-              decoration: BoxDecoration(
-                color: kAmbientBlendColor,
-                borderRadius: BorderRadius.circular(20),
-              ),
+              decoration: appInfoDialogDecoration(),
               child: Padding(
                 padding: const EdgeInsets.all(20.0),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.videocam_rounded, size: 48, color: _kChartLineBlue),
+                    appInfoDialogIcon(Icons.videocam_rounded),
                     const SizedBox(height: 16),
                     const Text(
                       'Informácie o kamere',
                       style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
                         color: Colors.white,
                       ),
                     ),
@@ -1137,19 +1134,14 @@ class _WebcamDetailPageState extends State<_WebcamDetailPage> {
                       width: double.infinity,
                       child: ElevatedButton(
                         onPressed: () => Navigator.of(context).pop(),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: kAmbientBlendColor,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
+                        style: appInfoDialogCloseButtonStyle(),
+                        child: const Text(
+                          'Zavrieť',
+                          style: TextStyle(
+                            color: Colors.white70,
+                            fontWeight: FontWeight.w700,
                           ),
-                          elevation: 0,
-                          shadowColor: Colors.transparent,
-                          splashFactory: NoSplash.splashFactory,
-                        ).copyWith(
-                          overlayColor: WidgetStateProperty.all(Colors.transparent),
                         ),
-                        child: const Text('Zavrieť', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
                       ),
                     ),
                   ],
@@ -1201,14 +1193,17 @@ class _WebcamDetailPageState extends State<_WebcamDetailPage> {
           GestureDetector(
             onTap: _showCameraInfoDialog,
             child: Container(
-              width: 36,
-              height: 36,
-              margin: const EdgeInsets.only(top: 8, bottom: 8, right: 12, left: 4),
+              width: 40,
+              height: 40,
+              margin: const EdgeInsets.only(top: 8, bottom: 8, right: 8, left: 4),
               decoration: BoxDecoration(
-                color: const Color.fromRGBO(255, 255, 255, 0.1),
-                borderRadius: BorderRadius.circular(8),
+                shape: BoxShape.circle,
+                color: kAppCardNavy,
+                border: Border.all(color: kAppCardNavyBorder),
               ),
-              child: const Center(child: Icon(Icons.info_outline, size: 20, color: Colors.white)),
+              child: const Center(
+                child: Icon(Icons.info_outline, size: 20, color: Colors.white),
+              ),
             ),
           ),
         ],
@@ -2224,51 +2219,45 @@ class PollenForecastPage extends StatelessWidget {
             type: MaterialType.transparency,
             child: Container(
               margin: const EdgeInsets.symmetric(horizontal: 24),
-              decoration: _chartStatTileDecoration(radius: 16),
+              decoration: appInfoDialogDecoration(),
               child: Padding(
                 padding: const EdgeInsets.all(20.0),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.spa_outlined, size: 48, color: _kChartLineBlue),
+                    appInfoDialogIcon(Icons.spa_outlined),
                     const SizedBox(height: 16),
-                    Text(
+                    const Text(
                       'Legenda úrovne peľu',
-                      style: _chartLabelStyle(size: 18, weight: FontWeight.w700).copyWith(
-                        color: _kChartTextPrimary,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
                       ),
                     ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: 20),
                     _buildLegendRow('Žiadna', _kChartTextMuted),
+                    const SizedBox(height: 12),
                     _buildLegendRow('Nízka', _getPollenColor(1)),
+                    const SizedBox(height: 12),
                     _buildLegendRow('Stredná', _getPollenColor(2)),
+                    const SizedBox(height: 12),
                     _buildLegendRow('Vysoká', _getPollenColor(3)),
+                    const SizedBox(height: 12),
                     _buildLegendRow('Veľmi vysoká', _getPollenColor(4)),
                     const SizedBox(height: 24),
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
                         onPressed: () => Navigator.of(context).pop(),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Color.alphaBlend(
-                            Colors.white.withValues(alpha: 0.12),
-                            kAmbientBlendColor,
-                          ),
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                            side: BorderSide(color: Colors.white.withValues(alpha: 0.28)),
-                          ),
-                          elevation: 0,
-                          shadowColor: Colors.transparent,
-                          splashFactory: NoSplash.splashFactory,
-                        ).copyWith(
-                          overlayColor: WidgetStateProperty.all(Colors.transparent),
-                        ),
-                        child: Text(
+                        style: appInfoDialogCloseButtonStyle(),
+                        child: const Text(
                           'Zavrieť',
-                          style: _chartLabelStyle(size: 14).copyWith(
-                            color: _kChartTextSecondary,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white70,
                           ),
                         ),
                       ),
@@ -2284,9 +2273,10 @@ class PollenForecastPage extends StatelessWidget {
   }
 
   Widget _buildLegendRow(String label, Color color) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 14.0, left: 16),
+    return SizedBox(
+      height: 28,
       child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Container(
             width: 18,
@@ -2296,10 +2286,18 @@ class PollenForecastPage extends StatelessWidget {
               shape: BoxShape.circle,
             ),
           ),
-          const SizedBox(width: 16),
-          Text(
-            label,
-            style: _chartLabelStyle(size: 16).copyWith(color: _kChartTextPrimary),
+          const SizedBox(width: 12),
+          SizedBox(
+            width: 132,
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: Colors.white,
+                height: 1.2,
+              ),
+            ),
           ),
         ],
       ),
@@ -2422,13 +2420,13 @@ class PollenForecastPage extends StatelessWidget {
         GestureDetector(
           onTap: () => _showLegend(context),
           child: Container(
-            width: 36,
-            height: 36,
-            margin: const EdgeInsets.only(top: 8, bottom: 8, right: 12, left: 4),
+            width: 40,
+            height: 40,
+            margin: const EdgeInsets.only(top: 8, bottom: 8, right: 8, left: 4),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+              shape: BoxShape.circle,
+              color: kAppCardNavy,
+              border: Border.all(color: kAppCardNavyBorder),
             ),
             child: const Center(
               child: Icon(Icons.info_outline, size: 20, color: Colors.white),
@@ -3631,6 +3629,8 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
   Widget? _radarView;
   bool _surfaceReady = false;
   bool _ownsController = false;
+  /// Počas info dialógu — nekompozitovať živý PlatformView (inak zasek / banding).
+  bool _coverRadarForDialog = false;
 
   @override
   void initState() {
@@ -3844,135 +3844,106 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
     );
   }
 
-  void _showRadarSourceInfo(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return Center(
-          child: Material(
-            type: MaterialType.transparency,
-            child: Container(
-              margin: const EdgeInsets.symmetric(horizontal: 24),
-              decoration: BoxDecoration(
-                color: kAmbientBlendColor,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: kAppCardNavyBorder),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(20.0),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.info_outline, size: 48, color: _kChartLineBlue),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'Zdroj dát',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
+  Future<void> _showRadarSourceInfo(BuildContext context) async {
+    if (_coverRadarForDialog) return;
+    // Najprv prekry PlatformView nepriehľadnou vrstvou — animácia dialógu cez
+    // Hybrid Composition WebView na Androide seká a robí „schody“ vo farbách.
+    setState(() => _coverRadarForDialog = true);
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+    try {
+      await showGeneralDialog<void>(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: 'Zavrieť',
+        // Skoro nepriehľadné — žiadny prehľad cez živú mapu.
+        barrierColor: const Color(0xE6172438),
+        transitionDuration: Duration.zero,
+        pageBuilder: (dialogContext, _, __) {
+          return Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                margin: const EdgeInsets.symmetric(horizontal: 24),
+                decoration: appInfoDialogDecoration(),
+                child: Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      appInfoDialogIcon(Icons.info_rounded),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'Zdroj dát',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 12),
-                    const Text(
-                      'Radarové dáta sú spracované z otvorených dát SHMÚ (SK), ČHMÚ (CZ), IMGW (PL), DWD (DE) a ANM (RO).',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.white70,
-                        height: 1.4,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    const Text(
-                      'Blesky: EUMETSAT',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.white70,
-                        height: 1.4,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    GestureDetector(
-                      onTap: () => launchUrl(Uri.parse('https://www.eumetsat.int')),
-                      child: const Text(
-                        'https://www.eumetsat.int',
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Radarové dáta sú spracované z otvorených dát SHMÚ (SK), ČHMÚ (CZ), IMGW (PL), DWD (DE) a ANM (RO).',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           fontSize: 14,
-                          color: _kChartLineBlue,
-                          decoration: TextDecoration.underline,
+                          color: Colors.white70,
+                          height: 1.4,
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 24),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: ElevatedButton(
-                            onPressed: () => Navigator.of(context).pop(),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: kAppCardNavy,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              elevation: 0,
-                              shadowColor: Colors.transparent,
-                              surfaceTintColor: Colors.transparent,
-                              splashFactory: NoSplash.splashFactory,
-                            ).copyWith(
-                              overlayColor: WidgetStateProperty.all(Colors.transparent),
-                            ),
-                            child: const Text(
-                              'Zavrieť',
-                              style: TextStyle(
-                                color: Colors.white70,
-                                fontWeight: FontWeight.bold,
-                              ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Blesky: EUMETSAT',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Colors.white70,
+                          height: 1.4,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      GestureDetector(
+                        onTap: () =>
+                            launchUrl(Uri.parse('https://www.eumetsat.int')),
+                        child: const Text(
+                          'https://www.eumetsat.int',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: kAppAccentBlue,
+                            decoration: TextDecoration.underline,
+                            decorationColor: kAppAccentBlue,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () => Navigator.of(dialogContext).pop(),
+                          style: appInfoDialogCloseButtonStyle(),
+                          child: const Text(
+                            'Zavrieť',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: ElevatedButton(
-                            onPressed: () {
-                              openUrl('https://www.shmu.sk');
-                              Navigator.of(context).pop();
-                            },
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: _kChartLineBlue,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              elevation: 0,
-                              shadowColor: Colors.transparent,
-                              surfaceTintColor: Colors.transparent,
-                              splashFactory: NoSplash.splashFactory,
-                            ).copyWith(
-                              overlayColor: WidgetStateProperty.all(Colors.transparent),
-                            ),
-                            child: const Text(
-                              'Web SHMÚ',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        );
-      },
-    );
+          );
+        },
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _coverRadarForDialog = false);
+      }
+    }
   }
 
   @override
@@ -4046,12 +4017,19 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
             actions: [
               _radarChromeButton(
                 icon: Icons.info_outline_rounded,
-                onTap: () => _showRadarSourceInfo(context),
+                onTap: () => unawaited(_showRadarSourceInfo(context)),
                 margin: const EdgeInsets.only(top: 8, bottom: 8, right: 8, left: 4),
               ),
             ],
           ),
-          body: mapBody,
+          body: Stack(
+            fit: StackFit.expand,
+            children: [
+              mapBody,
+              if (_coverRadarForDialog)
+                const ColoredBox(color: kAmbientBlendColor),
+            ],
+          ),
         ),
       ),
     );
@@ -4798,17 +4776,9 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     return null;
   }
 
-  /// Obnova dát bez znovunačítania WebView (mapa ostane na obrazovke).
+  /// Obnova výstrah bez GeoJSON / bez reloadu WebView — len `dbase` + prefarbenie.
+  /// (Helkor `loadLevels` / `reloadBtn` ťahajú okresy odznova — NEpoužívať.)
   Future<bool> _softReloadInPage(WebViewController c) async {
-    try {
-      final raw = await c.runJavaScriptReturningResult(
-        '(function(){ try { if (typeof loadLevels === "function") { loadLevels(); return "ok"; } '
-        'var b = document.getElementById("reloadBtn"); if (b) { b.click(); return "ok"; } '
-        'return "missing"; } catch (e) { return "err"; } })()',
-      );
-      if (raw.toString().contains('ok')) return true;
-    } catch (_) {}
-
     try {
       final res = await http
           .get(_vystrahyRequestUri(), headers: _vystrahyNoCacheHeaders)
@@ -4818,7 +4788,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       if (literal == null || literal.length < 2) return false;
       // Prázdne pole z editora — mapa očakáva objekt okres→výstrahy.
       if (literal == '[]') literal = '{}';
-      await c.runJavaScript('''
+      final raw = await c.runJavaScriptReturningResult('''
 (function() {
   try {
     var next = $literal;
@@ -4843,17 +4813,20 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
           var id = l.feature && l.feature._bezpecneId;
           l.setStyle({
             fillColor: farbaNaDen(dbase[id], off),
-            weight: 0.35,
+            weight: 0.9,
             color: '#172438',
             opacity: 0.9
           });
         } catch (e1) {}
       });
     }
-  } catch (e) {}
+    return "ok";
+  } catch (e) {
+    return "err";
+  }
 })();
 ''');
-      return true;
+      return raw.toString().contains('ok');
     } catch (_) {
       return false;
     }
@@ -4871,8 +4844,8 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       if (c == null) return;
     }
 
-    // Už hotová mapa: len tichá obnova dát + spinner v ikone.
-    if (loaded) {
+    // Mapa už je hotová → NIKDY nereloaduj WebView / GeoJSON.
+    if (loaded && mapContentReady) {
       softReloading = true;
       _notifySafely();
       final ok = await _softReloadInPage(c);
@@ -4880,22 +4853,15 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       _notifySafely();
       if (ok) {
         await refreshActiveWarningNotice(scheduleRecheck: false);
-        _scheduleMapResizeInject();
-        return;
       }
-      // Fallback: nová stránka, ale bez prekrytia spinnerom.
-      _preferSoftNavigation = true;
-      _onLoadStarted(soft: true);
-      await c.loadRequest(
-        _vystrahyRequestUri(),
-        headers: _vystrahyNoCacheHeaders,
-      );
-      await waitUntilReady(timeout: timeout);
-      await refreshActiveWarningNotice(scheduleRecheck: false);
       return;
     }
 
+    // Prvé načítanie / po chybe — až vtedy plný loadRequest.
+    softReloading = false;
+    _preferSoftNavigation = false;
     _onLoadStarted(soft: false);
+    mapContentReady = false;
     await c.loadRequest(
       _vystrahyRequestUri(),
       headers: _vystrahyNoCacheHeaders,
@@ -5393,7 +5359,7 @@ const String _kVystrahyEnsureOkresyFromNetworkJs = r'''
           var color = (typeof farbaNaDen === 'function')
             ? farbaNaDen(db[id], off)
             : '#10b981';
-          return { fillColor: color, weight: 0.35, color: '#172438', opacity: 0.9, fillOpacity: 1 };
+          return { fillColor: color, weight: 0.9, color: '#172438', opacity: 0.9, fillOpacity: 1 };
         },
         interactive: false
       }).addTo(mapRef);
@@ -5454,7 +5420,7 @@ const String _kVystrahyApplyPrefetchedOkresyJs = r'''
         var color = (typeof farbaNaDen === 'function')
           ? farbaNaDen(db[id], off)
           : '#10b981';
-        return { fillColor: color, weight: 0.35, color: '#172438', opacity: 0.9, fillOpacity: 1 };
+        return { fillColor: color, weight: 0.9, color: '#172438', opacity: 0.9, fillOpacity: 1 };
       },
       interactive: false
     }).addTo(mapRef);
@@ -5477,7 +5443,7 @@ const String _kVystrahyThinOkresBordersJs = r'''
       if (typeof geoLayer === 'undefined' || !geoLayer || !geoLayer.eachLayer) return false;
       geoLayer.eachLayer(function(l) {
         try {
-          l.setStyle({ weight: 0.35, color: '#172438', opacity: 0.9 });
+          l.setStyle({ weight: 0.9, color: '#172438', opacity: 0.9 });
         } catch (e0) {}
       });
       return true;
@@ -5504,7 +5470,7 @@ const String _kVystrahyOkresyReadyWatchJs = r'''
       if (typeof geoLayer === 'undefined' || !geoLayer || !geoLayer.eachLayer) return;
       geoLayer.eachLayer(function(l) {
         try {
-          l.setStyle({ weight: 0.35, color: '#172438', opacity: 0.9 });
+          l.setStyle({ weight: 0.9, color: '#172438', opacity: 0.9 });
         } catch (e0) {}
       });
     } catch (e1) {}
