@@ -5,18 +5,18 @@ const String kRadarServerBase = 'http://cz1.helkor.eu:41152';
 const int kRadarImageCols = 4000;
 const int kRadarImageRows = 2000;
 
-const double kRadarMinDbzForUi = 8.0;
-const double kRadarMinDbzSignificantEcho = 10.0;
-const double kRadarMinDbzCoherentEcho = 10.0;
-const double kRadarMinDbzTrackerIncoming = 10.0;
-const double kRadarMinDbzDistantApproach = 8.0;
-const int kRadarNoiseMinPersistFrames = 1;
-const int kRadarMinCoherentAreaPx = 1;
-const double kRadarMinDbzTrackerFront = 12.0;
-const int kRadarMinCoherentCorePx = 1;
-/// „Už prší u mňa“ — slabší prah, bez filtrácie šumu.
-const double kRadarMinDbzPrecipNow = 8.0;
-const double kRadarMinDbzEcho = 8.0;
+const double kRadarMinDbzForUi = 14.0;
+const double kRadarMinDbzSignificantEcho = 18.0;
+const double kRadarMinDbzCoherentEcho = 22.0;
+const double kRadarMinDbzTrackerIncoming = 18.0;
+const double kRadarMinDbzDistantApproach = 16.0;
+const int kRadarNoiseMinPersistFrames = 2;
+const int kRadarMinCoherentAreaPx = 4;
+const double kRadarMinDbzTrackerFront = 18.0;
+const int kRadarMinCoherentCorePx = 2;
+/// „Už prší u mňa“ — stále citlivé na mrholenie, ale nie na 1 px šum.
+const double kRadarMinDbzPrecipNow = 12.0;
+const double kRadarMinDbzEcho = 12.0;
 const int kRadarCoreSampleRadiusPx = 6;
 const int kRadarPeakCompareRadiusPx = 28;
 const int kRadarSampleRadiusPx = 56;
@@ -61,13 +61,14 @@ const int kRadarNowcastTrendFrames = 10;
 const Duration _kRadarNowcastCacheTtl = Duration(seconds: 90);
 const Duration kRadarTrackerPhaseHoldInterval = Duration(minutes: 5);
 const Duration kRadarTrackerIncomingToActiveHold = Duration(minutes: 5);
-const int kRadarTrackerArrivalSmoothMinutes = 15;
+/// ETA začiatku — menšie skoky držať; veľká zmena až po tomto okne.
+const int kRadarTrackerArrivalSmoothMinutes = 25;
 /// Koniec aktívneho dažďa — po zamknutí sa už nemení (len odpočet času).
 const Duration kRadarTrackerEndHoldInterval = Duration(minutes: 30);
 const int kRadarTrackerEndSmoothMinutes = 30;
-const int kRadarTrackerEndSoonerAdoptMinutes = 999;
-const int kRadarTrackerEndMaxStepMinutes = 0;
-const int kRadarTrackerEndEmergencyAdoptMinutes = 999;
+/// Incoming start/end — veľký skok až po tomto čase od posledného zamknutia.
+const Duration kRadarTrackerIncomingTimesHold = Duration(minutes: 4);
+const int kRadarTrackerIncomingJumpAdoptMinutes = 25;
 
 /// Obmedzená paralelizácia — inak desiatky PNG dekódov naraz = OOM na emulátore / slabších telefónoch.
 Future<List<T?>> _mapRadarSamplesWithConcurrency<T>(
@@ -128,6 +129,12 @@ class RadarFrameSample {
   final double? eastDbz;
   final double? westDbz;
 
+  /// Vek minulosti snímky voči [locNow] (s). Záporné = nowcast / budúcnosť.
+  int ageSecondsAt(DateTime locNow) {
+    final nowSec = locNow.millisecondsSinceEpoch ~/ 1000;
+    return nowSec - unix;
+  }
+
   double? dbzInDirection(String dir) => switch (dir) {
         'n' => northDbz,
         's' => southDbz,
@@ -136,11 +143,25 @@ class RadarFrameSample {
         _ => null,
       };
 }
+
+/// Max. vek **minulosti** snímky pre „prší teraz“ (RV ~10 min, Helkor ~5 min).
+/// Staršia mokrá snímka (napr. 17:30 pri 18:50) nesmie držať hero „Dážď“.
+const int kRadarLivePastFrameMaxAgeSec = 18 * 60;
+
+bool radarPastFrameFreshForLivePin(
+  RadarFrameSample frame, [
+  DateTime? locNow,
+]) {
+  final age = frame.ageSecondsAt(locNow ?? DateTime.now());
+  if (age < -120) return true;
+  if (age < 0) return true;
+  return age <= kRadarLivePastFrameMaxAgeSec;
+}
  
 /// Fáza karty sledovača — ovplyvňuje layout (kompaktný vs. rozšírený).
 enum RadarPrecipTrackerPhase { idle, loading, watching, active, incoming }
 
-const String kRadarTrackerCardTitle = 'Sledovač radaru';
+const String kRadarTrackerCardTitle = 'Sledovač zrážok podľa radaru';
 /// Horizont textu sledovača + pás 24 h — radar nowcast má zmysel cca do 5 h
 /// (RainViewer snímky ~2 h; 2–5 h = trajektória/ETA, ďalej už len model).
 const int kRadarTrackerHorizonHours = 5;
@@ -198,9 +219,21 @@ String _trackerIncomingTimingDetail({
   required String endLabel,
   required int minsToStart,
   required int durationMin,
+  int approachChancePercent = 0,
+  double intensityDbz = 0,
 }) {
   final subj = _trackerPrecipSubjectLower(snow: snow);
+  final chance = approachChancePercent.clamp(0, 100);
   final effectiveMins = math.max(minsToStart, 0);
+
+  // Formát blízky RainViewer: „Mrholenie s očakávaným začiatkom o 19:20 s 73%…“
+  if (chance >= 40 && effectiveMins >= 0) {
+    final kind = snow
+        ? 'Sneženie'
+        : (intensityDbz > 0 && intensityDbz < 22 ? 'Mrholenie' : 'Dážď');
+    return '$kind s očakávaným začiatkom o $startLabel s $chance% pravdepodobnosťou.';
+  }
+
   final startPhrase = effectiveMins <= 20
       ? 'Začiatok o $startLabel'
       : 'Začiatok okolo $startLabel';
@@ -260,6 +293,68 @@ int _trackerDisplayRemainingMinutes(DateTime endAt, DateTime locNow) {
 DateTime _trackerDisplayEndTime(DateTime endAt) =>
     _roundLocalTimeToMinutes(endAt, step: 5);
 
+/// Prekreslí text sledovača podľa zamknutých časov (nie skákanie ETA v detaile).
+RadarPrecipTrackerInfo _lockIncomingTrackerTimes(
+  RadarPrecipTrackerInfo base,
+  DateTime startAt,
+  DateTime endAt,
+  DateTime locNow, {
+  int approachChancePercent = 0,
+}) {
+  final snow = kSnowWeatherCodes.contains(base.iconCode);
+  final start = _roundLocalTimeToMinutes(startAt, step: 5);
+  final end = _trackerDisplayEndTime(endAt);
+  final startLabel = _trackerClockLabel(start);
+  final endLabel = _trackerClockLabel(end);
+  final durationMin = end.difference(start).inMinutes.clamp(15, 180);
+  final minsToStart =
+      start.difference(_roundLocalTimeToMinutes(locNow)).inMinutes;
+  final timing = _trackerIncomingTimingDetail(
+    snow: snow,
+    startLabel: startLabel,
+    endLabel: endLabel,
+    minsToStart: minsToStart,
+    durationMin: durationMin,
+    approachChancePercent: approachChancePercent,
+  );
+  final useChanceFormat = approachChancePercent >= 50 &&
+      timing.contains('pravdepodobnosťou');
+  final headline = _incomingTrackerStatusTitle(
+    atPinNow: false,
+    snow: snow,
+    intensityDbz: 0,
+  );
+  return RadarPrecipTrackerInfo(
+    phase: RadarPrecipTrackerPhase.incoming,
+    title: base.title.isNotEmpty ? base.title : kRadarTrackerCardTitle,
+    detail: useChanceFormat
+        ? timing
+        : _radarTrackerCardDetail(headline, timing),
+    iconCode: base.iconCode,
+    startLocal: start,
+    endLocal: end,
+  );
+}
+
+DateTime _trackerRoundedNow(DateTime locNow) =>
+    _roundLocalTimeToMinutes(locNow);
+
+/// true = koniec okna už nastal (vrátane rovnakej minúty).
+bool _trackerClockPassed(DateTime endAt, DateTime locNow) {
+  final end = _roundLocalTimeToMinutes(endAt);
+  final now = _trackerRoundedNow(locNow);
+  return !end.isAfter(now);
+}
+
+RadarPrecipTrackerInfo _trackerIdleAfterRain({int iconCode = 3}) {
+  return RadarPrecipTrackerInfo(
+    phase: RadarPrecipTrackerPhase.idle,
+    title: kRadarTrackerCardTitle,
+    detail: kRadarTrackerDryHorizonDetail,
+    iconCode: iconCode,
+  );
+}
+
 RadarPrecipTrackerInfo _activeTrackerWithEnd(
   RadarPrecipTrackerInfo base,
   DateTime endAt,
@@ -268,19 +363,21 @@ RadarPrecipTrackerInfo _activeTrackerWithEnd(
 }) {
   final snow = kSnowWeatherCodes.contains(base.iconCode);
   final displayEnd = locked ? endAt : _trackerDisplayEndTime(endAt);
+  // Koniec už prešiel — žiadne „ustúpiť do 12:55“ o 12:57.
+  if (_trackerClockPassed(displayEnd, locNow)) {
+    return _trackerIdleAfterRain(iconCode: base.iconCode);
+  }
   final rawRemaining = _trackerDisplayRemainingMinutes(displayEnd, locNow);
-  final remainingMin = rawRemaining <= 0
-      ? 0
-      : (rawRemaining < 55 ? rawRemaining.clamp(1, 180) : rawRemaining.clamp(5, 180));
+  final remainingMin = rawRemaining < 55
+      ? rawRemaining.clamp(1, 180)
+      : rawRemaining.clamp(5, 180);
   final endLabel = _trackerClockLabel(displayEnd);
-  final body = remainingMin <= 0
-      ? '${_trackerPrecipSubject(snow: snow)} by mal ustúpiť do $endLabel.'
-      : _trackerLastsDetail(
-          snow: snow,
-          endLabel: endLabel,
-          approxMinutes: remainingMin < 55 ? remainingMin : null,
-          approxOneHour: remainingMin >= 52 && remainingMin <= 75,
-        );
+  final body = _trackerLastsDetail(
+    snow: snow,
+    endLabel: endLabel,
+    approxMinutes: remainingMin < 55 ? remainingMin : null,
+    approxOneHour: remainingMin >= 52 && remainingMin <= 75,
+  );
   final headline = _trackerActiveHeadline(0, snow: snow);
   return RadarPrecipTrackerInfo(
     phase: base.phase,
@@ -325,9 +422,23 @@ RadarPrecipTrackerInfo _applyHardLockedEnd(
   }
   final hard = _trackerHardLockedEnd(cityKey);
   if (hard != null) {
+    if (_trackerClockPassed(hard, locNow)) {
+      // Lock vypršal — uvoľni; pri stále aktívnom daždi nový end z [info].
+      _clearTrackerHardEnd(cityKey);
+      if (info.endLocal != null &&
+          !_trackerClockPassed(info.endLocal!, locNow)) {
+        _lockTrackerEnd(cityKey, info.endLocal!);
+        final locked = _trackerHardLockedEnd(cityKey)!;
+        return _activeTrackerWithEnd(info, locked, locNow, locked: true);
+      }
+      return _trackerIdleAfterRain(iconCode: info.iconCode);
+    }
     return _activeTrackerWithEnd(info, hard, locNow, locked: true);
   }
   if (info.endLocal != null) {
+    if (_trackerClockPassed(info.endLocal!, locNow)) {
+      return _trackerIdleAfterRain(iconCode: info.iconCode);
+    }
     _lockTrackerEnd(cityKey, info.endLocal!);
     final locked = _trackerHardLockedEnd(cityKey)!;
     return _activeTrackerWithEnd(info, locked, locNow, locked: true);
@@ -423,13 +534,46 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
   final stablePhaseAt = _trackerStablePhaseAtByCity[cityKey];
   final now = DateTime.now();
 
-  final hardEnd = _trackerHardLockedEnd(cityKey);
+  var hardEnd = _trackerHardLockedEnd(cityKey);
+
+  // Uplynutý koniec (12:55 pri 12:57) — nikdy nedrž „Aktuálne prší… do 12:55“.
+  final candidateExpired = hardEnd ?? prev?.endLocal ?? next.endLocal;
+  if (candidateExpired != null &&
+      _trackerClockPassed(candidateExpired, locNow)) {
+    _clearTrackerHardEnd(cityKey);
+    if (next.phase == RadarPrecipTrackerPhase.active ||
+        next.phase == RadarPrecipTrackerPhase.incoming) {
+      // Stále mokrý pin → nový end bez starého locku.
+      final refreshed = _applyHardLockedEnd(next, cityKey, locNow);
+      if (refreshed.phase == RadarPrecipTrackerPhase.idle ||
+          (refreshed.endLocal != null &&
+              _trackerClockPassed(refreshed.endLocal!, locNow))) {
+        final idle = _trackerIdleAfterRain(iconCode: next.iconCode);
+        _saveTrackerStable(cityKey, idle);
+        return idle;
+      }
+      _saveTrackerStable(cityKey, refreshed, touchEnd: true);
+      return refreshed;
+    }
+    final idle = next.phase == RadarPrecipTrackerPhase.idle
+        ? next
+        : _trackerIdleAfterRain(iconCode: next.iconCode);
+    _saveTrackerStable(cityKey, idle);
+    return idle;
+  }
+
+  hardEnd = _trackerHardLockedEnd(cityKey);
   // Hard lock len pri stále mokrom/incoming — pri suchom pine nesmie držať „Aktuálne prší“.
   if (hardEnd != null &&
       prev != null &&
       prev.phase == RadarPrecipTrackerPhase.active &&
       next.phase == RadarPrecipTrackerPhase.incoming) {
     final locked = _activeTrackerWithEnd(prev, hardEnd, locNow, locked: true);
+    if (locked.phase == RadarPrecipTrackerPhase.idle) {
+      _clearTrackerHardEnd(cityKey);
+      _saveTrackerStable(cityKey, locked);
+      return locked;
+    }
     _saveTrackerStable(cityKey, locked, touchPhase: false);
     return locked;
   }
@@ -463,6 +607,11 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
       next.phase == RadarPrecipTrackerPhase.incoming) {
     if (hardEnd != null) {
       final locked = _activeTrackerWithEnd(prev, hardEnd, locNow, locked: true);
+      if (locked.phase == RadarPrecipTrackerPhase.idle) {
+        _clearTrackerHardEnd(cityKey);
+        _saveTrackerStable(cityKey, locked);
+        return locked;
+      }
       _saveTrackerStable(cityKey, locked, touchPhase: false);
       return locked;
     }
@@ -477,6 +626,11 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
         next.detail.contains('Nasledujúcu hodinu sa neočakávajú');
     if (hardEnd != null && !dryNow) {
       final locked = _activeTrackerWithEnd(prev, hardEnd, locNow, locked: true);
+      if (locked.phase == RadarPrecipTrackerPhase.idle) {
+        _clearTrackerHardEnd(cityKey);
+        _saveTrackerStable(cityKey, next);
+        return next;
+      }
       _saveTrackerStable(cityKey, locked, touchPhase: false);
       return locked;
     }
@@ -489,15 +643,21 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
       next.phase == RadarPrecipTrackerPhase.idle &&
       stablePhaseAt != null &&
       now.difference(stablePhaseAt) < kRadarTrackerPhaseHoldInterval) {
+    // Drž prev len kým end ešte neprešiel.
+    if (prev.endLocal != null && _trackerClockPassed(prev.endLocal!, locNow)) {
+      _clearTrackerHardEnd(cityKey);
+      _saveTrackerStable(cityKey, next);
+      return next;
+    }
     return prev;
   }
 
   if (prev.phase == RadarPrecipTrackerPhase.incoming &&
       next.phase != RadarPrecipTrackerPhase.incoming &&
-      next.phase != RadarPrecipTrackerPhase.active &&
-      stablePhaseAt != null &&
-      now.difference(stablePhaseAt) < kRadarTrackerPhaseHoldInterval) {
-    return prev;
+      next.phase != RadarPrecipTrackerPhase.active) {
+    // Suchý / idle / watching → uvoľni hneď (nedrž falošný dážď).
+    _saveTrackerStable(cityKey, next);
+    return next;
   }
 
   if (prev.phase == RadarPrecipTrackerPhase.incoming &&
@@ -554,6 +714,13 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
       prev.phase == RadarPrecipTrackerPhase.active) {
     if (hardEnd != null) {
       final locked = _activeTrackerWithEnd(next, hardEnd, locNow, locked: true);
+      if (locked.phase == RadarPrecipTrackerPhase.idle) {
+        _clearTrackerHardEnd(cityKey);
+        // Ak radar stále hlási aktívny dážď, zober nový end.
+        final refreshed = _applyHardLockedEnd(next, cityKey, locNow);
+        _saveTrackerStable(cityKey, refreshed, touchEnd: true);
+        return refreshed;
+      }
       _saveTrackerStable(cityKey, locked, touchPhase: false);
       return locked;
     }
@@ -573,55 +740,53 @@ RadarPrecipTrackerInfo stabilizeRadarTrackerInfo(
   if (prev.phase == RadarPrecipTrackerPhase.incoming &&
       next.phase == RadarPrecipTrackerPhase.incoming &&
       prev.startLocal != null &&
-      !prev.startLocal!.isAfter(locNow)) {
-    _saveTrackerStable(cityKey, next);
-    return next;
-  }
-
-  if (prev.phase == RadarPrecipTrackerPhase.incoming &&
-      next.phase == RadarPrecipTrackerPhase.incoming &&
-      prev.startLocal != null &&
-      next.startLocal != null &&
-      !next.startLocal!.isAfter(prev.startLocal!)) {
-    _saveTrackerStable(cityKey, next);
-    return next;
-  }
-
-  if (prev.phase == RadarPrecipTrackerPhase.incoming &&
-      next.phase == RadarPrecipTrackerPhase.incoming &&
-      prev.startLocal != null &&
-      next.startLocal != null) {
-    final delta =
-        next.startLocal!.difference(prev.startLocal!).inMinutes.abs();
-    if (next.startLocal!.isBefore(prev.startLocal!)) {
+      prev.endLocal != null) {
+    // ETA už nastalo — nechaj nový stav (active/incoming s novým oknom).
+    if (!prev.startLocal!.isAfter(locNow)) {
+      if (next.startLocal != null && next.endLocal != null) {
+        final locked = _lockIncomingTrackerTimes(
+          next,
+          next.startLocal!,
+          next.endLocal!,
+          locNow,
+        );
+        _saveTrackerStable(cityKey, locked);
+        return locked;
+      }
       _saveTrackerStable(cityKey, next);
       return next;
     }
-    if (delta <= kRadarTrackerArrivalSmoothMinutes) {
-      final keepStart = prev.startLocal!;
-      if (!keepStart.isAfter(locNow)) {
-        _saveTrackerStable(cityKey, next);
-        return next;
-      }
-      final startLabel =
-          '${keepStart.hour.toString().padLeft(2, '0')}:${keepStart.minute.toString().padLeft(2, '0')}';
-      final detail = next.detail.contains('Očakávaný')
-          ? next.detail.replaceFirst(
-              RegExp(r'Očakávaný začiatok o \d{2}:\d{2}'),
-              'Očakávaný začiatok o $startLabel',
-            )
-          : next.detail;
-      final stabilized = RadarPrecipTrackerInfo(
-        phase: next.phase,
-        title: next.title,
-        detail: detail,
-        iconCode: next.iconCode,
-        startLocal: keepStart,
-        endLocal: next.endLocal,
+
+    final nextStart = next.startLocal ?? prev.startLocal!;
+    final nextEnd = next.endLocal ?? prev.endLocal!;
+    final startDelta = nextStart.difference(prev.startLocal!).inMinutes.abs();
+    final endDelta = nextEnd.difference(prev.endLocal!).inMinutes.abs();
+    final heldLongEnough = stablePhaseAt == null ||
+        now.difference(stablePhaseAt) >= kRadarTrackerIncomingTimesHold;
+    final bigJump = startDelta > kRadarTrackerIncomingJumpAdoptMinutes ||
+        endDelta > kRadarTrackerIncomingJumpAdoptMinutes;
+
+    // Drž časy — text vždy z zamknutých hodnôt (inak detail skáče aj pri smooth).
+    if (!bigJump || !heldLongEnough) {
+      final locked = _lockIncomingTrackerTimes(
+        next,
+        prev.startLocal!,
+        prev.endLocal!,
+        locNow,
       );
-      _saveTrackerStable(cityKey, stabilized, touchPhase: false);
-      return stabilized;
+      _saveTrackerStable(cityKey, locked, touchPhase: false);
+      return locked;
     }
+
+    // Veľká zmena po hold — prijmi, ale zaokrúhli.
+    final locked = _lockIncomingTrackerTimes(
+      next,
+      nextStart,
+      nextEnd,
+      locNow,
+    );
+    _saveTrackerStable(cityKey, locked);
+    return locked;
   }
 
   _saveTrackerStable(cityKey, next, touchPhase: prev.phase != next.phase);
@@ -792,8 +957,17 @@ const double _kRadarCardinalUnitKm = 18.0;
 bool _flatFrameWetAtPin(RadarFrameSample f, {required bool rainViewer}) {
   final center = f.dbz ?? 0.0;
   if (rainViewer) {
-    // Len stred pinu — peak / nearbyEcho ≠ dážď na lokalite (mapa by bola suchá).
-    return f.precipAtPoint || center >= kRainViewerLegendMinDbz;
+    if (f.precipAtPoint || center >= kRainViewerLegendMinDbz) return true;
+    // Bunka priamo nad pinom (mapa má echo, stredný pixel môže byť fringe < 15).
+    final inner = f.innerPeakDbz ?? f.peakDbz ?? center;
+    if (center >= kRainViewerLegendTraceDbz && f.coherentCorePx >= 1) {
+      return true;
+    }
+    if (center >= 10 && f.coherentPx14 >= 2 && (inner - center) <= 14) {
+      return true;
+    }
+    if (f.coherentCorePx >= 2 && inner >= 18 && center >= 8) return true;
+    return false;
   }
   // Helkor: `precip` = echo v okolí, nie na pine — nesmie spustiť „prší tu“.
   return f.precipAtPoint || center >= kRainViewerLegendMinDbz;
@@ -804,13 +978,16 @@ bool _flatFrameNearbyApproach(RadarFrameSample f, {required bool rainViewer}) {
   final center = f.dbz ?? 0.0;
   final peak = f.innerPeakDbz ?? f.peakDbz ?? center;
   if (rainViewer) {
+    // Súvislá bunka pri pine — nie 1–2 px zelené škvŕny.
     return peak >= 18 &&
         center < kRainViewerLegendMinDbz &&
-        (f.coherentPx14 >= 2 || f.coherentCorePx >= 1);
+        f.coherentPx14 >= 4 &&
+        f.coherentCorePx >= 1;
   }
-  return peak >= 22 &&
+  return peak >= 24 &&
       center < 14 &&
-      (f.coherentPx14 >= 2 || f.precip || peak >= 28);
+      f.coherentPx14 >= 4 &&
+      (f.coherentCorePx >= 2 || peak >= 30);
 }
 
 double _flatFrameUiDbz(RadarFrameSample f, {required bool rainViewer}) {
@@ -1109,11 +1286,29 @@ double? _flatCenterDbzSlopePerMin(List<RadarFrameSample> history) {
   if (slope != null && slope < -0.04) chance -= 20;
   chance = chance.clamp(0, 95);
   if (!approaching || eta == null) {
-    if (nearby && !departingMotion && etaFromGap != null) {
+    // Bez pohybu k pinu nevymýšľať príchod len z „peak v okolí“ (falošný dážď).
+    if (nearby && toward && !departingMotion && etaFromGap != null) {
       approaching = true;
       eta ??= etaFromGap;
-      chance = math.max(chance, 35);
-      endMins ??= (eta + 15).clamp(eta + 8, 50);
+      chance = math.max(chance, 40);
+      endMins ??= (eta + 20).clamp(eta + 12, 55);
+    } else if (nearby &&
+        !departingMotion &&
+        (toward ||
+            (slope != null && slope > 0.02) ||
+            firstWetNowcastMins != null ||
+            (speedKmH != null && speedKmH > 5))) {
+      // Súvislá bunka na mape + aspoň slabý signál priblíženia → % šance.
+      approaching = true;
+      eta ??= etaFromGap ?? firstWetNowcastMins ?? 25;
+      chance = math.max(chance, 40);
+      endMins ??= (eta + 20).clamp(eta + 12, 55);
+    } else if (nearby && !departingMotion && etaFromGap != null) {
+      // Stacionárna/pomaly bunka blízko pinu — nízka, ale nie nulová šanca.
+      approaching = true;
+      eta ??= etaFromGap;
+      chance = math.max(chance, 40);
+      endMins ??= (eta + 20).clamp(eta + 12, 55);
     } else {
       chance = 0;
       approaching = false;
@@ -1182,7 +1377,8 @@ RadarPinForecastSnapshot buildRadarPinForecastSnapshot({
 
   if (history.isNotEmpty) {
     final f = history.last;
-    if (_flatFrameWetAtPin(f, rainViewer: fromRainViewer)) {
+    if (radarPastFrameFreshForLivePin(f, locNow) &&
+        _flatFrameWetAtPin(f, rainViewer: fromRainViewer)) {
       wetAtPin = true;
       rainViewer = fromRainViewer;
     }
@@ -1196,7 +1392,8 @@ RadarPinForecastSnapshot buildRadarPinForecastSnapshot({
   // Helkor iba keď RV históriu nemáme (fallback mimo/bez RV dát).
   if (!fromRainViewer && helkorHistory.isNotEmpty) {
     final f = helkorHistory.last;
-    if (_flatFrameWetAtPin(f, rainViewer: false)) {
+    if (radarPastFrameFreshForLivePin(f, locNow) &&
+        _flatFrameWetAtPin(f, rainViewer: false)) {
       wetAtPin = true;
       rainViewer = false;
     }
@@ -1251,13 +1448,10 @@ RadarPinForecastSnapshot buildRadarPinForecastSnapshot({
   final int? windowStart = wetAtPin
       ? 0
       : (approaching && eta != null && chance >= 25 ? eta : null);
-  // Pri daždi na pine — okno podľa endMins; dlhá bunka môže ísť aj cez 2–3 h.
+  // Pri daždi na pine — koniec podľa endMins (bez umelého minima 55 min).
   final int? windowEnd = windowStart == null
       ? null
-      : math.max(
-          endMins ?? (windowStart + (wetAtPin ? 70 : 30)),
-          wetAtPin ? 55 : (windowStart + 25),
-        );
+      : (endMins ?? (windowStart + (wetAtPin ? 30 : 30)));
 
   if (windowStart != null && windowEnd != null && windowEnd > windowStart) {
     for (var h = 0; h <= 6; h++) {
@@ -1278,24 +1472,24 @@ RadarPinForecastSnapshot buildRadarPinForecastSnapshot({
     }
   }
 
-  // Ďalšia hodina: pás 24 h začína na +1 h — pri daždi na pine ju vždy autorizuj.
-  // Ďalšie hodiny podľa endMins (prehánka + front môže ísť 3–5 h).
+  // Ďalšie hodiny len ak dážď ešte zasahuje do nich (nie natvrdo +1 h).
   if (wetAtPin) {
     authorizeHour(nowHour);
-    authorizeHour(nowHour.add(const Duration(hours: 1)));
-    final hold = math.max(endMins ?? 55, 55);
-    final minsToNextHour = 60 - locNow.minute;
-    if (hold > minsToNextHour + 10) {
-      authorizeHour(nowHour.add(const Duration(hours: 2)));
+    final hold = (endMins ?? 25).clamp(8, 180);
+    // Hard-lock sledovača (do 12:55) prebíja surový endMins.
+    var effectiveEnd = locNow.add(Duration(minutes: hold));
+    if (cityLat != null && cityLon != null) {
+      final hard = _trackerHardLockedEnd(_trackerCityKey(cityLat, cityLon));
+      if (hard != null && hard.isAfter(locNow) && hard.isBefore(effectiveEnd)) {
+        effectiveEnd = hard;
+      }
     }
-    if (hold > minsToNextHour + 70) {
-      authorizeHour(nowHour.add(const Duration(hours: 3)));
-    }
-    if (hold > minsToNextHour + 130) {
-      authorizeHour(nowHour.add(const Duration(hours: 4)));
-    }
-    if (hold > minsToNextHour + 190) {
-      authorizeHour(nowHour.add(const Duration(hours: 5)));
+    for (var h = 1; h <= 5; h++) {
+      final hour = nowHour.add(Duration(hours: h));
+      // Autorizuj hodinu len ak dážď ešte beží po jej začiatku.
+      if (effectiveEnd.isAfter(hour)) {
+        authorizeHour(hour);
+      }
     }
   }
 
@@ -1365,7 +1559,7 @@ RadarPinForecastSnapshot buildRadarPinForecastSnapshot({
     nearTermEndExclusiveMs: nearEndMs,
     clearEcmwfNearTerm: clearEcmwf,
     etaMinutes: wetAtPin ? 0 : eta,
-    endMinutes: wetAtPin ? math.max(endMins ?? 55, 55) : endMins,
+    endMinutes: wetAtPin ? (endMins ?? 25).clamp(8, 180) : endMins,
     approachChancePercent: wetAtPin ? 100 : chance,
     distanceKmEstimate: motion.distanceKm,
     motionSpeedKmH: motion.speedKmH,
@@ -1378,11 +1572,13 @@ RadarPinForecastSnapshot buildRadarPinForecastSnapshot({
 class RadarNowcastContext {
   const RadarNowcastContext({
     required this.eligible,
-    required this.history, 
+    required this.history,
     this.fromRainViewer = false,
     this.nowcastHistory = const [],
     this.helkorHistory = const [],
     this.pinForecast = RadarPinForecastSnapshot.empty,
+    this.cityLat,
+    this.cityLon,
   });
 
   final bool eligible;
@@ -1395,6 +1591,9 @@ class RadarNowcastContext {
   final List<RadarFrameSample> helkorHistory;
   /// Profesionálny flat snapshot + matematika pre UI (hero / 24 h).
   final RadarPinForecastSnapshot pinForecast;
+  /// Súradnice mesta — hard-lock konca sledovača musí sedieť s pásom 24 h.
+  final double? cityLat;
+  final double? cityLon;
 
   /// Helkor backup — len keď nie je RainViewer (mapa Meteo nie je detekcia).
   bool get meteoRadarBackupPrecipSignal =>
@@ -1625,33 +1824,178 @@ class RadarNowcastContext {
     return nowHour.add(const Duration(hours: kRadarNowcastStripHorizonHours));
   }
 
+  /// Koniec okna sledovača pre pás — rovnaký hard-lock / endLocal ako karta.
+  DateTime? _trackerStripEndAtPin(DateTime locNow) {
+    final lat = cityLat;
+    final lon = cityLon;
+    if (lat != null && lon != null) {
+      final cityKey = _trackerCityKey(lat, lon);
+      final hard = _trackerHardLockedEnd(cityKey);
+      if (hard != null) {
+        // Hard-lock už prešiel → dážď skončil (žiadne ďalšie mokré hodiny).
+        return hard.isAfter(locNow) ? hard : locNow;
+      }
+      final stable = _trackerStableByCity[_trackerStabilizerKey(lat, lon)];
+      if (stable != null &&
+          stable.phase == RadarPrecipTrackerPhase.active &&
+          stable.endLocal != null) {
+        final end = stable.endLocal!;
+        return end.isAfter(locNow) ? end : locNow;
+      }
+    }
+    return _roundLocalTimeToMinutes(
+      locNow.add(Duration(minutes: _trackerRemainingMinutesAtPin(locNow))),
+    );
+  }
+
+  /// Aktívny dážď — pás striktne podľa minútového konca sledovača (nie firstDryHour).
+  bool _stripSlotOverlapsTrackerMinuteEnd(
+    DateTime slotHour,
+    DateTime windowStart,
+    DateTime minuteEnd,
+  ) {
+    // minuteEnd je posledná minúta dažďa (vrátane) → exkluzívny koniec = +1 min.
+    final endExclusive = minuteEnd.add(const Duration(minutes: 1));
+    return _hourlySlotOverlapsPrecipWindow(slotHour, windowStart, endExclusive);
+  }
+
   /// Zrážková ikona v pásme podľa nowcastu (do 5 h):
   /// - aktuálna hodina = živý pin
-  /// - v okne RV snímkov (~2 h) = len mokrý pixel na pine v tej hodine
-  /// - za snímkami do 5 h = trajektória (pinForecast)
+  /// - budúce hodiny = rovnaké okno ako sledovač (do 12:55 ⇒ 13:00 suché)
   bool nowcastAuthorizesStripPrecipHour(DateTime slotHour, DateTime locNow) {
     final nowHour = _localHourFloor(locNow);
     final slot = _localHourFloor(slotHour);
     if (slot.isBefore(nowHour)) return false;
     if (!slot.isBefore(nowcastStripGateEndExclusive(locNow))) return false;
 
-    // Aktuálna hodina — živý pin.
+    // Aktuálna hodina — živý pin (blížiaca sa bunka ≠ „prší teraz“).
     if (slot == nowHour) {
-      return precipNow || rainAtPinNow || pinForecast.wetAtPinNow;
+      return precipNow ||
+          rainAtPinNow ||
+          pinForecast.wetAtPinNow ||
+          radarUiWetAtPin;
     }
 
+    // Echo už prešlo / je východne — žiadny dážď v páse.
+    if (fromRainViewer && _rainViewerEchoOffPathOrPassedAt(locNow)) {
+      return false;
+    }
+
+    // Aktívny dážď — pás striktne podľa okna sledovača (hard-lock do 12:55).
+    if (precipNow ||
+        rainAtPinNow ||
+        pinForecast.wetAtPinNow ||
+        _trackerRainActiveAtPin) {
+      final stripEnd = _trackerStripEndAtPin(locNow);
+      // Okno už skončilo → budúce hodiny suché (aj keď pin ešte chvíľu „mokrý“).
+      if (stripEnd != null && _trackerClockPassed(stripEnd, locNow)) {
+        return false;
+      }
+      final ui = _trackerUiPrecipWindow(locNow);
+      if (ui != null) {
+        return _stripSlotOverlapsTrackerMinuteEnd(slot, ui.start, ui.minuteEnd);
+      }
+      final minuteEnd = _rainViewerStripRainMinuteEndAt(locNow) ?? stripEnd;
+      if (minuteEnd != null) {
+        return _stripSlotOverlapsTrackerMinuteEnd(slot, nowHour, minuteEnd);
+      }
+      // Bez minútového okna — neautorizuj ďalšie hodiny z nowcastu/modelu.
+      return false;
+    }
+
+    // Najprv ETA sledovača — pás musí sedieť s textom „do 20:55“.
+    if (_stripSlotOverlapsTrackerIncomingWindow(slot, locNow)) return true;
+    if (authorizesPrecipAtLocalHour(slot, locNow)) return true;
+
     if (fromRainViewer && nowcastHistory.isNotEmpty) {
-      // 1) Skutočná nowcast snímka na tú hodinu.
       if (_rainViewerNowcastWetAtHour(slot, locNow)) return true;
       final cov = rainViewerNowcastCoverageEndExclusive(locNow);
-      // V okne snímkov: suchá snímka = suchá hodina (nič nevymýšľať).
+      // V okne snímkov bez ETA: suchá snímka = suchá hodina.
       if (cov != null && slot.isBefore(cov)) return false;
-      // 2) Za poslednou snímkou → do 5 h: ETA / pohyb bunky.
       return pinForecast.authorizesLocalHour(slot);
     }
 
-    // Bez RV nowcastu — flat snapshot (helkor / trajektória).
     return pinForecast.authorizesLocalHour(slot);
+  }
+
+  /// Budúci hodinový slot prekrýva ETA okno sledovača (príchod / aktívny dážď).
+  bool _stripSlotOverlapsTrackerIncomingWindow(
+    DateTime slotHour,
+    DateTime locNow,
+  ) {
+    final window = _stripAlignedTrackerPrecipWindow(locNow);
+    if (window == null) return false;
+    return _stripSlotOverlapsTrackerMinuteEnd(
+      slotHour,
+      window.start,
+      window.minuteEnd,
+    );
+  }
+
+  /// Rovnaké okno ako karta sledovača — bez vymýšľania dažďa zo vzdialeného peaku.
+  ({DateTime start, DateTime minuteEnd})? _stripAlignedTrackerPrecipWindow(
+    DateTime locNow,
+  ) {
+    if (fromRainViewer && _rainViewerEchoOffPathOrPassedAt(locNow)) {
+      return null;
+    }
+    final ui = _trackerUiPrecipWindow(locNow);
+    if (ui != null) return ui;
+
+    if (precipNow || rainAtPinNow || pinForecast.wetAtPinNow) {
+      final endAt = _trackerStripEndAtPin(locNow) ??
+          _roundLocalTimeToMinutes(
+            locNow.add(
+              Duration(
+                minutes: (pinForecast.endMinutes ??
+                        _trackerRemainingMinutesAtPin(locNow))
+                    .clamp(15, 180),
+              ),
+            ),
+          );
+      return (
+        start: _roundLocalTimeToMinutes(locNow),
+        minuteEnd: endAt,
+      );
+    }
+
+    // Len potvrdený príchod — nie „peak niekde v okolí“ ani mäkký pinForecast.
+    if (fromRainViewer) {
+      if (!_rainViewerIncomingLikelyAt(locNow)) {
+        return null;
+      }
+    } else if (!_trackerIncomingConfirmed && !pinForecast.approaching) {
+      return null;
+    }
+
+    var arrivalMins = fromRainViewer
+        ? _rainViewerIncomingArrivalMinutes(locNow)
+        : _trackerSoftArrivalMinutes(locNow);
+    if (arrivalMins < 0 &&
+        fromRainViewer &&
+        _rainViewerNearbyPrecipField &&
+        _rainViewerIncomingLikelyAt(locNow)) {
+      arrivalMins = _rainViewerNearbyArrivalMinutes();
+    }
+    if (arrivalMins < 0 || arrivalMins > 120) return null;
+    // PinForecast ETA ako poistka — konzistentnejšie než náhodný 35 min fallback.
+    if (pinForecast.etaMinutes != null && pinForecast.etaMinutes! >= 0) {
+      arrivalMins = math.min(arrivalMins, pinForecast.etaMinutes!);
+    }
+
+    final startAt = _trackerIncomingStartAt(locNow, arrivalMins);
+    final int endMins = pinForecast.endMinutes != null
+        ? math.max(arrivalMins + 20, pinForecast.endMinutes!)
+        : arrivalMins + math.max(45, _incomingPassageMinutes());
+    final endAt = _roundLocalTimeToMinutes(
+      locNow.add(
+        Duration(
+          minutes: endMins.clamp(arrivalMins + 15, 180).toInt(),
+        ),
+      ),
+    );
+    if (!endAt.isAfter(startAt)) return null;
+    return (start: startAt, minuteEnd: endAt);
   }
 
   /// Minútový koniec dažďa pre pás 24 h — len nowcast snímky (bez getter reťazcov → Stack Overflow).
@@ -1881,13 +2225,98 @@ class RadarNowcastContext {
   bool _rainViewerIncomingLikelyAt(DateTime locNow) {
     if (!fromRainViewer) return false;
     if (precipNow) return true;
-    if (_rainViewerEchoBypassesPinAt(locNow)) return false;
-    if (!_rainViewerTrajectoryHeadingToPinAt(locNow)) return false;
-    if (_rainViewerFutureWetAtPin(locNow)) return true;
-    if (_rainViewerNearbyPrecipField && !_rainViewerNearbyFieldRecedingRaw()) {
+    final frame = latest;
+    // Bunka už nad pinom — to je aktívny dážď, nie „príchod“, ale signal áno.
+    if (frame != null &&
+        radarPastFrameFreshForLivePin(frame, locNow) &&
+        _rainViewerCellEngulfsPin(frame)) {
       return true;
     }
-    return _rainViewerTrajectoryIncomingCore();
+    // Echo východne / už prešlo — NEHLÁSAŤ príchod (raw, bez getter cyklov).
+    if (_rainViewerEchoOffPathOrPassedRaw()) return false;
+
+    if (_rainViewerEchoBypassesPinAt(locNow) &&
+        !_echoMovingTowardPinOrClosing &&
+        !_echoApproachingPin &&
+        pinForecast.approachChancePercent < 40) {
+      return false;
+    }
+
+    // Nowcast musí pin namočiť aspoň 2 po sebe idúce snímky — 1 fringe ≠ dážď.
+    if (_rainViewerNowcastWetAheadAtPin(locNow)) return true;
+
+    // Trajektória k pinu + pohyb + dostatočná bunka (nie šum).
+    if (_rainViewerTrajectoryHeadingToPinAt(locNow) &&
+        (_echoMovingTowardPinOrClosing ||
+            _echoClosingFromDirection ||
+            pinForecast.approachChancePercent >= 40) &&
+        _rainViewerApproachDbz >= 18 &&
+        (latest?.coherentPx14 ?? 0) >= 3) {
+      return true;
+    }
+
+    // Nearby field: pohyb k pinu, alebo silná bunka + % / približovanie zo snapshotu.
+    if (_rainViewerNearbyPrecipFieldRaw() &&
+        !_rainViewerNearbyFieldRecedingRaw() &&
+        _rainViewerApproachDbz >= 18) {
+      final moving = _echoMovingTowardPinOrClosing || _echoClosingFromDirection;
+      final chanceOk = pinForecast.approachChancePercent >= 40;
+      final approachSide =
+          math.max(frame?.westDbz ?? 0, frame?.northDbz ?? 0) >= 18;
+      final sideMayHit = approachSide &&
+          (pinForecast.towardPin ||
+              pinForecast.approaching ||
+              (pinForecast.motionSpeedKmH ?? 0) >= -2);
+      if (moving || chanceOk || sideMayHit) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Off-path / prešlé echo — **len snímka + história**, žiadne gettery (Stack Overflow).
+  bool _rainViewerEchoOffPathOrPassedRaw() {
+    if (!fromRainViewer || precipNow) return false;
+    final frame = latest;
+    if (frame == null) return false;
+    final center = frame.dbz ?? 0;
+    if (center >= kRainViewerLegendMinDbz) return false;
+    if (_rainViewerCellEngulfsPin(frame)) return false;
+
+    if (_rawCentroidMovingAwayFromPin()) return true;
+
+    final e = frame.eastDbz ?? 0;
+    final w = frame.westDbz ?? 0;
+    final n = frame.northDbz ?? 0;
+    final s = frame.southDbz ?? 0;
+    const wet = kRainViewerLegendMinDbz;
+
+    final eastDominant =
+        e >= wet && e >= w + 4 && e >= n - 2 && e >= s - 2;
+    final southDominant =
+        s >= wet && s >= n + 4 && s >= w - 2 && s >= e - 2;
+    if ((eastDominant || southDominant) && center < kRainViewerLegendTraceDbz) {
+      final approachSlope = eastDominant
+          ? _directionalDbzSlopePerMin('w')
+          : _directionalDbzSlopePerMin('n');
+      if (approachSlope != null && approachSlope > 0.025) return false;
+      return true;
+    }
+
+    final dom = _dominantEchoDirection(frame);
+    if (dom != null &&
+        (dom.dir == 'e' || dom.dir == 's') &&
+        dom.dbz >= wet &&
+        center < kRainViewerLegendTraceDbz) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _rainViewerEchoOffPathOrPassedAt(DateTime locNow) {
+    if (_rainViewerEchoOffPathOrPassedRaw()) return true;
+    if (_rainViewerFutureWetAtPin(locNow)) return false;
+    return false;
   }
 
   bool _rainViewerTrackerPrecipSignalAt(DateTime locNow) =>
@@ -1921,10 +2350,11 @@ class RadarNowcastContext {
     return false;
   }
 
-  /// Suchý pin + bunka/pole pri pine na mape — aj bez potvrdeného pohybu.
-  bool get _rainViewerNearbyPrecipField {
+  /// Suchý pin + bunka/pole pri pine — raw (bez offPath / incoming getterov).
+  bool _rainViewerNearbyPrecipFieldRaw() {
     if (!fromRainViewer || precipNow) return false;
     if (_rainViewerNearbyFieldRecedingRaw()) return false;
+    if (_rainViewerEchoOffPathOrPassedRaw()) return false;
 
     final frame = latest;
     if (frame == null) return false;
@@ -1934,12 +2364,28 @@ class RadarNowcastContext {
     if (center >= kRainViewerLegendMinDbz) return false;
 
     final inner = frame.innerPeakDbz ?? frame.peakDbz ?? 0;
-    if (inner < kRainViewerLegendMinDbz) return false;
+    if (inner < 18) return false;
+    // Izolované zelené bodky ≠ pole; súvislá bunka na mape áno.
+    if (frame.coherentPx14 < 4 || frame.coherentCorePx < 1) return false;
+
+    final w = frame.westDbz ?? 0;
+    final n = frame.northDbz ?? 0;
+    final e = frame.eastDbz ?? 0;
+    final s = frame.southDbz ?? 0;
+    final approachSide = math.max(w, n);
+    final passedSide = math.max(e, s);
+    if (passedSide >= kRainViewerLegendMinDbz &&
+        passedSide > approachSide + 3 &&
+        center < kRainViewerLegendTraceDbz) {
+      return false;
+    }
 
     final cardinal = _maxCardinalDbz(frame);
     final strength = rainViewerDbzForUi(math.max(inner, cardinal));
-    return strength >= kRainViewerLegendMinDbz;
+    return strength >= 18;
   }
+
+  bool get _rainViewerNearbyPrecipField => _rainViewerNearbyPrecipFieldRaw();
 
   /// ETA blízkej bunky — intenzita/gap peak vs. stred (bez [_incomingArrivalMinutesRaw]).
   int _rainViewerNearbyArrivalMinutes() {
@@ -1976,9 +2422,8 @@ class RadarNowcastContext {
     final strength = _rainViewerApproachDbz;
     if (strength < kRainViewerLegendMinDbz) return false;
 
-    if (_echoApproachingPin ||
-        _echoClosingFromDirection ||
-        _echoMovingTowardPinOrClosing) {
+    // Len leaf motion — NIE _echoApproachingPin (cyklus so coherent).
+    if (_echoClosingFromDirection || _echoMovingTowardPinOrClosing) {
       return true;
     }
 
@@ -2099,12 +2544,12 @@ class RadarNowcastContext {
       if (approach != null && approach.dbz >= kRainViewerLegendMinDbz) {
         return true;
       }
-      if (_echoMovingTowardPinOrClosing || _echoApproachingPin) return true;
+      if (_echoMovingTowardPinOrClosing) return true;
     }
 
     if (_rainViewerEchoBypassesPinAt(locNow)) return false;
 
-    if (_echoMovingTowardPinOrClosing || _echoApproachingPin) return true;
+    if (_echoMovingTowardPinOrClosing) return true;
 
     if (history.length >= 3) {
       final first = history.first;
@@ -2233,14 +2678,25 @@ class RadarNowcastContext {
   }
 
   int? _rainViewerNowcastArrivalMinutes(DateTime locNow) {
+    // Až 2 po sebe idúce mokré snímky — jedna fringe ≠ ETA.
+    if (!_rainViewerNowcastWetAheadAtPin(locNow)) return null;
     final nowSec = locNow.millisecondsSinceEpoch ~/ 1000;
+    var consecutive = 0;
     for (final f in nowcastHistory) {
-      if (f.unix <= nowSec || !_rainViewerFrameWetAtPin(f)) continue;
+      if (f.unix <= nowSec) continue;
+      if (!_rainViewerFrameWetAtPin(f)) {
+        consecutive = 0;
+        continue;
+      }
+      consecutive++;
+      if (consecutive < 2) continue;
       final frameLocal = DateTime.fromMillisecondsSinceEpoch(
         f.unix * 1000,
         isUtc: true,
       ).add(locNow.timeZoneOffset);
-      return math.max(5, frameLocal.difference(locNow).inMinutes);
+      // ETA = začiatok prvého z dvoch mokrých (predchádzajúci frame).
+      final startLocal = frameLocal.subtract(const Duration(minutes: 10));
+      return math.max(5, startLocal.difference(locNow).inMinutes);
     }
     return null;
   }
@@ -2255,38 +2711,30 @@ class RadarNowcastContext {
     return math.max(minutes, math.max(visual, gapFloor)).clamp(10, 150);
   }
 
-  /// Minúty do príchodu — trajektória z histórie má prioritu pred optimistickým nowcastom.
+  /// Minúty do príchodu — trajektória / spoľahlivý nowcast; nie šum v okolí.
   int _rainViewerIncomingArrivalMinutes(DateTime locNow) {
     if (precipNow) return 0;
-    if (_rainViewerEchoBypassesPinAt(locNow) ||
-        !_rainViewerTrajectoryHeadingToPinAt(locNow)) {
+    if (_rainViewerEchoBypassesPinAt(locNow)) return -1;
+
+    final nowcastMins = _rainViewerNowcastArrivalMinutes(locNow);
+    if (nowcastMins != null) {
+      return _rainViewerIncomingEtaFloor(nowcastMins);
+    }
+
+    if (!_rainViewerTrajectoryHeadingToPinAt(locNow)) {
       return -1;
     }
 
     final trajectoryMins = _rainViewerTrajectoryArrivalMinutesFromHistory();
-    final nowcastMins = _rainViewerNowcastArrivalMinutes(locNow);
     final separated = _rainViewerIncomingCellSeparatedFromPin();
 
-    if (trajectoryMins != null || nowcastMins != null) {
-      late final int mins;
-      if (trajectoryMins != null && nowcastMins != null) {
-        // Nowcast často skorší než skutočný pohyb bunky — pri oddelenej bunke ber neskorší odhad.
-        mins = separated
-            ? math.max(trajectoryMins, nowcastMins)
-            : math.max(trajectoryMins, (nowcastMins * 0.85).round());
-      } else {
-        mins = trajectoryMins ?? nowcastMins!;
-      }
-      return _rainViewerIncomingEtaFloor(mins);
+    if (trajectoryMins != null) {
+      return _rainViewerIncomingEtaFloor(trajectoryMins);
     }
 
-    if (_rainViewerNearbyPrecipField && !_rainViewerTrajectoryIncomingCore()) {
-      return _rainViewerIncomingEtaFloor(
-        _rainViewerNearbyArrivalMinutes(),
-      );
-    }
-
+    // Bez trajektórie / nowcastu NEVyMÝŠĽAŤ ETA zo „škvŕn v okolí“.
     if (!_rainViewerTrajectoryIncomingCore()) return -1;
+    if (separated && !_echoMovingTowardPinOrClosing) return -1;
 
     var raw = _incomingArrivalMinutesRaw();
     if (raw < 0) raw = _trackerVisualApproachMinutes();
@@ -2398,12 +2846,15 @@ class RadarNowcastContext {
   /// Surový stav pixelu — trend v histórii; UI používa [precipNow].
   bool get _rawPrecipAtPoint => latest?.precipAtPoint ?? false;
 
-  /// Prší pri pinom — len echo priamo nad bodkou (nie bunka v diaľke na mape).
+  /// Prší pri pinom — stred pinu alebo bunka, ktorá pin na mape prekrýva.
+  /// Stará snímka (> [kRadarLivePastFrameMaxAgeSec]) ≠ „práve prší“.
   bool get precipNow {
     final frame = latest;
     if (frame == null) return false;
+    if (!radarPastFrameFreshForLivePin(frame)) return false;
     if (fromRainViewer) {
-      return _rainViewerFrameRainAtPinCore(frame);
+      return _rainViewerFrameRainAtPinCore(frame) ||
+          _rainViewerCellEngulfsPin(frame);
     }
     // Helkor `precip` = nearbyEcho — pre „teraz“ berieme len stred pinu.
     return frame.precipAtPoint ||
@@ -2424,11 +2875,29 @@ class RadarNowcastContext {
   /// Verejný prístup pre UI — radar potvrdil zrážky pri pine.
   bool get rainAtPinNow => _rainAtPinCore;
 
+  /// Hero / pás / sledovač — prší nad lokalitou (vrátane bunky nad pinom).
+  bool get radarUiWetAtPin {
+    final frame = latest;
+    if (frame == null) return false;
+    if (!radarPastFrameFreshForLivePin(frame)) return false;
+    if (fromRainViewer) {
+      return precipNow ||
+          _rainAtPinCore ||
+          _rainViewerCellEngulfsPin(frame) ||
+          pinForecast.wetAtPinNow;
+    }
+    return precipNow || pinForecast.wetAtPinNow;
+  }
+
   /// Zrážky priamo nad pinom.
   bool get _rainAtPinCore {
     final frame = latest;
     if (frame == null) return false;
-    if (fromRainViewer) return _rainViewerFrameRainAtPinCore(frame);
+    if (!radarPastFrameFreshForLivePin(frame)) return false;
+    if (fromRainViewer) {
+      return _rainViewerFrameRainAtPinCore(frame) ||
+          _rainViewerCellEngulfsPin(frame);
+    }
     return frame.precipAtPoint ||
         (frame.dbz ?? 0) >= kRainViewerLegendMinDbz;
   }
@@ -2610,11 +3079,23 @@ class RadarNowcastContext {
   bool get _staticDistantCellNearMap {
     if (_skipCmaxNoiseFilters) return false;
     if (precipNow || _confirmedRainAtPinCore) return false;
+    if (fromRainViewer &&
+        (_rainViewerNearbyPrecipField ||
+            _rainViewerTrajectoryIncomingCore() ||
+            pinForecast.approaching)) {
+      return false;
+    }
     final frame = latest;
     if (frame == null) return false;
 
     final center = frame.dbz ?? 0;
     if (center >= 14) return false;
+    // Blízke silné jadro (červené na mape pri pine) ≠ „vzdialená bunka“.
+    final peak = frame.peakDbz ?? center;
+    final nearby = _maxNearbyDbz ?? 0;
+    if (math.max(peak, nearby) >= kRainViewerLegendLightRainDbz) {
+      return false;
+    }
 
     final strength = _frameEchoStrength(frame);
     if (strength < kRadarMinDbzSignificantEcho) return false;
@@ -2645,7 +3126,11 @@ class RadarNowcastContext {
   bool get _trackerMapEchoVisible {
     final frame = latest;
     if (frame != null && fromRainViewer) {
-      if (_rainViewerFrameWetAtPin(frame)) return true;
+      if (_rainViewerFrameWetAtPin(frame) ||
+          _rainViewerCellEngulfsPin(frame) ||
+          _rainViewerLocalEchoAtPin(frame)) {
+        return true;
+      }
     } else if (frame != null) {
       if (_skipCmaxNoiseFilters) {
         if (frame.precipAtPoint || frame.precip) return true;
@@ -2678,17 +3163,23 @@ class RadarNowcastContext {
       if (frame == null) return false;
       final center = frame.dbz ?? 0;
       if (center >= kRainViewerLegendMinDbz) return false;
+      if (_rainViewerEchoOffPathOrPassedRaw()) return false;
       if (_rainViewerNearbyFieldRecedingRaw()) return false;
       if (_echoClosingFromDirection ||
-          _echoMovingTowardPinOrClosing ||
-          _echoApproachingPin) {
+          _echoMovingTowardPinOrClosing) {
         return true;
       }
-      if (!_rainViewerNearbyPrecipField &&
-          !_rainViewerTrajectoryIncomingCore()) {
+      if (!_rainViewerNearbyPrecipFieldRaw()) {
         return false;
       }
-      return _rainViewerApproachDbz >= kRainViewerLegendMinDbz;
+      // Súvislá bunka + šanca / Z-S približovanie — rovnaká logika ako incoming.
+      if (pinForecast.approachChancePercent >= 40) return true;
+      final approachSide =
+          math.max(frame.westDbz ?? 0, frame.northDbz ?? 0) >= 18;
+      return approachSide &&
+          (pinForecast.towardPin ||
+              pinForecast.approaching ||
+              (pinForecast.motionSpeedKmH ?? 0) >= -2);
     }
     if (!_trackerIncomingConfirmed && !_realDirectionalFrontApproaching) {
       return false;
@@ -2845,10 +3336,15 @@ class RadarNowcastContext {
     return authorizesPrecipAtLocalHour(slotHour, locNow);
   }
 
-  /// Prší priamo nad pinom — striktne RainViewer stred pinu.
+  /// Prší priamo nad pinom — stred pinu alebo bunka, ktorá pin vizuálne prekrýva.
   bool get _trackerRainActiveAtPin {
     if (fromRainViewer) {
-      return precipNow || _rainAtPinCore;
+      final frame = latest;
+      if (frame == null) return false;
+      if (!radarPastFrameFreshForLivePin(frame)) return false;
+      return precipNow ||
+          _rainAtPinCore ||
+          _rainViewerCellEngulfsPin(frame);
     }
     final frame = latest;
     if (frame == null) return false;
@@ -2856,11 +3352,15 @@ class RadarNowcastContext {
     return precipNow || frame.precipAtPoint;
   }
 
-  /// Časová verzia — aktívny dážď len pri potvrdenom echo na pine (aktuálna snímka).
+  /// Časová verzia — aktívny dážď pri pine / bunka nad pinom (živá snímka).
   bool _trackerRainActiveAtPinAt(DateTime locNow) {
     if (!fromRainViewer) return _trackerRainActiveAtPin;
-    // Len živý pin — nie staré nowcast snímky (tie by držali falošné „prší“).
-    return precipNow || _rainAtPinCore;
+    final frame = latest;
+    if (frame == null) return false;
+    if (!radarPastFrameFreshForLivePin(frame, locNow)) return false;
+    return precipNow ||
+        _rainAtPinCore ||
+        _rainViewerCellEngulfsPin(frame);
   }
 
   /// „Blíži sa…“ — RainViewer nowcast pri pine alebo bunka smerujúca k pinu.
@@ -3483,15 +3983,7 @@ class RadarNowcastContext {
   /// Jediná brána pre „Blíži sa…“ v sledovači — nie izolovaný šum mapy.
   bool get _trackerIncomingConfirmed {
     if (fromRainViewer) {
-      final locNow = DateTime.now();
-      if (precipNow) return true;
-      if (_rainViewerEchoBypassesPinAt(locNow)) return false;
-      if (!_rainViewerTrajectoryHeadingToPinAt(locNow)) return false;
-      if (nowcastHistory.any((f) => _rainViewerFrameWetAtPin(f))) return true;
-      if (_rainViewerNearbyPrecipField && !_rainViewerNearbyFieldRecedingRaw()) {
-        return true;
-      }
-      return _rainViewerTrajectoryIncomingCore();
+      return _rainViewerIncomingLikelyAt(DateTime.now());
     }
     if (precipNow || _confirmedRainAtPinCore) return true;
     if (_staticDistantCellNearMap ||
@@ -3747,9 +4239,9 @@ class RadarNowcastContext {
     final frame = latest;
     if (frame == null) return false;
     if (fromRainViewer) {
+      // NIKDY netrajectoryIncomingCore tu — volá _echoApproachingPin → Stack Overflow.
       return _rainViewerFrameWetAtPin(frame) ||
-          _rainViewerTrajectoryIncomingCore() ||
-          _rainViewerNearbyPrecipField;
+          _rainViewerNearbyPrecipFieldRaw();
     }
     if (_skipCmaxNoiseFilters) {
       return frame.precipAtPoint || frame.precip;
@@ -3799,16 +4291,31 @@ class RadarNowcastContext {
     return _coherentEchoNearPinRaw();
   }
 
+  /// Silné echo v okolí pinu — len nearby field (bez incomingLikely → Stack Overflow).
+  bool get _trackerHasSignificantNearbyEcho {
+    final frame = latest;
+    if (frame == null) return false;
+    if (fromRainViewer) {
+      return _rainViewerNearbyPrecipFieldRaw();
+    }
+    final peak = frame.peakDbz ?? frame.innerPeakDbz ?? 0;
+    final nearby = _maxNearbyDbz ?? 0;
+    return math.max(peak, nearby) >= kRadarMinDbzSignificantEcho;
+  }
+
   /// Radarový šum — izolované bodky bez súdržnosti (Hlohovec / Košice).
   bool get _isRadarNoiseOnly {
     if (fromRainViewer) {
       if (_confirmedRainAtPinCore || precipNow) return false;
-      if (_rainViewerTrajectoryIncoming || _rainViewerNearbyPrecipField) {
-        return false;
-      }
+      // Bez trajectoryIncoming — ťahá approaching → coherent → SO.
+      if (_rainViewerNearbyPrecipFieldRaw()) return false;
       final frame = latest;
       if (frame == null) return true;
-      if (_rainViewerFrameWetAtPin(frame)) return false;
+      if (_rainViewerFrameWetAtPin(frame) ||
+          _rainViewerCellEngulfsPin(frame) ||
+          _rainViewerLocalEchoAtPin(frame)) {
+        return false;
+      }
       if (_trackerMapEchoVisible) return false;
       return true;
     }
@@ -4217,7 +4724,8 @@ class RadarNowcastContext {
     }
 
     if (approach == null || approach.dir == null || approach.dbz < 18) {
-      return _significantEchoNearPin;
+      // Nie _significantEchoNearPin — ťahá coherent → trajectory → approaching (SO).
+      return _trackerHasSignificantNearbyEcho;
     }
 
     final dirSlope = _directionalDbzSlopePerMin(approach.dir!);
@@ -5384,17 +5892,26 @@ class RadarNowcastContext {
     if (fromRainViewer) {
       if (slotHour == nowHour && precipNow) return true;
 
-      if (precipNow) {
-        final minuteEnd = _rainViewerStripRainMinuteEndAt(locNow);
-        if (minuteEnd != null &&
-            _hourlySlotOverlapsPrecipWindow(
-              slotHour,
-              nowHour,
-              _firstDryHourAfter(minuteEnd),
-            )) {
-          return true;
+      if (precipNow || rainAtPinNow || _trackerRainActiveAtPin) {
+        // Rovnaký koniec ako sledovač — hodina po 12:55 nesmie byť mokrá.
+        final ui = _trackerUiPrecipWindow(locNow);
+        if (ui != null) {
+          return _stripSlotOverlapsTrackerMinuteEnd(
+            slotHour,
+            ui.start,
+            ui.minuteEnd,
+          );
         }
-        return _rainViewerNowcastWetAtHour(slotHour, locNow);
+        final minuteEnd = _rainViewerStripRainMinuteEndAt(locNow) ??
+            _trackerStripEndAtPin(locNow);
+        if (minuteEnd != null) {
+          return _stripSlotOverlapsTrackerMinuteEnd(
+            slotHour,
+            nowHour,
+            minuteEnd,
+          );
+        }
+        return slotHour == nowHour;
       }
 
       final window = _rainViewerPrecipWindow(locNow);
@@ -5406,29 +5923,36 @@ class RadarNowcastContext {
         );
       }
 
+      // ETA sledovača — len pri potvrdenom príchode (nie pinForecast zo šumu).
+      final uiWindow = _trackerUiPrecipWindow(locNow);
+      if (uiWindow != null && _rainViewerIncomingLikelyAt(locNow)) {
+        return _stripSlotOverlapsTrackerMinuteEnd(
+          slotHour,
+          uiWindow.start,
+          uiWindow.minuteEnd,
+        );
+      }
+
       return false;
     }
 
     if (precipNow || _trackerPrecipAtPinForCard) {
       if (slotHour == nowHour) return true;
-      final endAt = _ongoingEndAt(locNow) ??
+      final endAt = _trackerStripEndAtPin(locNow) ??
+          _ongoingEndAt(locNow) ??
           _resolvedPrecipMinuteEnd(locNow);
       if (endAt == null) return false;
-      return _hourlySlotOverlapsPrecipWindow(
-        slotHour,
-        nowHour,
-        _firstDryHourAfter(endAt),
-      );
+      return _stripSlotOverlapsTrackerMinuteEnd(slotHour, nowHour, endAt);
     }
 
     final uiWindow = _trackerUiPrecipWindow(locNow);
     if (uiWindow != null &&
         _trackerIncomingConfirmed &&
         _trackerUiAuthorizesStripPrecip(locNow)) {
-      return _hourlySlotOverlapsPrecipWindow(
+      return _stripSlotOverlapsTrackerMinuteEnd(
         slotHour,
         uiWindow.start,
-        _firstDryHourAfter(uiWindow.minuteEnd),
+        uiWindow.minuteEnd,
       );
     }
 
@@ -5594,15 +6118,17 @@ class RadarNowcastContext {
         return null;
       }
       if (_trackerRainActiveAtPinAt(locNow)) {
-        final endAt = _roundLocalTimeToMinutes(
-          locNow.add(Duration(minutes: _trackerRemainingMinutesAtPin(locNow))),
-        );
+        final endAt = _trackerStripEndAtPin(locNow) ??
+            _roundLocalTimeToMinutes(
+              locNow.add(Duration(minutes: _trackerRemainingMinutesAtPin(locNow))),
+            );
+        if (_trackerClockPassed(endAt, locNow)) return null;
         return (
           start: _roundLocalTimeToMinutes(locNow),
           minuteEnd: endAt,
         );
       }
-      if (_rainViewerFutureWetAtPin(locNow) ||
+      if (_rainViewerNowcastWetAheadAtPin(locNow) ||
           _rainViewerIncomingLikelyAt(locNow)) {
         final arrivalMins = _rainViewerIncomingArrivalMinutes(locNow);
         if (arrivalMins >= 0) {
@@ -5616,18 +6142,7 @@ class RadarNowcastContext {
           }
         }
       }
-      if (_rainViewerNearbyPrecipField) {
-        final arrivalMins = _rainViewerIncomingArrivalMinutes(locNow);
-        if (arrivalMins >= 0 && arrivalMins <= 90) {
-          final startAt = _trackerIncomingStartAt(locNow, arrivalMins);
-          final endAt = _roundLocalTimeToMinutes(
-            startAt.add(const Duration(minutes: 45)),
-          );
-          if (endAt.isAfter(startAt)) {
-            return (start: startAt, minuteEnd: endAt);
-          }
-        }
-      }
+      // Žiadne vymýšľanie okna len z nearby škvŕn.
       return null;
     }
 
@@ -5638,9 +6153,11 @@ class RadarNowcastContext {
     }
 
     if (_trackerRainActiveAtPin) {
-      final endAt = _roundLocalTimeToMinutes(
-        locNow.add(Duration(minutes: _trackerRemainingMinutesAtPin(locNow))),
-      );
+      final endAt = _trackerStripEndAtPin(locNow) ??
+          _roundLocalTimeToMinutes(
+            locNow.add(Duration(minutes: _trackerRemainingMinutesAtPin(locNow))),
+          );
+      if (_trackerClockPassed(endAt, locNow)) return null;
       return (
         start: _roundLocalTimeToMinutes(locNow),
         minuteEnd: endAt,
@@ -5743,21 +6260,23 @@ class RadarNowcastContext {
     final minsToStart =
         startAt.difference(_roundLocalTimeToMinutes(locNow)).inMinutes;
 
-    final String detail;
+    final String timingDetail;
     if (atPinNow) {
       final remainingMin = endAt.difference(locNow).inMinutes.clamp(5, 180);
-      detail = _trackerLastsDetail(
+      timingDetail = _trackerLastsDetail(
         snow: snow,
         endLabel: endLabel,
         approxMinutes: remainingMin < 55 ? remainingMin : null,
       );
     } else {
-      detail = _trackerIncomingTimingDetail(
+      timingDetail = _trackerIncomingTimingDetail(
         snow: snow,
         startLabel: startLabel,
         endLabel: endLabel,
         minsToStart: minsToStart,
         durationMin: durationMin,
+        approachChancePercent: pinForecast.approachChancePercent,
+        intensityDbz: intensityDbz,
       );
     }
 
@@ -5769,11 +6288,17 @@ class RadarNowcastContext {
       snow: snow,
       intensityDbz: intensityDbz,
     );
+    // Formát ako RainViewer: jedna veta o začiatku + % (bez „Blížia sa zrážky.“).
+    final useChanceFormat = !atPinNow &&
+        pinForecast.approachChancePercent >= 40 &&
+        timingDetail.contains('pravdepodobnosťou');
 
     return RadarPrecipTrackerInfo(
       phase: phase,
       title: kRadarTrackerCardTitle,
-      detail: _radarTrackerCardDetail(headline, detail),
+      detail: useChanceFormat
+          ? timingDetail
+          : _radarTrackerCardDetail(headline, timingDetail),
       iconCode: iconCode,
       startLocal: startAt,
       endLocal: endAt,
@@ -5932,16 +6457,12 @@ class RadarNowcastContext {
       if (_helkorTrackerPrecipSignal) {
         dbz = math.max(dbz, _helkorIntensityDbz);
       }
-      final detail = _helkorTrackerPrecipSignal &&
-              !(fromRainViewer && _rainViewerTrackerPrecipSignalAt(locNow))
-          ? 'Meteo radar zachytáva zrážky v okolí — sledujem vývoj.'
-          : 'Radar zachytáva zrážky v okolí — sledujem vývoj.';
-      return RadarPrecipTrackerInfo(
-        phase: RadarPrecipTrackerPhase.watching,
-        title: kRadarTrackerCardTitle,
-        detail: detail,
-        iconCode: _wmoFromRadarIntensity(dbz, snow: snow),
+      final incoming = _incomingFromNearbyEcho(
+        locNow,
+        intensityDbz: dbz,
+        snow: snow,
       );
+      if (incoming != null) return incoming;
     }
 
     return RadarPrecipTrackerInfo(
@@ -5949,6 +6470,36 @@ class RadarNowcastContext {
       title: kRadarTrackerCardTitle,
       detail: kRadarTrackerDryHorizonDetail,
       iconCode: skyWmoFromCloudCover(cloudCoverPercent),
+    );
+  }
+
+  /// Blízka bunka → ETA len pri potvrdenom príchode (žiadne falošné „prší“).
+  RadarPrecipTrackerInfo? _incomingFromNearbyEcho(
+    DateTime locNow, {
+    required double intensityDbz,
+    required bool snow,
+  }) {
+    if (precipNow || rainAtPinNow || pinForecast.wetAtPinNow) return null;
+    if (fromRainViewer && _rainViewerEchoOffPathOrPassedAt(locNow)) {
+      return null;
+    }
+    if (fromRainViewer) {
+      if (!_rainViewerIncomingLikelyAt(locNow)) return null;
+    } else if (!_trackerIncomingConfirmed && !pinForecast.approaching) {
+      return null;
+    }
+    final window = _stripAlignedTrackerPrecipWindow(locNow);
+    if (window == null) return null;
+    final dbz = math.max(
+      intensityDbz,
+      fromRainViewer ? kRainViewerLegendMinDbz : kRadarMinDbzForUi,
+    );
+    return _buildIncomingTrackerInfo(
+      locNow,
+      window: window,
+      intensityDbz: dbz,
+      snow: snow,
+      forceIncomingPhase: true,
     );
   }
 
@@ -5975,8 +6526,9 @@ class RadarNowcastContext {
             _staticDistantCellNearMap ||
             _isDisorganizedMapNoise) &&
         !_trackerMapEchoVisible &&
-        !_trackerRainActiveAtPin) {
-      resetRadarTrackerStabilizer(clearHardEndLock: false);
+        !_trackerRainActiveAtPin &&
+        !_trackerHasSignificantNearbyEcho) {
+      // Neresetuj stabilizátor — inak „Blížia sa zrážky“ zmizne pri jednom šumovom snímku.
       if (_wetExpectedInTrackerHorizon(
         locNow,
         ecmwfHourly: ecmwfHourly,
@@ -6002,21 +6554,8 @@ class RadarNowcastContext {
     final snow = _radarSnowLikely(tempC: tempC);
     final intensityDbz = _trackerIntensityDbz;
 
-    // Mrholenie / dážď pri pine — pred obchvatom, aby sa nezobrazilo sucho.
-    if (_trackerRainActiveAtPinAt(locNow) ||
-        (fromRainViewer &&
-            latest != null &&
-            _rainViewerLocalEchoAtPin(latest!))) {
-      return _buildActiveTrackerInfo(
-        locNow,
-        intensityDbz: intensityDbz,
-        snow: snow,
-      );
-    }
-
-    if (fromRainViewer &&
-        _rainViewerEchoBypassesPinAt(locNow) &&
-        !_helkorTrackerPrecipSignal) {
+    // Echo východne / už prešlo — karta preč (mapa bez zrážok na lokalitu).
+    if (fromRainViewer && _rainViewerEchoOffPathOrPassedAt(locNow)) {
       return RadarPrecipTrackerInfo(
         phase: RadarPrecipTrackerPhase.idle,
         title: kRadarTrackerCardTitle,
@@ -6025,7 +6564,36 @@ class RadarNowcastContext {
       );
     }
 
-    if (_precipBandPassedPin) {
+    // Mrholenie / dážď pri pine — len skutočný mokrý pixel (nie vzdialený peak).
+    if (_trackerRainActiveAtPinAt(locNow) ||
+        (fromRainViewer &&
+            latest != null &&
+            _rainViewerFrameWetAtPin(latest!) &&
+            radarPastFrameFreshForLivePin(latest!, locNow))) {
+      return _buildActiveTrackerInfo(
+        locNow,
+        intensityDbz: intensityDbz,
+        snow: snow,
+      );
+    }
+
+    // Obchvat — len keď bunka naozaj nejde k pinu (inak RainViewer hlási príchod a my mlčíme).
+    if (fromRainViewer &&
+        _rainViewerEchoBypassesPinAt(locNow) &&
+        !_helkorTrackerPrecipSignal &&
+        !_trackerNearbyApproachLikely &&
+        !_echoMovingTowardPinOrClosing &&
+        !_echoApproachingPin &&
+        !_trackerHasSignificantNearbyEcho) {
+      return RadarPrecipTrackerInfo(
+        phase: RadarPrecipTrackerPhase.idle,
+        title: kRadarTrackerCardTitle,
+        detail: kRadarTrackerDryHorizonDetail,
+        iconCode: skyWmoFromCloudCover(cloudCoverPercent),
+      );
+    }
+
+    if (_precipBandPassedPin && !_trackerHasSignificantNearbyEcho) {
       return _monitoringTrackerInfo(
         locNow,
         cloudCoverPercent: cloudCoverPercent,
@@ -6073,6 +6641,17 @@ class RadarNowcastContext {
       );
     }
 
+    // Potvrdený príchod (nie len peak / mäkký pinForecast).
+    if (!_trackerRainActiveAtPinAt(locNow) &&
+        _trackerIncomingConfirmedAt(locNow)) {
+      final incoming = _incomingFromNearbyEcho(
+        locNow,
+        intensityDbz: effectiveDbz,
+        snow: snow,
+      );
+      if (incoming != null) return incoming;
+    }
+
     return _monitoringTrackerInfo(
       locNow,
       cloudCoverPercent: cloudCoverPercent,
@@ -6110,7 +6689,7 @@ class RadarNowcastContext {
         );
       }
       return RadarPrecipTrackerInfo(
-        phase: RadarPrecipTrackerPhase.watching,
+        phase: RadarPrecipTrackerPhase.idle,
         title: kRadarTrackerCardTitle,
         detail: kRadarTrackerDryHorizonDetail,
         iconCode: icon,
@@ -6120,7 +6699,11 @@ class RadarNowcastContext {
     if (_echoClearlyOffPath ||
         (fromRainViewer &&
             _rainViewerEchoBypassesPinAt(locNow) &&
-            !_helkorTrackerPrecipSignal)) {
+            !_helkorTrackerPrecipSignal &&
+            !_trackerNearbyApproachLikely &&
+            !_echoMovingTowardPinOrClosing &&
+            !_echoApproachingPin &&
+            !_trackerHasSignificantNearbyEcho)) {
       return RadarPrecipTrackerInfo(
         phase: RadarPrecipTrackerPhase.idle,
         title: kRadarTrackerCardTitle,
@@ -6132,7 +6715,9 @@ class RadarNowcastContext {
     if (_hasActiveNearbyEcho && !_significantEchoNearPin && !_rainAtPinCore) {
       if (fromRainViewer &&
           _rainViewerEchoBypassesPinAt(locNow) &&
-          !_helkorTrackerPrecipSignal) {
+          !_helkorTrackerPrecipSignal &&
+          !_trackerNearbyApproachLikely &&
+          !_echoMovingTowardPinOrClosing) {
         return RadarPrecipTrackerInfo(
           phase: RadarPrecipTrackerPhase.idle,
           title: kRadarTrackerCardTitle,
@@ -6140,10 +6725,11 @@ class RadarNowcastContext {
           iconCode: icon,
         );
       }
+      // Slabé / neisté echo — radšej skryť kartu než „sledujem vývoj“.
       return RadarPrecipTrackerInfo(
-        phase: RadarPrecipTrackerPhase.watching,
+        phase: RadarPrecipTrackerPhase.idle,
         title: kRadarTrackerCardTitle,
-        detail: 'Slabé echo v okolí — zatiaľ bez dážďa pri lokalite.',
+        detail: kRadarTrackerDryHorizonDetail,
         iconCode: icon,
       );
     }
@@ -6172,46 +6758,12 @@ class RadarNowcastContext {
           );
         }
       }
-      var arrivalMins = fromRainViewer
-          ? _rainViewerIncomingArrivalMinutes(locNow)
-          : _trackerSoftArrivalMinutes(locNow);
-      if (fromRainViewer &&
-          arrivalMins < 0 &&
-          _rainViewerNearbyPrecipField) {
-        arrivalMins = _rainViewerNearbyArrivalMinutes();
-      }
-      if (arrivalMins >= 0) {
-        final startAt = _trackerIncomingStartAt(locNow, arrivalMins);
-        final endAt = _roundLocalTimeToMinutes(
-          startAt.add(Duration(
-            minutes: math.max(45, _incomingPassageMinutes()),
-          )),
-        );
-        final detail = arrivalMins > 60
-            ? 'Radar zachytáva zrážky v okolí — možný príchod okolo ${_trackerClockLabel(startAt)}.'
-            : 'Radar zachytáva zrážky v okolí — sledujem vývoj.';
-        if (arrivalMins <= 90 && _trackerIncomingConfirmed) {
-          return _buildIncomingTrackerInfo(
-            locNow,
-            window: (start: startAt, minuteEnd: endAt),
-            intensityDbz: math.max(dbz, kRainViewerLegendMinDbz),
-            snow: snow,
-            forceIncomingPhase: arrivalMins <= 75,
-          );
-        }
-        return RadarPrecipTrackerInfo(
-          phase: RadarPrecipTrackerPhase.watching,
-          title: kRadarTrackerCardTitle,
-          detail: detail,
-          iconCode: _wmoFromRadarIntensity(dbz, snow: snow),
-        );
-      }
-      return RadarPrecipTrackerInfo(
-        phase: RadarPrecipTrackerPhase.watching,
-        title: kRadarTrackerCardTitle,
-        detail: 'Radar zachytáva zrážky v okolí — sledujem vývoj.',
-        iconCode: _wmoFromRadarIntensity(dbz, snow: snow),
+      final incoming = _incomingFromNearbyEcho(
+        locNow,
+        intensityDbz: dbz,
+        snow: snow,
       );
+      if (incoming != null) return incoming;
     }
 
     if (_wetExpectedInTrackerHorizon(
@@ -6263,7 +6815,18 @@ Future<RadarNowcastContext> fetchRadarNowcastContextForCity(GeoCity city) async 
       DateTime.now().difference(cachedAt) < _kRadarNowcastCacheTtl;
   if (cacheFresh) {
     // Krátky TTL pre všetky stavy — pri daždi aj príchode musíme ťahať nové snímky.
-    return _radarNowcastCache!;
+    final cached = _radarNowcastCache!;
+    if (cached.cityLat != null && cached.cityLon != null) return cached;
+    return RadarNowcastContext(
+      eligible: cached.eligible,
+      history: cached.history,
+      fromRainViewer: cached.fromRainViewer,
+      nowcastHistory: cached.nowcastHistory,
+      helkorHistory: cached.helkorHistory,
+      pinForecast: cached.pinForecast,
+      cityLat: city.lat,
+      cityLon: city.lon,
+    );
   }
 
   try {
@@ -6411,6 +6974,8 @@ RadarNowcastContext _contextFromHistory(
     nowcastHistory: nowcastHistory,
     helkorHistory: helkorHistory,
     pinForecast: pinForecast,
+    cityLat: cityLat,
+    cityLon: cityLon,
   );
 }
 

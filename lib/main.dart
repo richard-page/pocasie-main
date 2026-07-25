@@ -13,6 +13,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:onesignal_flutter/onesignal_flutter.dart';
@@ -748,20 +749,27 @@ bool isDaytimeForHour(String hourTimeUTC, DailyForecast? daily) {
   }
 }
 
-String _formatPrecipitation(double amount, {int? weatherCode}) {
+/// Rozmedzie úhrnu v UI — krátke stupne (`0-1`, `1-2`, …).
+String _precipitationAmountRange(double amount) => precipAmountRangeLabel(amount);
+
+String _formatPrecipitation(
+  double amount, {
+  int? weatherCode,
+  bool daily = false,
+}) {
   bool isSnow = false;
   if (weatherCode != null) {
     final Set<int> snowCodes = {71, 73, 75, 77, 85, 86, 56, 57, 66, 67};
     isSnow = snowCodes.contains(weatherCode);
   }
 
-  String unit = isSnow ? 'cm' : 'mm';
-
-  if (amount <= 0.0) return '0 $unit';
-  if (amount == amount.toInt().toDouble()) {
-    return '${amount.toInt()} $unit';
-  }
-  return '${amount.toStringAsFixed(1)} $unit';
+  final aligned = alignPrecipMmForDisplay(
+    amount,
+    weatherCode: weatherCode,
+    dailyContext: daily,
+  );
+  final unit = isSnow ? 'cm' : 'mm';
+  return '${_precipitationAmountRange(aligned)} $unit';
 }
 
 
@@ -820,14 +828,14 @@ int _drySkyIconTierFromModel({
   return 1;
 }
 
-/// Búrkovú ikonu pri WMO 95/96/99 — šanca ≥ 50 % a merateľné mm (Best Match ju rozhodol).
+/// Búrkovú ikonu — najprv sila z mm (≥ mierny), potom šanca.
 bool _thunderIconWarranted(
   int precipProbabilityPercent,
   double hourlyPrecipitationMm, {
   double snowfallCm = 0.0,
 }) =>
     precipProbabilityPercent >= kMinPrecipProbPercent &&
-    hourlyPrecipitationMm >= kThunderMinMmPerHour &&
+    precipIntensityAllowsThunder(hourlyPrecipitationMm) &&
     snowfallCm < _kIconMeaningfulSnowCm;
 
 
@@ -2413,6 +2421,7 @@ Future<String?> _getTimezoneForCoordinates(double lat, double lon) async {
   // Maďarsko
   if (lat >= 45.5 && lat <= 49.0 && lon >= 16.0 && lon <= 23.0) {
     return 'Europe/Budapest';
+
   }
   // Rakúsko
   if (lat >= 46.0 && lat <= 50.0 && lon >= 9.0 && lon <= 18.0) {

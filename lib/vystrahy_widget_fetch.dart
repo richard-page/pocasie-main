@@ -113,6 +113,9 @@ String? matchVystrahyOkresName({
   for (final raw in candidates) {
     final cleaned = raw
         .replaceFirst(RegExp(r'^Okres\s+', caseSensitive: false), '')
+        .replaceFirst(RegExp(r'^District\s+of\s+', caseSensitive: false), '')
+        .replaceFirst(RegExp(r'\s+District$', caseSensitive: false), '')
+        .replaceFirst(RegExp(r'\s+Region$', caseSensitive: false), '')
         .trim();
     if (cleaned.isEmpty) continue;
     final lower = cleaned.toLowerCase();
@@ -294,17 +297,28 @@ class VystrahyWidgetSnapshot {
   }
 }
 
-Future<Map<String, dynamic>?> fetchVystrahyDbaseMap() async {
+Future<Map<String, dynamic>?> _fetchVystrahyDbaseFromJson() async {
   try {
     final res = await http
-        .get(Uri.parse(kVystrahyJsonUrl))
+        .get(
+          Uri.parse(
+            '$kVystrahyJsonUrl?_cb=${DateTime.now().millisecondsSinceEpoch}',
+          ),
+          headers: const {
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+          },
+        )
         .timeout(const Duration(seconds: 12));
     if (res.statusCode >= 200 && res.statusCode < 300) {
       final decoded = json.decode(utf8.decode(res.bodyBytes));
       if (decoded is Map) return Map<String, dynamic>.from(decoded);
     }
   } catch (_) {}
+  return null;
+}
 
+Future<Map<String, dynamic>?> _fetchVystrahyDbaseFromPhp() async {
   try {
     final res = await http
         .get(
@@ -320,10 +334,23 @@ Future<Map<String, dynamic>?> fetchVystrahyDbaseMap() async {
     if (res.statusCode < 200 || res.statusCode >= 300) return null;
     final literal = _extractDbaseLiteral(res.body);
     if (literal == null) return null;
-    final decoded = json.decode(literal);
+    final decoded = json.decode(literal == '[]' ? '{}' : literal);
     if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    if (decoded is List) return <String, dynamic>{};
   } catch (_) {}
   return null;
+}
+
+/// [preferPhp] — domovský banner / pull: vždy čerstvé PHP (JSON býva cache/oneskorený).
+Future<Map<String, dynamic>?> fetchVystrahyDbaseMap({
+  bool preferPhp = false,
+}) async {
+  if (preferPhp) {
+    return await _fetchVystrahyDbaseFromPhp() ??
+        await _fetchVystrahyDbaseFromJson();
+  }
+  return await _fetchVystrahyDbaseFromJson() ??
+      await _fetchVystrahyDbaseFromPhp();
 }
 
 String? _extractDbaseLiteral(String html) {
@@ -331,7 +358,10 @@ String? _extractDbaseLiteral(String html) {
   final m = marker.firstMatch(html);
   if (m == null) return null;
   var i = m.end;
-  if (i >= html.length || html[i] != '{') return null;
+  if (i >= html.length) return null;
+  final open = html[i];
+  if (open != '{' && open != '[') return null;
+  final close = open == '{' ? '}' : ']';
   var depth = 0;
   final start = i;
   for (; i < html.length; i++) {
@@ -349,9 +379,9 @@ String? _extractDbaseLiteral(String html) {
       }
       continue;
     }
-    if (ch == '{') {
+    if (ch == open) {
       depth++;
-    } else if (ch == '}') {
+    } else if (ch == close) {
       depth--;
       if (depth == 0) return html.substring(start, i + 1);
     }
@@ -417,6 +447,7 @@ Future<VystrahyWidgetSnapshot?> fetchVystrahySnapshotForCity({
   required String cityName,
   String? admin1,
   String? admin2,
+  bool preferPhp = false,
 }) async {
   final okres = matchVystrahyOkresName(
     cityName: cityName,
@@ -424,7 +455,7 @@ Future<VystrahyWidgetSnapshot?> fetchVystrahySnapshotForCity({
     admin2: admin2,
   );
   if (okres == null) return null;
-  final dbase = await fetchVystrahyDbaseMap();
+  final dbase = await fetchVystrahyDbaseMap(preferPhp: preferPhp);
   if (dbase == null) return null;
   return buildVystrahySnapshotForOkres(dbase, okres);
 }

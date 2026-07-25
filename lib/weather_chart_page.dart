@@ -552,7 +552,7 @@ class ForecastSubpageScaffold extends StatelessWidget {
 }
 
 
-class WeatherChartPage extends StatelessWidget {
+class WeatherChartPage extends StatefulWidget {
   final GeoCity city;
   final WeatherData data;
   final RadarNowcastContext radarCtx;
@@ -564,13 +564,58 @@ class WeatherChartPage extends StatelessWidget {
     this.radarCtx = RadarNowcastContext.inactive,
   });
 
+  @override
+  State<WeatherChartPage> createState() => _WeatherChartPageState();
+}
+
+class _WeatherChartPageState extends State<WeatherChartPage> {
+  late WeatherData _data;
+  bool _extendingHorizon = false;
+
+  GeoCity get city => widget.city;
+  RadarNowcastContext get radarCtx => widget.radarCtx;
+
   String get _modelLabel => 'ECMWF IFS';
   bool get _radarAugmentsChart =>
       radarCtx.eligible && radarNowcastActiveForCity(city);
 
   @override
+  void initState() {
+    super.initState();
+    _data = widget.data;
+    if (!forecastDailyHorizonComplete(_data)) {
+      unawaited(_extendHorizonInBackground());
+    }
+  }
+
+  Future<void> _extendHorizonInBackground() async {
+    if (!mounted) return;
+    setState(() => _extendingHorizon = true);
+    try {
+      final map = await _downloadOpenMeteoForecast(
+        city.lat,
+        city.lon,
+        'auto',
+        model: forecastModelForCity(city, WeatherForecastModel.bestMatch),
+        forceRefresh: false,
+      );
+      if (!mounted || map == null) return;
+      final parsed = WeatherData.fromJson(map);
+      final nextLen = parsed.daily?.time.length ?? 0;
+      final curLen = _data.daily?.time.length ?? 0;
+      if (nextLen > curLen) {
+        setState(() => _data = parsed);
+      }
+    } catch (e) {
+      debugPrint('WeatherChartPage extend horizon: $e');
+    } finally {
+      if (mounted) setState(() => _extendingHorizon = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final daily = data.daily;
+    final daily = _data.daily;
     final dayCount = math.min(daily?.time.length ?? 0, kChartForecastDays);
 
     return Scaffold(
@@ -601,7 +646,9 @@ class WeatherChartPage extends StatelessWidget {
                   ),
                   Expanded(
                     child: Text(
-                      dayCount > 0 ? 'Graf na $kChartForecastDays dní' : 'Graf predpovede',
+                      dayCount > 0
+                          ? 'Graf na $kChartForecastDays dní'
+                          : 'Graf predpovede',
                       textAlign: TextAlign.center,
                       style: const TextStyle(
                         color: Colors.white,
@@ -614,6 +661,15 @@ class WeatherChartPage extends StatelessWidget {
                 ],
               ),
             ),
+            if (_extendingHorizon)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 4),
+                child: LinearProgressIndicator(
+                  minHeight: 2,
+                  backgroundColor: Colors.transparent,
+                  color: kAppAccentBlue,
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
               child: Text(
@@ -682,9 +738,9 @@ class WeatherChartPage extends StatelessWidget {
                           mainAxisSize: MainAxisSize.min,
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            _ChartSummaryStrip(data: data, radarCtx: radarCtx),
+                            _ChartSummaryStrip(data: _data, radarCtx: radarCtx),
                             _ChartDaysScroller(
-                              data: data,
+                              data: _data,
                               dayCount: dayCount,
                               radarCtx: radarCtx,
                             ),

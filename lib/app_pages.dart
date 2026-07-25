@@ -236,13 +236,16 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
             shrinkWrap: true,
             children: options.map((t) {
               final selected = t.hour == current.hour && t.minute == current.minute;
-              return ListTile(
-                title: Text(
-                  _fmtTime(t),
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+              return Material(
+                color: Colors.transparent,
+                child: ListTile(
+                  title: Text(
+                    _fmtTime(t),
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                  ),
+                  trailing: selected ? const Icon(Icons.check, color: _kChartLineBlue) : null,
+                  onTap: () => Navigator.of(context).pop(t),
                 ),
-                trailing: selected ? const Icon(Icons.check, color: _kChartLineBlue) : null,
-                onTap: () => Navigator.of(context).pop(t),
               );
             }).toList(),
           ),
@@ -609,7 +612,9 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                       final unit = e.value;
                       final isFirst = e.key == 0;
                       final isSelected = _selectedWindUnit == unit;
-                      return ListTile(
+                      return Material(
+                        color: Colors.transparent,
+                        child: ListTile(
                         visualDensity: VisualDensity.compact,
                         contentPadding: EdgeInsets.fromLTRB(12, isFirst ? 0 : 2, 12, 2),
                         horizontalTitleGap: 8,
@@ -643,6 +648,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                         onTap: () async {
                           await _saveWindUnit(unit);
                         },
+                      ),
                       );
                     }),
                   ],
@@ -2514,6 +2520,8 @@ class _CitySearchPageState extends State<CitySearchPage> {
   bool _loading = false;
   bool _editMode = false;
   Timer? _debounce;
+  /// Zruší oneskorené odpovede API po pop / novej query.
+  int _searchSerial = 0;
 
   /// Middle dot — v zdroji bývalo pokazené UTF-8 (zobrazilo sa ako „â€““).
   static const String _citySubtitleSep = ' \u00B7 ';
@@ -2545,6 +2553,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
   @override
   void dispose() {
     _debounce?.cancel();
+    _searchSerial++;
     _c.removeListener(_onChanged);
     _c.dispose();
     _focus.dispose();
@@ -2553,6 +2562,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
 
   Future<void> _loadSearchHistory() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     final List<String>? historyJson = prefs.getStringList(kSearchHistoryKey);
     if (historyJson != null) {
       setState(() {
@@ -2576,30 +2586,17 @@ class _CitySearchPageState extends State<CitySearchPage> {
     await prefs.setStringList(kSearchHistoryKey, historyJson);
   }
 
-  void _addToSearchHistory(GeoCity city) {
-    _searchHistory.removeWhere((existingCity) =>
-        existingCity.name == city.name &&
-        existingCity.countryCode == city.countryCode &&
-        (existingCity.lat - city.lat).abs() < 0.001 &&
-        (existingCity.lon - city.lon).abs() < 0.001);
-
-    setState(() {
-      _searchHistory.insert(0, city);
-      if (_searchHistory.length > 20) {
-        _searchHistory.removeLast();
-      }
-    });
-    _saveSearchHistory();
-  }
 
   void _removeFromHistory(GeoCity city) {
+    if (!mounted) return;
     setState(() {
       _searchHistory.remove(city);
     });
-    _saveSearchHistory();
+    unawaited(_saveSearchHistory());
   }
 
   void _toggleEditMode() {
+    if (!mounted) return;
     setState(() {
       _editMode = !_editMode;
     });
@@ -2725,15 +2722,17 @@ class _CitySearchPageState extends State<CitySearchPage> {
     required List<GeoCity> cities,
     required bool history,
   }) {
-    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+    // Klávesnica nemení veľkosť panela — len dolný padding ListView, aby šlo
+    // doscrollovať posledné mestá nad klávesnicu.
+    final keyboardBottom = MediaQuery.viewInsetsOf(context).bottom;
     return Padding(
-      padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + bottomInset),
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       child: DecoratedBox(
         decoration: appSurfaceDecoration(radius: 22, withShadow: false),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(22),
           child: ListView.separated(
-            padding: EdgeInsets.zero,
+            padding: EdgeInsets.only(bottom: 8 + keyboardBottom),
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
             itemCount: cities.length,
             separatorBuilder: (_, __) => Divider(
@@ -2852,6 +2851,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
       child: ForecastSubpageScaffold(
       title: 'Vyhľadávanie miest',
       wrapBodyInGlass: false,
+      // Panel sa neskracuje / „nezroluje“ — klávesnica prekryje spodok.
       resizeToAvoidBottomInset: false,
       leading: _citySearchChromeButton(
         icon: _editMode ? Icons.close : Icons.arrow_back,
@@ -2859,6 +2859,11 @@ class _CitySearchPageState extends State<CitySearchPage> {
           if (_editMode) {
             _toggleEditMode();
           } else {
+            _focus.unfocus();
+            FocusManager.instance.primaryFocus?.unfocus();
+            try {
+              SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+            } catch (_) {}
             Navigator.of(context).maybePop();
           }
         },
@@ -3027,29 +3032,68 @@ class _CitySearchPageState extends State<CitySearchPage> {
     );
   }
 
-  void _choose(GeoCity c) {
-    _addToSearchHistory(c);
+  void _persistHistorySilently(GeoCity city) {
+    _searchHistory.removeWhere((existingCity) =>
+        existingCity.name == city.name &&
+        existingCity.countryCode == city.countryCode &&
+        (existingCity.lat - city.lat).abs() < 0.001 &&
+        (existingCity.lon - city.lon).abs() < 0.001);
+    _searchHistory.insert(0, city);
+    if (_searchHistory.length > 20) {
+      _searchHistory.removeLast();
+    }
+    unawaited(_saveSearchHistory());
+  }
+
+  Future<void> _choose(GeoCity c) async {
+    _debounce?.cancel();
+    _searchSerial++;
+    // Zastav ďalšie query počas hide IME + pop.
+    _c.removeListener(_onChanged);
+    // Bez setState — inak list + klávesnica sekajú pri pop.
+    _persistHistorySilently(c);
+
+    // Najprv schovať IME, až potom pop — inak klávesnica mizne sekavo cez rebuild domova.
+    if (_focus.hasFocus) {
+      _focus.unfocus();
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    try {
+      await SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    } catch (_) {}
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    if (!mounted) return;
     Navigator.of(context).pop<GeoCity>(c);
   }
 
   Future<void> _search(String q) async {
+    final serial = ++_searchSerial;
+    if (!mounted) return;
+    setState(() => _loading = true);
     try {
-      setState(() => _loading = true);
       var cities = await _searchOpenMeteo(q);
+      if (!mounted || serial != _searchSerial) return;
       if (cities.length < 8) {
         final nominatim = await _searchNominatim(q);
+        if (!mounted || serial != _searchSerial) return;
         cities = [...cities, ...nominatim];
       }
+      if (!mounted || serial != _searchSerial) return;
       setState(() => _results = _finalizeSearchResults(cities, q));
     } catch (_) {
+      if (!mounted || serial != _searchSerial) return;
       try {
         final nominatim = await _searchNominatim(q);
+        if (!mounted || serial != _searchSerial) return;
         setState(() => _results = _finalizeSearchResults(nominatim, q));
       } catch (_) {
+        if (!mounted || serial != _searchSerial) return;
         setState(() => _results = <GeoCity>[]);
       }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && serial == _searchSerial) {
+        setState(() => _loading = false);
+      }
     }
   }
 
@@ -3219,6 +3263,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
   void _onChanged() {
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 500), () async {
+      if (!mounted) return;
       final q = _c.text.trim();
       if (q.isEmpty) {
         setState(() => _results = <GeoCity>[]);
@@ -3236,23 +3281,50 @@ class _CitySearchPageState extends State<CitySearchPage> {
       : '';
 
   /// Kľúč deduplikácie — rovnaké mesto z viacerých API (Košický vs Košický kraj).
+  /// Bez lat/lon: Open-Meteo a Nominatim majú iný stred sídla (inak 2 rovnaké riadky).
   String _cityDedupKey(GeoCity c) {
     return [
       _normalizeSearchPart(c.name),
+      _normalizeSearchPart(c.countryCode),
       _normalizeAdminRegion(c.admin1),
       _normalizeAdminRegion(c.admin2),
-      _normalizeSearchPart(c.countryCode),
-      (c.lat * 1e2).round(),
-      (c.lon * 1e2).round(),
     ].join('|');
   }
 
-  /// Druhý stupeň: rovnaký názov + krajina v blízkosti (~15 km) → jedna položka
-  /// (Open-Meteo + Nominatim, alebo mesto vs. „duch“ so slabšími dátami).
-  List<GeoCity> _mergeNearDuplicateCities(List<GeoCity> input) {
-    const double maxLatDiff = 0.14; // ~15 km
-    const double maxLonDiff = 0.14;
+  /// Približná vzdialenosť (km) — lon ° nie je rovnaká dĺžka ako lat °.
+  double _approxDistanceKm(
+    double lat1,
+    double lon1,
+    double lat2,
+    double lon2,
+  ) {
+    final dLat = (lat1 - lat2) * 111.0;
+    final midLatRad = ((lat1 + lat2) * 0.5) * math.pi / 180.0;
+    final dLon = (lon1 - lon2) * 111.0 * math.cos(midLatRad);
+    return math.sqrt(dLat * dLat + dLon * dLon);
+  }
 
+  bool _citiesAreNearDuplicates(GeoCity a, GeoCity b) {
+    final regionA = _normalizeAdminRegion(
+      a.admin1.trim().isNotEmpty ? a.admin1 : a.admin2,
+    );
+    final regionB = _normalizeAdminRegion(
+      b.admin1.trim().isNotEmpty ? b.admin1 : b.admin2,
+    );
+    final sameRegion = regionA.isNotEmpty && regionA == regionB;
+    final distKm = _approxDistanceKm(a.lat, a.lon, b.lat, b.lon);
+    // ~25 km: mesto vs. obec / iný centroid API (Limoges city vs municipality).
+    if (distKm <= 25) return true;
+    // Rovnaký kraj/región — širší rádius (admin hranice).
+    if (sameRegion && distKm <= 55) return true;
+    // Rovnaký text pod názvom v zozname → jedna položka.
+    if (_citySubtitle(a) == _citySubtitle(b) && distKm <= 80) return true;
+    return false;
+  }
+
+  /// Druhý stupeň: rovnaký názov + krajina v blízkosti → jedna položka
+  /// (Open-Meteo + Nominatim, alebo mesto vs. obec so slabšími dátami).
+  List<GeoCity> _mergeNearDuplicateCities(List<GeoCity> input) {
     // Zoskup podľa názvu + štátu (admin1 môže líšiť: okres vs kraj, voj. obvod…).
     final Map<String, List<GeoCity>> groups = <String, List<GeoCity>>{};
     for (final c in input) {
@@ -3270,9 +3342,7 @@ class _CitySearchPageState extends State<CitySearchPage> {
         var mergedIntoCluster = false;
         for (var i = 0; i < clusters.length; i++) {
           final selected = clusters[i];
-          final isNear = (selected.lat - c.lat).abs() <= maxLatDiff &&
-              (selected.lon - c.lon).abs() <= maxLonDiff;
-          if (!isNear) continue;
+          if (!_citiesAreNearDuplicates(selected, c)) continue;
           if (_preferSearchCity(c, selected)) {
             clusters[i] = _enrichCityRegion(c, selected);
           } else {
@@ -4022,6 +4092,13 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   Timer? _scheduledWarmupTimer;
   Timer? _okresyReadyPoll;
   Timer? _warningRankRecheckTimer;
+  Timer? _warningExpiryTimer;
+  int _homeBannerFetchSerial = 0;
+  String? _homeBannerCityKey;
+  /// Domovský banner riadi HTTP; JS sync len pri mape / explicitnom pulli.
+  bool _jsMayUpdateHomeBanner = false;
+  /// Prednačítané okresy-hq.json (~1 MB) — WebView fetch často timeoutne.
+  String? _cachedOkresyGeoJson;
   final List<Timer> _mapResizeInjectTimers = [];
   double? _userLat;
   double? _userLon;
@@ -4061,6 +4138,8 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
         } catch (_) {}
       }),
     );
+    // Okresy sú veľké — dlhší timeout, cache pre WebView fallback.
+    unawaited(_prefetchOkresyGeoForWebView());
   }
 
   /// WebView warmup — HTTP prefetch hneď; WebView čo najskôr (okresy async po HTML).
@@ -4092,6 +4171,8 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   void clearActiveWarning({bool showMapHint = false}) {
     _warningRankRecheckTimer?.cancel();
     _warningRankRecheckTimer = null;
+    _warningExpiryTimer?.cancel();
+    _warningExpiryTimer = null;
     if (activeWarningNotice == null) {
       unawaited(syncVystrahyHomeWidgetFromNotice(
         null,
@@ -4108,18 +4189,163 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   }
 
   void _setActiveWarningNotice(VystrahyActiveNotice? notice) {
-    if (activeWarningNotice == notice) return;
-    activeWarningNotice = notice;
+    final pruned = notice?.prunedAt(DateTime.now());
+    if (activeWarningNotice == pruned) {
+      _scheduleWarningExpiryWatch();
+      return;
+    }
+    activeWarningNotice = pruned;
     _notifySafely();
+    _scheduleWarningExpiryWatch();
     unawaited(
       syncVystrahyHomeWidgetFromNotice(
-        notice,
-        fallbackOkres: notice?.okres,
+        pruned,
+        fallbackOkres: pruned?.okres,
       ),
     );
   }
 
+  /// Skryje banner hneď po uplynutí `do` (bez čakania na pull-to-refresh).
+  void pruneExpiredActiveWarning({DateTime? now}) {
+    final current = activeWarningNotice;
+    if (current == null) return;
+    final at = now ?? DateTime.now();
+    final pruned = current.prunedAt(at);
+    if (pruned == null) {
+      _setActiveWarningNotice(null);
+      return;
+    }
+    if (pruned == current) {
+      _scheduleWarningExpiryWatch();
+      return;
+    }
+    _setActiveWarningNotice(pruned);
+  }
+
+  void _scheduleWarningExpiryWatch() {
+    _warningExpiryTimer?.cancel();
+    _warningExpiryTimer = null;
+    final notice = activeWarningNotice;
+    if (notice == null) return;
+    final now = DateTime.now();
+    DateTime? soonestEnd;
+    for (final item in notice.items) {
+      final end = item.endAt;
+      if (end == null || !end.isAfter(now)) continue;
+      if (soonestEnd == null || end.isBefore(soonestEnd)) {
+        soonestEnd = end;
+      }
+    }
+    if (soonestEnd == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        pruneExpiredActiveWarning();
+      });
+      return;
+    }
+    var wait = soonestEnd.difference(now) + const Duration(milliseconds: 400);
+    if (wait.isNegative) wait = Duration.zero;
+    // Cap — aj tak polling doťahuje zrušenie na serveri.
+    if (wait > const Duration(hours: 6)) {
+      wait = const Duration(hours: 6);
+    }
+    _warningExpiryTimer = Timer(wait, () {
+      pruneExpiredActiveWarning();
+      // Po uplynutí ešte raz z HTTP (keby na serveri ostali iné výstrahy).
+      final lat = _userLat;
+      final lon = _userLon;
+      if (lat == null || lon == null) return;
+      // City name nemáme tu — prune stačí; heartbeat dorovná.
+    });
+  }
+
+  /// Domovský banner z HTTP — okamžite pri zmene mesta (WebView netreba).
+  Future<void> refreshHomeBannerForCity(GeoCity city) async {
+    if (!cityEligibleForVystrahy(city)) {
+      clearActiveWarning();
+      return;
+    }
+    final serial = ++_homeBannerFetchSerial;
+    final cityKey =
+        '${city.lat.toStringAsFixed(3)}:${city.lon.toStringAsFixed(3)}';
+    final locationChanged = _homeBannerCityKey != cityKey;
+    _homeBannerCityKey = cityKey;
+
+    // Pri zmene lokality hneď schovať starý banner — inak ostane cudzí okres.
+    if (locationChanged) {
+      _setActiveWarningNotice(null);
+    } else {
+      pruneExpiredActiveWarning();
+    }
+
+    _userLat = city.lat;
+    _userLon = city.lon;
+
+    final okresGuess = matchVystrahyOkresName(
+      cityName: city.name,
+      admin1: city.admin1,
+      admin2: city.admin2,
+    );
+
+    try {
+      final snap = await fetchVystrahySnapshotForCity(
+        cityName: city.name,
+        admin1: city.admin1,
+        admin2: city.admin2,
+        preferPhp: true,
+      );
+      if (serial != _homeBannerFetchSerial) return;
+
+      if (snap != null && snap.hasWarning) {
+        _setActiveWarningNotice(VystrahyActiveNotice.fromWidgetSnapshot(snap));
+        return;
+      }
+
+      if (snap != null) {
+        // Okres nájdený, server nemá platnú výstrahu (zrušená / uplynulá).
+        // Nenechaj starý WebView dbase banner znova zapnúť.
+        _setActiveWarningNotice(null);
+        return;
+      }
+
+      // snap == null: buď neznámy okres, alebo zlyhal fetch.
+      if (okresGuess != null) {
+        // Fetch zlyhal — nesahej na WebView, nechaj aktuálny stav (len prune).
+        pruneExpiredActiveWarning();
+        return;
+      }
+
+      final fromMap = await _syncBannerFromFreshWebView(city);
+      if (serial != _homeBannerFetchSerial) return;
+      if (!fromMap) {
+        _setActiveWarningNotice(null);
+      }
+    } catch (_) {
+      if (serial != _homeBannerFetchSerial) return;
+      pruneExpiredActiveWarning();
+    }
+  }
+
+  /// Pin → banner. true ak sa podarilo nastaviť výstrahu.
+  Future<bool> _syncBannerFromFreshWebView(GeoCity city) async {
+    if (!mapContentReady || _controller == null) {
+      updateUserLocation(city.lat, city.lon, inject: false);
+      if (_controller == null) warmup();
+      return false;
+    }
+    _userLat = city.lat;
+    _userLon = city.lon;
+    _jsMayUpdateHomeBanner = true;
+    try {
+      await _injectLocationMarker(scheduleRetry: false);
+      await _syncActiveWarningNoticeFromJs();
+    } finally {
+      _jsMayUpdateHomeBanner = false;
+    }
+    return activeWarningNotice?.shouldShow == true;
+  }
+
   Future<void> _syncActiveWarningNoticeFromJs() async {
+    if (!_attachedToPage && !_jsMayUpdateHomeBanner) return;
     final c = _controller;
     if (c == null) return;
     try {
@@ -4129,7 +4355,11 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
         text = text.substring(1, text.length - 1);
         text = text.replaceAll(r'\"', '"').replaceAll(r'\\', r'\');
       }
-      _setActiveWarningNotice(VystrahyActiveNotice.fromJsJson(text));
+      final parsed = VystrahyActiveNotice.fromJsJson(text);
+      // JS null často znamená „pin ešte nenašiel okres“ — nenechaj to zmazať
+      // čerstvý HTTP banner.
+      if (parsed == null && activeWarningNotice != null) return;
+      _setActiveWarningNotice(parsed);
     } catch (_) {}
   }
 
@@ -4142,11 +4372,13 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       return;
     }
     await _injectLocationMarker(scheduleRetry: false);
+    if (_userLat != lat || _userLon != lon) return;
     await _syncActiveWarningNoticeFromJs();
     if (!scheduleRecheck) return;
     _warningRankRecheckTimer?.cancel();
     _warningRankRecheckTimer =
         Timer(const Duration(milliseconds: 450), () {
+      if (_userLat != lat || _userLon != lon) return;
       unawaited(refreshActiveWarningNotice(scheduleRecheck: false));
     });
   }
@@ -4156,21 +4388,71 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     _okresyReadyPoll?.cancel();
     if (mapContentReady) return;
     unawaited(_injectOkresyReadyWatchJs());
+    unawaited(_prefetchOkresyGeoForWebView());
     var tries = 0;
-    _okresyReadyPoll = Timer.periodic(const Duration(milliseconds: 100), (t) {
+    _okresyReadyPoll = Timer.periodic(const Duration(milliseconds: 200), (t) {
       tries++;
       if (mapContentReady || failed) {
         t.cancel();
         return;
       }
-      if (tries > 150) {
+      // Po ~4 s / 12 s / 24 s skús doťahať okresy (súbor je ~1 MB, WebView často nestihne).
+      if (tries == 20 || tries == 60 || tries == 120) {
+        unawaited(_ensureOkresyGeoInWebView());
+      }
+      if (tries > 300) {
         t.cancel();
-        // Po ~15 s už nič nečakať — nech používateľ aspoň vidí čo je.
+        // Po ~60 s už nič nečakať — nech používateľ aspoň vidí čo je.
         if (loaded && !failed) _markMapContentReady();
         return;
       }
       unawaited(_pollOkresyReadyOnce());
     });
+  }
+
+  Future<void> _prefetchOkresyGeoForWebView() async {
+    if (_cachedOkresyGeoJson != null && _cachedOkresyGeoJson!.length > 1000) {
+      return;
+    }
+    try {
+      final res = await http
+          .get(
+            Uri.parse(
+              '$kMeteoVystrahyOkresyUrl?_cb=${DateTime.now().millisecondsSinceEpoch}',
+            ),
+            headers: const {
+              'Cache-Control': 'no-cache, no-store, must-revalidate',
+              'Pragma': 'no-cache',
+            },
+          )
+          .timeout(const Duration(seconds: 90));
+      if (res.statusCode < 200 || res.statusCode >= 300) return;
+      final text = utf8.decode(res.bodyBytes);
+      if (text.contains('"features"') && text.length > 1000) {
+        _cachedOkresyGeoJson = text;
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _ensureOkresyGeoInWebView() async {
+    final c = _controller;
+    if (c == null || mapContentReady) return;
+    try {
+      await c.runJavaScript(_kVystrahyEnsureOkresyFromNetworkJs);
+    } catch (_) {}
+
+    await _prefetchOkresyGeoForWebView();
+    final geo = _cachedOkresyGeoJson;
+    if (geo == null || geo.length < 1000) return;
+    if (mapContentReady) return;
+    try {
+      // Vlož GeoJSON z Flutter cache — WebView fetch často timeoutne.
+      await c.runJavaScript(
+        'window.__pocasieOkresyGeo='
+        '$geo;'
+        '$_kVystrahyApplyPrefetchedOkresyJs',
+      );
+    } catch (_) {}
   }
 
   Future<void> _injectOkresyReadyWatchJs() async {
@@ -4229,6 +4511,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     final js = buildVystrahyUserLocationMarkerJs(lat, lon);
     try {
       await c.runJavaScript(js);
+      if (_userLat != lat || _userLon != lon) return;
       if (mapContentReady) {
         await _syncActiveWarningNoticeFromJs();
       }
@@ -4240,6 +4523,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       if (_userLat != lat || _userLon != lon) return;
       try {
         await c.runJavaScript(js);
+        if (_userLat != lat || _userLon != lon) return;
         if (mapContentReady) {
           await _syncActiveWarningNoticeFromJs();
         }
@@ -4461,13 +4745,16 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     return completer.future;
   }
 
-  /// Extrahuje `let dbase = {...}` z HTML výstrah.
+  /// Extrahuje `let dbase = {...}` / `let dbase = [...]` z HTML výstrah.
   static String? _extractVystrahyDbaseLiteral(String html) {
     final marker = RegExp(r'let\s+dbase\s*=\s*');
     final m = marker.firstMatch(html);
     if (m == null) return null;
     var i = m.end;
-    if (i >= html.length || html[i] != '{') return null;
+    if (i >= html.length) return null;
+    final open = html[i];
+    if (open != '{' && open != '[') return null;
+    final close = open == '{' ? '}' : ']';
     var depth = 0;
     final start = i;
     for (; i < html.length; i++) {
@@ -4485,9 +4772,9 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
         }
         continue;
       }
-      if (ch == '{') {
+      if (ch == open) {
         depth++;
-      } else if (ch == '}') {
+      } else if (ch == close) {
         depth--;
         if (depth == 0) return html.substring(start, i + 1);
       }
@@ -4511,12 +4798,16 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
           .get(_vystrahyRequestUri(), headers: _vystrahyNoCacheHeaders)
           .timeout(const Duration(seconds: 12));
       if (res.statusCode < 200 || res.statusCode >= 300) return false;
-      final literal = _extractVystrahyDbaseLiteral(res.body);
-      if (literal == null || literal.length < 3) return false;
+      var literal = _extractVystrahyDbaseLiteral(res.body);
+      if (literal == null || literal.length < 2) return false;
+      // Prázdne pole z editora — mapa očakáva objekt okres→výstrahy.
+      if (literal == '[]') literal = '{}';
       await c.runJavaScript('''
 (function() {
   try {
-    dbase = $literal;
+    var next = $literal;
+    if (Array.isArray(next)) next = {};
+    dbase = next;
     var now = new Date();
     for (var okr in dbase) {
       if (!Array.isArray(dbase[okr])) continue;
@@ -4597,6 +4888,7 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     double lat,
     double lon, {
     Duration timeout = const Duration(seconds: 12),
+    GeoCity? city,
   }) async {
     if (!coordsWithinSlovakiaVystrahyExtent(lat, lon)) {
       clearActiveWarning();
@@ -4604,12 +4896,20 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     }
     _userLat = lat;
     _userLon = lon;
+    if (city != null) {
+      unawaited(refreshHomeBannerForCity(city));
+    }
     prefetchAssets();
     if (_controller == null) {
       final ready = await waitUntilReady(timeout: timeout);
       if (!ready) return;
     }
-    await reload(timeout: timeout);
+    _jsMayUpdateHomeBanner = true;
+    try {
+      await reload(timeout: timeout);
+    } finally {
+      _jsMayUpdateHomeBanner = false;
+    }
   }
 
   void refreshMapLayout() => _scheduleMapResizeInject();
@@ -5015,6 +5315,139 @@ const String _kVystrahyMobileInjectJs = r'''
 })();
 ''';
 
+/// Keď stránka nestihne stiahnuť okresy-hq.json, skús absolútne URL.
+const String _kVystrahyEnsureOkresyFromNetworkJs = r'''
+(function() {
+  if (window.__pocasieEnsuringOkresyNet) return;
+  window.__pocasieEnsuringOkresyNet = true;
+  async function ensure() {
+    try {
+      if (typeof geoLayer !== 'undefined' && geoLayer && geoLayer.getLayers &&
+          geoLayer.getLayers().length > 0) {
+        return true;
+      }
+      var mapRef = (typeof map !== 'undefined' && map) ? map : window.__pocasieLeafletMap;
+      if (!mapRef || typeof L === 'undefined') return false;
+      var urls = [
+        'http://cz1.helkor.eu:41083/okresy-hq.json',
+        'http://cz1.helkor.eu:41083/vystrahy.php?getGeo=1',
+        'okresy-hq.json',
+        '?getGeo=1'
+      ];
+      var rawGeo = null;
+      for (var i = 0; i < urls.length; i++) {
+        try {
+          var u = urls[i];
+          u += (u.indexOf('?') >= 0 ? '&' : '?') + '_cb=' + Date.now();
+          var response = await fetch(u);
+          if (!response.ok) continue;
+          var json = await response.json();
+          if (json && json.features && json.features.length) {
+            rawGeo = json;
+            break;
+          }
+        } catch (e0) {}
+      }
+      if (!rawGeo) return false;
+      var kontrolaMien = {};
+      rawGeo.features.forEach(function(feat, idx) {
+        var p = feat.properties || {};
+        var meno = p.NAME_2 || p.name || p.NM3 || ('Okres ' + idx);
+        if (kontrolaMien[meno]) meno = meno + '_' + idx;
+        kontrolaMien[meno] = true;
+        feat._bezpecneId = meno;
+      });
+      var off = (typeof vybranyDenOffset === 'number') ? vybranyDenOffset : 0;
+      var db = (typeof dbase !== 'undefined' && dbase && !Array.isArray(dbase))
+        ? dbase
+        : {};
+      try {
+        if (typeof geoLayer !== 'undefined' && geoLayer) {
+          mapRef.removeLayer(geoLayer);
+        }
+      } catch (e1) {}
+      geoLayer = L.geoJSON(rawGeo, {
+        style: function(f) {
+          var id = f && f._bezpecneId;
+          var color = (typeof farbaNaDen === 'function')
+            ? farbaNaDen(db[id], off)
+            : '#10b981';
+          return { fillColor: color, weight: 1, color: '#172438', fillOpacity: 1 };
+        },
+        interactive: false
+      }).addTo(mapRef);
+      if (typeof prerozdelBounndy === 'function') {
+        try { prerozdelBounndy(); } catch (e2) {}
+      }
+      return true;
+    } catch (e) {
+      return false;
+    } finally {
+      window.__pocasieEnsuringOkresyNet = false;
+    }
+  }
+  ensure().then(function(ok) {
+    if (!ok) return;
+    window.__pocasieVystrahyOkresyReady = true;
+    try {
+      if (window.VystrahyReady && VystrahyReady.postMessage) {
+        VystrahyReady.postMessage('okresy');
+      }
+    } catch (e3) {}
+  });
+})();
+''';
+
+/// Aplikuj `window.__pocasieOkresyGeo` (vložené z Flutter prefetch).
+const String _kVystrahyApplyPrefetchedOkresyJs = r'''
+(function() {
+  try {
+    if (typeof geoLayer !== 'undefined' && geoLayer && geoLayer.getLayers &&
+        geoLayer.getLayers().length > 0) {
+      return;
+    }
+    var rawGeo = window.__pocasieOkresyGeo;
+    if (!rawGeo || !rawGeo.features || !rawGeo.features.length) return;
+    var mapRef = (typeof map !== 'undefined' && map) ? map : window.__pocasieLeafletMap;
+    if (!mapRef || typeof L === 'undefined') return;
+    var kontrolaMien = {};
+    rawGeo.features.forEach(function(feat, idx) {
+      var p = feat.properties || {};
+      var meno = p.NAME_2 || p.name || p.NM3 || ('Okres ' + idx);
+      if (kontrolaMien[meno]) meno = meno + '_' + idx;
+      kontrolaMien[meno] = true;
+      feat._bezpecneId = meno;
+    });
+    var off = (typeof vybranyDenOffset === 'number') ? vybranyDenOffset : 0;
+    var db = (typeof dbase !== 'undefined' && dbase && !Array.isArray(dbase))
+      ? dbase
+      : {};
+    try {
+      if (typeof geoLayer !== 'undefined' && geoLayer) {
+        mapRef.removeLayer(geoLayer);
+      }
+    } catch (e0) {}
+    geoLayer = L.geoJSON(rawGeo, {
+      style: function(f) {
+        var id = f && f._bezpecneId;
+        var color = (typeof farbaNaDen === 'function')
+          ? farbaNaDen(db[id], off)
+          : '#10b981';
+        return { fillColor: color, weight: 1, color: '#172438', fillOpacity: 1 };
+      },
+      interactive: false
+    }).addTo(mapRef);
+    if (typeof prerozdelBounndy === 'function') {
+      try { prerozdelBounndy(); } catch (e1) {}
+    }
+    window.__pocasieVystrahyOkresyReady = true;
+    if (window.VystrahyReady && VystrahyReady.postMessage) {
+      VystrahyReady.postMessage('okresy');
+    }
+  } catch (e) {}
+})();
+''';
+
 /// Sleduje načítanie okresov (geoLayer) a hlási do Flutter cez VystrahyReady.
 const String _kVystrahyOkresyReadyWatchJs = r'''
 (function() {
@@ -5046,10 +5479,10 @@ const String _kVystrahyOkresyReadyWatchJs = r'''
     if (ready()) {
       clearInterval(t);
       notify();
-    } else if (tries > 150) {
+    } else if (tries > 300) {
       clearInterval(t);
     }
-  }, 100);
+  }, 200);
 })();
 ''';
 

@@ -450,13 +450,23 @@ const String kLocationPermissionPromptShownKey = 'location_permission_prompt_sho
 /// Predvolený zoom náhľadu / fullscreen radaru (mestská úroveň — nie celá SR).
 const double kMeteoRadarCityZoom = 7;
 
-String buildMeteoRadarUrl(GeoCity city, {bool cacheBust = false}) {
+const String kMeteoRadarHelkorOrigin = 'http://cz1.helkor.eu:41152';
+const String kMeteoRadarMapboxGlJsUrl =
+    'https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.js';
+const String kMeteoRadarMapboxGlCssUrl =
+    'https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.css';
+
+String _helkorRadarPageUrl(GeoCity city, {bool cacheBust = false}) {
   final base =
-      'http://cz1.helkor.eu:41152/radar/?lat=${city.lat}&lon=${city.lon}&zoom=${kMeteoRadarCityZoom.toStringAsFixed(0)}&hideUI=true';
-  // Cache-bust len pri manuálnom retry — inak WebView znova sťahuje slovakia.geojson.
+      '$kMeteoRadarHelkorOrigin/radar/?lat=${city.lat}&lon=${city.lon}&zoom=${kMeteoRadarCityZoom.toStringAsFixed(0)}&hideUI=true';
   if (!cacheBust) return base;
   return '$base&_cb=${DateTime.now().millisecondsSinceEpoch}';
 }
+
+/// URL pre WebView — priamo Helkor.
+/// Lokálny warm-proxy lámal Mapbox dlaždice (prázdna mapa, len zrážky).
+String buildMeteoRadarUrl(GeoCity city, {bool cacheBust = false}) =>
+    _helkorRadarPageUrl(city, cacheBust: cacheBust);
 
 /// Pin Mapbox kamery na mesto.
 ///
@@ -514,19 +524,54 @@ String buildMeteoRadarPinCityJs({
     var lon = $lon;
     var z = $kMeteoRadarCityZoom;
     window.__appRadarHome = { lat: lat, lon: lon, zoom: z };
+    function locationDotRoots() {
+      var out = [];
+      try {
+        document.querySelectorAll('.mapboxgl-marker').forEach(function(root) {
+          if (root.querySelector('.location-dot') || root.classList.contains('location-dot')) {
+            out.push(root);
+          }
+        });
+      } catch (eQ) {}
+      return out;
+    }
+    function keepRootForMarker(marker) {
+      if (!marker || typeof marker.getElement !== 'function') return null;
+      var el = marker.getElement();
+      if (!el) return null;
+      if (el.classList && el.classList.contains('mapboxgl-marker')) return el;
+      return (el.closest && el.closest('.mapboxgl-marker')) || el.parentElement || el;
+    }
+    function dedupeLocationDots(keepRoot) {
+      locationDotRoots().forEach(function(root) {
+        if (keepRoot && root === keepRoot) return;
+        if (keepRoot && keepRoot.contains && root.contains(keepRoot)) return;
+        try { root.remove(); } catch (eR) {}
+      });
+    }
+    function syncUserMarker() {
+      if (typeof userMarker !== 'undefined' && userMarker) {
+        try { userMarker.setLngLat([lon, lat]); } catch (eM) {}
+        dedupeLocationDots(keepRootForMarker(userMarker));
+        return;
+      }
+      // Žiadny userMarker — zmaž orphan DOM bodky a vytvor jednu na správnom mieste.
+      locationDotRoots().forEach(function(root) {
+        try { root.remove(); } catch (eR) {}
+      });
+      if (typeof mapboxgl === 'undefined' || typeof map === 'undefined' || !map) return;
+      var el = document.createElement('div');
+      el.className = 'location-dot';
+      userMarker = new mapboxgl.Marker(el).setLngLat([lon, lat]).addTo(map);
+      dedupeLocationDots(keepRootForMarker(userMarker));
+    }
     function pin() {
       if (window.__appRadarUserInteracting) return false;
       if (typeof map === 'undefined' || !map || typeof map.jumpTo !== 'function') {
         return false;
       }
       map.jumpTo({ center: [lon, lat], zoom: z });
-      if (typeof userMarker !== 'undefined' && userMarker) {
-        userMarker.setLngLat([lon, lat]);
-      } else if (typeof mapboxgl !== 'undefined') {
-        var el = document.createElement('div');
-        el.className = 'location-dot';
-        userMarker = new mapboxgl.Marker(el).setLngLat([lon, lat]).addTo(map);
-      }
+      syncUserMarker();
       try { window.requestedZoom = z; } catch (eZ) {}
       try { window.requestedLat = lat; window.requestedLon = lon; } catch (eL) {}
       return true;
@@ -546,6 +591,9 @@ String buildMeteoRadarPinCityJs({
                 map.jumpTo({ center: [h.lon, h.lat], zoom: h.zoom });
                 if (typeof userMarker !== 'undefined' && userMarker) {
                   userMarker.setLngLat([h.lon, h.lat]);
+                  dedupeLocationDots(keepRootForMarker(userMarker));
+                } else {
+                  dedupeLocationDots(locationDotRoots()[0] || null);
                 }
               } catch (eH) {}
             }
@@ -560,7 +608,12 @@ String buildMeteoRadarPinCityJs({
     try { window.dispatchEvent(new Event('resize')); } catch (eD) {}
     ok = pin() || ok;
     $deferredPins
-    document.documentElement.classList.add('radar-layers-ready');
+    // Helkor často pridá bodku až v map.on('load') — zmaž duplicitu po ňom.
+    setTimeout(function() { try { syncUserMarker(); } catch (eS) {} }, 0);
+    setTimeout(function() { try { syncUserMarker(); } catch (eS2) {} }, 200);
+    setTimeout(function() { try { syncUserMarker(); } catch (eS3) {} }, 600);
+    // Neodkrývaj vrstvy tu — inak biela Mapbox mapa pred dlaždicami.
+    // Odkrýva až radar ready gate / Flutter.
     return ok ? '1' : '0';
   } catch (e) {
     return '0';
@@ -644,29 +697,319 @@ Widget buildMeteoRadarWebView({
   );
 }
 
-/// Hranice SK na Helkor radare (~1 MB) — prednačítať pri štarte, inak nestihnú.
+/// Hranice SK na Helkor radare — prednačítať + disk cache pre WebView warm-proxy.
 const String kMeteoRadarSlovakiaGeoJsonUrl =
-    'http://cz1.helkor.eu:41152/radar/slovakia.geojson';
+    '$kMeteoRadarHelkorOrigin/radar/slovakia.geojson';
+const String kMeteoRadarRomaniaGeoJsonUrl =
+    '$kMeteoRadarHelkorOrigin/radar/romania.geojson';
+const String kMeteoRadarHistoryCmaxUrl =
+    '$kMeteoRadarHelkorOrigin/radar/radar_history_cmax.json';
 
 List<String> meteoRadarPrefetchUrls({GeoCity? city}) {
   final lat = city?.lat ?? 48.7;
   final lon = city?.lon ?? 19.5;
   return [
     kMeteoRadarSlovakiaGeoJsonUrl,
-    'http://cz1.helkor.eu:41152/radar/radar_history_cmax.json',
-    // Rovnaká HTML URL ako WebView — DNS/TCP + disk cache pre danú lokalitu.
-    'http://cz1.helkor.eu:41152/radar/?lat=$lat&lon=$lon&zoom=7&hideUI=true',
-    'https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.js',
-    'https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.css',
+    kMeteoRadarRomaniaGeoJsonUrl,
+    kMeteoRadarHistoryCmaxUrl,
+    // Rovnaká HTML URL ako WebView — DNS/TCP.
+    '$kMeteoRadarHelkorOrigin/radar/?lat=$lat&lon=$lon&zoom=7&hideUI=true',
+    kMeteoRadarMapboxGlJsUrl,
+    kMeteoRadarMapboxGlCssUrl,
   ];
 }
 
-bool _radarMapAssetsPrefetchStarted = false;
+class _RadarWarmAsset {
+  _RadarWarmAsset(this.bytes, this.savedAt, {required this.contentType});
+  final List<int> bytes;
+  final DateTime savedAt;
+  final String contentType;
+}
 
-/// HTTP prefetch radaru (geojson + história + posledný CMAX frame) — ešte pred WebView.
-void prefetchRadarMapAssets([GeoCity? city]) {
-  if (_radarMapAssetsPrefetchStarted) return;
-  _radarMapAssetsPrefetchStarted = true;
+HttpServer? _radarWarmServer;
+int? _radarWarmPort;
+Future<void>? _radarWarmStartFuture;
+Directory? _radarWarmDir;
+final Map<String, _RadarWarmAsset> _radarWarmMem = {};
+final Map<String, Future<_RadarWarmAsset?>> _radarWarmInflight = {};
+DateTime? _radarPrefetchLastRun;
+
+Duration _radarWarmTtlForKey(String key) {
+  if (key.contains('mapbox-gl')) return const Duration(days: 30);
+  if (key.endsWith('.geojson')) return const Duration(days: 7);
+  if (key.contains('radar_history')) return const Duration(minutes: 5);
+  if (key.endsWith('.png') || key.endsWith('.webp')) {
+    return const Duration(minutes: 8);
+  }
+  return const Duration(hours: 6);
+}
+
+String _radarWarmDiskName(String key) {
+  final safe = key.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+  if (safe.length <= 120) return safe;
+  return '${safe.substring(0, 80)}_${safe.hashCode}';
+}
+
+bool _radarWarmAssetFresh(_RadarWarmAsset asset, String key) {
+  return DateTime.now().difference(asset.savedAt) < _radarWarmTtlForKey(key);
+}
+
+Future<Directory> _radarWarmDirectory() async {
+  final existing = _radarWarmDir;
+  if (existing != null) return existing;
+  final root = await getApplicationCacheDirectory();
+  final dir = Directory('${root.path}/radar_warm');
+  if (!await dir.exists()) {
+    await dir.create(recursive: true);
+  }
+  _radarWarmDir = dir;
+  return dir;
+}
+
+Future<_RadarWarmAsset?> _radarWarmReadDisk(String key) async {
+  try {
+    final dir = await _radarWarmDirectory();
+    final file = File('${dir.path}/${_radarWarmDiskName(key)}');
+    final meta = File('${dir.path}/${_radarWarmDiskName(key)}.meta');
+    if (!await file.exists() || !await meta.exists()) return null;
+    final metaParts = (await meta.readAsString()).split('\n');
+    if (metaParts.length < 2) return null;
+    final savedAt = DateTime.tryParse(metaParts[0]);
+    if (savedAt == null) return null;
+    final contentType = metaParts[1].trim();
+    final bytes = await file.readAsBytes();
+    final asset = _RadarWarmAsset(bytes, savedAt, contentType: contentType);
+    if (!_radarWarmAssetFresh(asset, key)) return null;
+    _radarWarmMem[key] = asset;
+    return asset;
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<void> _radarWarmWrite(String key, List<int> bytes, String contentType) async {
+  final asset = _RadarWarmAsset(
+    bytes,
+    DateTime.now(),
+    contentType: contentType,
+  );
+  _radarWarmMem[key] = asset;
+  try {
+    final dir = await _radarWarmDirectory();
+    final file = File('${dir.path}/${_radarWarmDiskName(key)}');
+    final meta = File('${dir.path}/${_radarWarmDiskName(key)}.meta');
+    await file.writeAsBytes(bytes, flush: false);
+    await meta.writeAsString('${asset.savedAt.toIso8601String()}\n$contentType');
+  } catch (_) {}
+}
+
+Future<_RadarWarmAsset?> _radarWarmGetOrFetch(
+  String key,
+  String networkUrl, {
+  String? contentTypeHint,
+}) {
+  final mem = _radarWarmMem[key];
+  if (mem != null && _radarWarmAssetFresh(mem, key)) {
+    return Future<_RadarWarmAsset?>.value(mem);
+  }
+  final inflight = _radarWarmInflight[key];
+  if (inflight != null) return inflight;
+
+  final future = () async {
+    final disk = await _radarWarmReadDisk(key);
+    if (disk != null) return disk;
+    try {
+      final r = await http.get(Uri.parse(networkUrl)).timeout(
+            const Duration(seconds: 25),
+          );
+      if (r.statusCode < 200 || r.statusCode >= 300 || r.bodyBytes.isEmpty) {
+        return null;
+      }
+      final ct = contentTypeHint ??
+          r.headers['content-type'] ??
+          'application/octet-stream';
+      await _radarWarmWrite(key, r.bodyBytes, ct);
+      return _radarWarmMem[key];
+    } catch (_) {
+      return _radarWarmMem[key];
+    } finally {
+      _radarWarmInflight.remove(key);
+    }
+  }();
+  _radarWarmInflight[key] = future;
+  return future;
+}
+
+Future<void> _radarWarmHandleRequest(HttpRequest request) async {
+  final response = request.response;
+  try {
+    final path = request.uri.path;
+    if (path == '/cache/mapbox-gl.js') {
+      final asset = await _radarWarmGetOrFetch(
+        'mapbox-gl.js',
+        kMeteoRadarMapboxGlJsUrl,
+        contentTypeHint: 'application/javascript; charset=utf-8',
+      );
+      if (asset == null) {
+        response.statusCode = HttpStatus.badGateway;
+        return;
+      }
+      response.headers.set(HttpHeaders.contentTypeHeader, asset.contentType);
+      response.headers.set(HttpHeaders.cacheControlHeader, 'public, max-age=2592000');
+      response.add(asset.bytes);
+      return;
+    }
+    if (path == '/cache/mapbox-gl.css') {
+      final asset = await _radarWarmGetOrFetch(
+        'mapbox-gl.css',
+        kMeteoRadarMapboxGlCssUrl,
+        contentTypeHint: 'text/css; charset=utf-8',
+      );
+      if (asset == null) {
+        response.statusCode = HttpStatus.badGateway;
+        return;
+      }
+      response.headers.set(HttpHeaders.contentTypeHeader, asset.contentType);
+      response.headers.set(HttpHeaders.cacheControlHeader, 'public, max-age=2592000');
+      response.add(asset.bytes);
+      return;
+    }
+
+    if (!path.startsWith('/radar') && !path.startsWith('/blesky')) {
+      response.statusCode = HttpStatus.notFound;
+      return;
+    }
+
+    final helkorPath = path;
+    final helkorUri = Uri.parse(
+      '$kMeteoRadarHelkorOrigin$helkorPath${request.uri.hasQuery ? '?${request.uri.query}' : ''}',
+    );
+
+    final isHtmlPage = path == '/radar' || path == '/radar/' || path == '/radar/index.html';
+    final isHistoryJson = path.endsWith('radar_history_cmax.json');
+    final isStaticWarm = path.endsWith('.geojson') ||
+        isHistoryJson ||
+        path.endsWith('.png') ||
+        path.endsWith('.webp') ||
+        path.endsWith('.jpg');
+
+    if (isHtmlPage) {
+      final r = await http.get(helkorUri).timeout(const Duration(seconds: 20));
+      if (r.statusCode < 200 || r.statusCode >= 300) {
+        response.statusCode = r.statusCode;
+        response.add(r.bodyBytes);
+        return;
+      }
+      // Mapbox JS/CSS nechávame na CDN — proxy z localhost láme dlaždice štýlu.
+      response.headers.set(HttpHeaders.contentTypeHeader, 'text/html; charset=utf-8');
+      response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+      response.write(r.body);
+      return;
+    }
+
+    if (isStaticWarm) {
+      final key = path.startsWith('/') ? path.substring(1).replaceAll('/', '_') : path;
+      final asset = await _radarWarmGetOrFetch(key, helkorUri.toString());
+      if (asset != null) {
+        var outBytes = asset.bytes;
+        var outType = asset.contentType;
+        // Absolútne Helkor URL v histórii → cez proxy (inak WebView míňa disk cache).
+        if (isHistoryJson) {
+          final port = _radarWarmPort;
+          if (port != null) {
+            final rewritten = utf8.decode(asset.bytes).replaceAll(
+                  kMeteoRadarHelkorOrigin,
+                  'http://127.0.0.1:$port',
+                );
+            outBytes = utf8.encode(rewritten);
+            outType = 'application/json; charset=utf-8';
+          }
+        }
+        response.headers.set(HttpHeaders.contentTypeHeader, outType);
+        response.headers.set(
+          HttpHeaders.cacheControlHeader,
+          'public, max-age=${_radarWarmTtlForKey(key).inSeconds}',
+        );
+        response.add(outBytes);
+        return;
+      }
+    }
+
+    final r = await http.get(helkorUri).timeout(const Duration(seconds: 25));
+    response.statusCode = r.statusCode;
+    var body = r.bodyBytes;
+    final ct = r.headers['content-type'];
+    if (isHistoryJson && r.statusCode >= 200 && r.statusCode < 300) {
+      final port = _radarWarmPort;
+      if (port != null) {
+        final rewritten = r.body.replaceAll(
+          kMeteoRadarHelkorOrigin,
+          'http://127.0.0.1:$port',
+        );
+        body = utf8.encode(rewritten);
+        response.headers.set(HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
+      } else if (ct != null) {
+        response.headers.set(HttpHeaders.contentTypeHeader, ct);
+      }
+    } else if (ct != null) {
+      response.headers.set(HttpHeaders.contentTypeHeader, ct);
+    }
+    response.add(body);
+    if (isStaticWarm && r.statusCode >= 200 && r.statusCode < 300 && r.bodyBytes.isNotEmpty) {
+      final key = path.startsWith('/') ? path.substring(1).replaceAll('/', '_') : path;
+      // Disk: originálne bajty (bez rewrite), rewrite len pri servírovaní.
+      unawaited(_radarWarmWrite(key, r.bodyBytes, ct ?? 'application/octet-stream'));
+    }
+  } catch (_) {
+    response.statusCode = HttpStatus.badGateway;
+  } finally {
+    await response.close();
+  }
+}
+
+/// Lokálny HTTP proxy: WebView berie Mapbox/geojson z diskovej cache (nie z Dart http).
+Future<void> ensureRadarWarmProxyStarted() {
+  final existing = _radarWarmStartFuture;
+  if (existing != null) return existing;
+  _radarWarmStartFuture = () async {
+    if (_radarWarmServer != null) return;
+    try {
+      await _radarWarmDirectory();
+      // Prednačítaj diskové assety do RAM pred prvým requestom.
+      await Future.wait([
+        _radarWarmReadDisk('mapbox-gl.js'),
+        _radarWarmReadDisk('mapbox-gl.css'),
+        _radarWarmReadDisk('radar_slovakia.geojson'),
+        _radarWarmReadDisk('radar_romania.geojson'),
+        _radarWarmReadDisk('radar_radar_history_cmax.json'),
+      ]);
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      _radarWarmServer = server;
+      _radarWarmPort = server.port;
+      server.listen(
+        (request) {
+          unawaited(_radarWarmHandleRequest(request));
+        },
+        onError: (_) {},
+        cancelOnError: false,
+      );
+    } catch (_) {
+      _radarWarmServer = null;
+      _radarWarmPort = null;
+      _radarWarmStartFuture = null;
+    }
+  }();
+  return _radarWarmStartFuture!;
+}
+
+/// HTTP prefetch radaru (geojson / história / Mapbox) — DNS+TCP ešte pred WebView.
+/// WebView ide priamo na Helkor (proxy lámal Mapbox dlaždice).
+Future<void> prefetchRadarMapAssets([GeoCity? city]) async {
+  final last = _radarPrefetchLastRun;
+  if (last != null && DateTime.now().difference(last) < const Duration(seconds: 45)) {
+    return;
+  }
+  _radarPrefetchLastRun = DateTime.now();
 
   unawaited(() async {
     await Future.wait(
@@ -675,16 +1018,15 @@ void prefetchRadarMapAssets([GeoCity? city]) {
           final r = await http
               .get(Uri.parse(url))
               .timeout(const Duration(seconds: 20));
-          // Prednačítaj aj najnovší radarový PNG — WebView ho potom berie z cache.
           if (url.contains('radar_history_cmax.json') && r.statusCode == 200) {
             try {
               final data = jsonDecode(r.body);
               if (data is List && data.isNotEmpty) {
-                final last = data.last;
-                if (last is Map && last['url'] is String) {
-                  var frameUrl = last['url'] as String;
+                final lastFrame = data.last;
+                if (lastFrame is Map && lastFrame['url'] is String) {
+                  var frameUrl = lastFrame['url'] as String;
                   if (frameUrl.startsWith('/')) {
-                    frameUrl = 'http://cz1.helkor.eu:41152$frameUrl';
+                    frameUrl = '$kMeteoRadarHelkorOrigin$frameUrl';
                   }
                   await http
                       .get(Uri.parse(frameUrl))
@@ -931,6 +1273,21 @@ class VystrahyWarningItem {
 
   bool get isValid => rank >= 1 && jav.isNotEmpty;
 
+  /// Rovnaká logika ako JS na mape: bez `do` alebo po konci → nezobrazovať.
+  bool isRelevantAt(DateTime now) {
+    if (!isValid) return false;
+    final end = endAt;
+    if (end == null) return false;
+    return end.isAfter(now);
+  }
+
+  bool isActiveAt(DateTime now) {
+    if (!isRelevantAt(now)) return false;
+    final start = startAt;
+    if (start == null) return false;
+    return !start.isAfter(now);
+  }
+
   String levelLine(String okres) => '$rank. stupeň • okres $okres';
 
   /// Jedna výstraha: „Búrky · do dnes 23:59“ / „Dážď · od zajtra 08:00 do 18:00“.
@@ -1002,13 +1359,39 @@ class VystrahyActiveNotice {
   final List<VystrahyWarningItem> items;
 
   int get rank =>
-      items.fold(0, (max, item) => item.rank > max ? item.rank : max);
+      visibleItems.fold(0, (max, item) => item.rank > max ? item.rank : max);
 
-  bool get shouldShow =>
-      okres.isNotEmpty && items.any((item) => item.isValid);
+  bool get shouldShow => shouldShowAt(DateTime.now());
+
+  bool shouldShowAt(DateTime now) =>
+      okres.isNotEmpty && visibleItemsAt(now).isNotEmpty;
 
   List<VystrahyWarningItem> get visibleItems =>
-      items.where((item) => item.isValid).toList(growable: false);
+      visibleItemsAt(DateTime.now());
+
+  List<VystrahyWarningItem> visibleItemsAt(DateTime now) => items
+      .where((item) => item.isRelevantAt(now))
+      .toList(growable: false);
+
+  /// Odstráni uplynuté položky; `null` ak nič neostalo.
+  VystrahyActiveNotice? prunedAt(DateTime now) {
+    final kept = <VystrahyWarningItem>[];
+    for (final item in items) {
+      if (!item.isRelevantAt(now)) continue;
+      kept.add(
+        VystrahyWarningItem(
+          rank: item.rank,
+          jav: item.jav,
+          javId: item.javId,
+          startAt: item.startAt,
+          endAt: item.endAt,
+          isActiveNow: item.isActiveAt(now),
+        ),
+      );
+    }
+    if (okres.isEmpty || kept.isEmpty) return null;
+    return VystrahyActiveNotice(okres: okres, items: kept);
+  }
 
   Color get accentColor => vystrahyLevelAccentColor(rank);
 
@@ -1091,15 +1474,39 @@ class VystrahyActiveNotice {
             .whereType<VystrahyWarningItem>()
             .toList(growable: false);
         if (items.isEmpty) return null;
-        return VystrahyActiveNotice(okres: okres, items: items);
+        return VystrahyActiveNotice(okres: okres, items: items)
+            .prunedAt(DateTime.now());
       }
 
       final legacy = VystrahyWarningItem.fromMap(map);
       if (legacy == null) return null;
-      return VystrahyActiveNotice(okres: okres, items: [legacy]);
+      return VystrahyActiveNotice(okres: okres, items: [legacy])
+          .prunedAt(DateTime.now());
     } catch (_) {
       return null;
     }
+  }
+
+  /// Banner / widget z HTTP `vystrahy.json` (bez WebView).
+  static VystrahyActiveNotice? fromWidgetSnapshot(
+    VystrahyWidgetSnapshot snap, {
+    DateTime? now,
+  }) {
+    final at = now ?? DateTime.now();
+    if (snap.okres.isEmpty || !snap.hasWarning) return null;
+    final items = snap.items
+        .map(
+          (i) => VystrahyWarningItem(
+            rank: i.rank,
+            jav: i.jav,
+            javId: resolveVystrahyJavId(i.jav),
+            startAt: i.od,
+            endAt: i.doUntil,
+            isActiveNow: i.isActiveNow,
+          ),
+        )
+        .toList(growable: false);
+    return VystrahyActiveNotice(okres: snap.okres, items: items).prunedAt(at);
   }
 
   @override
@@ -1602,13 +2009,13 @@ double _ecmwfHourlyPrecipMm(HourlyForecast h, int idx) =>
 int _ecmwfHourlyPrecipProb(HourlyForecast h, int idx) =>
     h.precipitationProbability?[idx] ?? 0;
 
-/// Reprezentatívne mm pre % — len legacy / denné sumy; 24 h pás to nepoužíva na ikony.
+/// Reprezentatívne mm z % — stupne majú padať do rôznych rozmedzí (0-1 / 1-2 / 2-3).
 double displayMmFromPrecipProbability(int prob) {
-  if (prob >= 90) return 1.4;
-  if (prob >= 80) return 1.0;
-  if (prob >= 70) return 0.6;
-  if (prob >= 60) return 0.35;
-  if (prob >= 50) return 0.2;
+  if (prob >= 90) return 3.2;
+  if (prob >= 80) return 2.2;
+  if (prob >= 70) return 1.3;
+  if (prob >= 60) return 0.7;
+  if (prob >= 50) return 0.35;
   return kMeaningfulPrecipMmPerHour;
 }
 
@@ -1797,6 +2204,33 @@ void applyUnifiedHourlyStripPrecip({
     ),
     radarCtx: radarCtx,
     locTime: locTime,
+  );
+  diversifyRepetitiveWetStripPercents(
+    displayIcons: displayIcons,
+    showRainPrecip: showRainPrecip,
+    storedProbs: storedProbs,
+    precipMm: precipMm,
+    stripIndices: stripIndices,
+    h: h,
+  );
+  // Mokré mm — až po % (mm z % musia sedieť s rozmanitými percentami).
+  diversifyRepetitiveWetStripMm(
+    displayIcons: displayIcons,
+    showRainPrecip: showRainPrecip,
+    storedProbs: storedProbs,
+    precipMm: precipMm,
+    stripIndices: stripIndices,
+    h: h,
+  );
+  // Po diversify — znova strop podľa hodín dopredu (vlna nesmie vrátiť 90 %).
+  applyRadarHorizonPrecipProbCaps(
+    storedProbs: storedProbs,
+    showRainPrecip: showRainPrecip,
+    displayIcons: displayIcons,
+    stripIndices: stripIndices,
+    h: h,
+    locTime: locTime,
+    utcOffsetSeconds: utcOffsetSeconds,
   );
   alignDryStripPercentsForMatchingIcons(
     displayIcons: displayIcons,
@@ -2059,8 +2493,8 @@ int _openMeteoUiPrecipHoursBeforeStrip({
   return 0;
 }
 
-/// Búrka (95/96/99): mimo nowcastu podľa modelu/bleskov.
-/// V nowcast okne (do 5 h) modelová búrka **neprebíja** radar — len skutočné blesky.
+/// Búrka (95/96/99): sila z mm rozmedzia → potom blesky / model.
+/// V nowcast okne modelová búrka **neprebíja** radar — len skutočné blesky.
 void alignHourlyStripThunderWithProbability({
   required List<int> displayIcons,
   required List<bool> showRainPrecip,
@@ -2094,7 +2528,12 @@ void alignHourlyStripThunderWithProbability({
     final lightningHere = lightningNearby &&
         lightningHourIndex != null &&
         idx == lightningHourIndex;
-    final thunderReported = apiThunder || lightningHere;
+    final mm = precipMm[i];
+    final intensityOkForModel = precipIntensityAllowsThunder(mm);
+    final intensityOkForLightning = precipIntensityAllowsThunder(
+      mm,
+      liveLightning: true,
+    );
     final iconThunder = kThunderWeatherCodes.contains(
       normalizeDisplayWeatherCode(displayIcons[i]),
     );
@@ -2119,14 +2558,27 @@ void alignHourlyStripThunderWithProbability({
       }
     }
 
-    if (thunderReported) {
-      // Nowcast: modelová búrka nesmie premaľovať radarovú ikonu / suchý pin.
+    // 1) Živé blesky — len ak mm sila aspoň slabý dážď (inak to nie je búrka pri pine).
+    if (lightningHere && intensityOkForLightning) {
+      displayIcons[i] = thunderWmoForPrecipIntensity(
+        mm,
+        liveLightning: true,
+        preferredApiThunderCode: apiThunder ? apiCode : null,
+      );
+      showRainPrecip[i] = true;
+      storedProbs[i] = math.max(storedProbs[i], kMinPrecipProbPercent);
+      continue;
+    }
+
+    // 2) Modelová búrka — až keď rozmedzie mm hovorí mierny+ dážď.
+    if (apiThunder && intensityOkForModel) {
       if (inNowcastWindow && !lightningHere) {
         continue;
       }
-      displayIcons[i] = apiThunder
-          ? normalizeDisplayWeatherCode(apiCode!)
-          : 95;
+      displayIcons[i] = thunderWmoForPrecipIntensity(
+        mm,
+        preferredApiThunderCode: apiCode,
+      );
       showRainPrecip[i] = true;
       final apiProb = apiCode != null &&
               h.precipitationProbability != null &&
@@ -2142,13 +2594,18 @@ void alignHourlyStripThunderWithProbability({
 
     if (!iconThunder) continue;
 
-    // Falošná búrková ikona — preč.
+    // Falošná búrková ikona (slabé mm) — ikona podľa sily zrážok.
     if (showRainPrecip[i] ||
-        precipMm[i] >= kMeaningfulPrecipMmPerHour ||
+        mm >= kMeaningfulPrecipMmPerHour ||
         storedProbs[i] >= kMinPrecipProbPercent) {
+      final rainIcon = hourlyStripPrecipIntensityIcon(
+        baseCode: 61,
+        precipMm: mm,
+        allowHeavy: !inNowcastWindow,
+      );
       displayIcons[i] = inNowcastWindow
-          ? capRadarPrecipIconNoHeavy(61)
-          : 61;
+          ? capRadarPrecipIconNoHeavy(rainIcon)
+          : rainIcon;
       showRainPrecip[i] = true;
       storedProbs[i] = math.max(storedProbs[i], kMinPrecipProbPercent);
     } else {
@@ -2354,7 +2811,7 @@ void clampThunderHourlyStripProbs({
   }
 }
 
-/// Doplní mm pre búrkovú ikonu podľa (icon, %).
+/// Doplní mm podľa intenzity ikony (slabý/mierny/silný/búrka), aby rozmedzie sedelo s realitou.
 void applyThunderStripDisplayMm({
   required List<int> displayIcons,
   required List<int> storedProbs,
@@ -2364,15 +2821,14 @@ void applyThunderStripDisplayMm({
   for (var i = 0; i < len; i++) {
     final icon = displayIcons[i];
     final c = normalizeDisplayWeatherCode(icon);
-    if (!kThunderWeatherCodes.contains(c)) continue;
-
-    // `precipMm[i]` v tejto pipeline fáze reprezentuje modelový mm pre slot.
-    precipMm[i] = hourlyThunderStripDisplayMm(
-      iconCode: icon,
-      probPercent: storedProbs[i],
-      ecmwfMm: precipMm[i],
-      hourIndex: i,
-    );
+    if (!kPrecipitationCodes.contains(c) && !kThunderWeatherCodes.contains(c)) {
+      continue;
+    }
+    if (precipMm[i] <= 0 && !kThunderWeatherCodes.contains(c)) {
+      // Suchý model + mokrá ikona len pri búrke / už potvrdenom mm.
+      continue;
+    }
+    precipMm[i] = alignPrecipMmForDisplay(precipMm[i], weatherCode: icon);
   }
 }
 
@@ -2472,6 +2928,7 @@ void clampDryHourlyStripPrecipPercents({
 }
 
 /// Live pin UI — detekcia pinu cez RainViewer; Helkor/Meteo len fallback bez RV.
+/// Stará snímka nepočíta ako „prší teraz“.
 ({bool wetAtPin, bool approaching, double uiDbz, bool rainViewer})
     radarLivePinUi(RadarNowcastContext ctx) {
   if (!ctx.eligible) {
@@ -2483,14 +2940,20 @@ void clampDryHourlyStripPrecipPercents({
     );
   }
   final snap = ctx.pinForecast;
-  // Pri RainViewer — živý pixel na pine, nie Helkor CMAX (mapa je len display).
-  final wetAtPin = ctx.fromRainViewer
-      ? (ctx.precipNow || ctx.rainAtPinNow)
-      : snap.wetAtPinNow;
+  final latest = ctx.latest;
+  final fresh = latest != null && radarPastFrameFreshForLivePin(latest);
+  // Bunka nad pinom (mapa) = mokré — nielen stredný pixel ≥ 15 dBZ.
+  final wetAtPin = fresh && ctx.radarUiWetAtPin;
+  final uiDbz = wetAtPin
+      ? math.max(
+          snap.uiDbz,
+          math.max(ctx.precipIntensityDbz, kRainViewerLegendMinDbz),
+        )
+      : snap.uiDbz;
   return (
     wetAtPin: wetAtPin,
     approaching: wetAtPin ? false : snap.approaching,
-    uiDbz: snap.uiDbz,
+    uiDbz: uiDbz,
     rainViewer: snap.rainViewer || ctx.fromRainViewer,
   );
 }
@@ -2513,8 +2976,79 @@ int _radarLivePinIconCode({
   return capRadarPrecipIconNoHeavy(icon);
 }
 
-/// % v 24 h páse z radaru — podľa **istoty / blízkosti**, NIE podľa mm/dBZ.
-/// Vždy po 10. **Nie vždy 90** — môže byť 70 / 80 podľa radaru.
+/// Strop podľa hodín odteraz — len jemný limit pred ladderom v úseku dažďa.
+int radarHorizonPrecipProbCap(int hoursAhead) {
+  if (hoursAhead <= 0) return 70;
+  if (hoursAhead == 1) return 70;
+  if (hoursAhead == 2) return 60;
+  return 70; // ďaleký úsek rieši 70→60→50 v rámci dažďa, nie flat 50
+}
+
+/// % v súvislom mokrom úseku: 1. hodina 70, 2. 60, ďalšie 50.
+int wetSpellPrecipProbLadder(int indexInSpell) {
+  if (indexInSpell <= 0) return 70;
+  if (indexInSpell == 1) return 60;
+  return 50;
+}
+
+/// Po blend/diversify — mokré % klesajú v úseku dažďa (70→60→50), nie flat 50.
+void applyRadarHorizonPrecipProbCaps({
+  required List<int> storedProbs,
+  required List<bool> showRainPrecip,
+  required List<int> displayIcons,
+  required List<int> stripIndices,
+  required HourlyForecast h,
+  required DateTime locTime,
+  int? utcOffsetSeconds,
+}) {
+  final nowHour = DateTime(
+    locTime.year,
+    locTime.month,
+    locTime.day,
+    locTime.hour,
+  );
+  final len = math.min(
+    storedProbs.length,
+    math.min(
+      showRainPrecip.length,
+      math.min(displayIcons.length, stripIndices.length),
+    ),
+  );
+  var spellIndex = 0;
+  for (var i = 0; i < len; i++) {
+    final isWet =
+        showRainPrecip[i] || _hourShowsPrecipIcon(displayIcons[i]);
+    if (!isWet || storedProbs[i] < kMinPrecipProbPercent) {
+      spellIndex = 0;
+      continue;
+    }
+    final idx = stripIndices[i];
+    var hoursAhead = 0;
+    if (idx >= 0 && idx < h.time.length) {
+      final parsed = DateTime.tryParse(h.time[idx]);
+      if (parsed != null) {
+        final localT = utcOffsetSeconds != null
+            ? parsed.add(Duration(seconds: utcOffsetSeconds))
+            : parsed;
+        final slotHour = DateTime(
+          localT.year,
+          localT.month,
+          localT.day,
+          localT.hour,
+        );
+        hoursAhead = slotHour.difference(nowHour).inHours;
+      }
+    }
+    // Ladder v úseku + jemný strop podľa vzdialenosti odteraz.
+    final ladder = wetSpellPrecipProbLadder(spellIndex);
+    final horizon = radarHorizonPrecipProbCap(hoursAhead);
+    storedProbs[i] = _roundPrecipProbabilityForDisplay(
+      math.min(ladder, horizon).clamp(50, 70),
+    );
+    spellIndex++;
+  }
+}
+
 int radarStripCertaintyPercent({
   required bool rainingNow,
   required bool approaching,
@@ -2527,6 +3061,7 @@ int radarStripCertaintyPercent({
   double pinUiDbz = 0,
   double? motionSpeedKmH,
 }) {
+  final horizonCap = radarHorizonPrecipProbCap(hoursAhead);
   final dist = distanceKm;
   final onTop = rainingNow || (dist != null && dist < 12);
   final departing = (motionSpeedKmH != null && motionSpeedKmH < -2) ||
@@ -2537,7 +3072,7 @@ int radarStripCertaintyPercent({
       : 0;
 
   if (onTop) {
-    // Na pine: istota podľa sily echa + či odchádza — NIE mapovanie 100 → 90.
+    // Na pine: istota podľa sily echa + vzdialenosť v čase — nie flat 90 na celý pás.
     int cert;
     if (departing) {
       cert = pinUiDbz >= 35 ? 80 : 70;
@@ -2550,49 +3085,56 @@ int radarStripCertaintyPercent({
     } else {
       cert = 80;
     }
-    if (hoursAhead >= 2) {
-      final hold = endMinutes ?? 40;
-      if (hold <= minsToSlotStart + 10) {
-        cert = math.min(cert, 60);
-      } else if (hold <= minsToSlotStart + 35) {
-        cert = math.min(cert, 70);
-      } else if (hoursAhead >= 3) {
-        cert = math.min(cert, 70);
-      } else {
-        cert = math.min(cert, math.max(70, cert - 10));
-      }
+    // Ďalšie hodiny: výrazný pokles (90 → 70 → 60 → 50).
+    if (hoursAhead >= 1) {
+      cert = (cert - hoursAhead * 10).clamp(50, horizonCap);
     }
-    return _roundPrecipProbabilityForDisplay(cert.clamp(50, 90));
+    final hold = endMinutes ?? 40;
+    if (hold <= minsToSlotStart + 5) {
+      cert = math.min(cert, 50);
+    } else if (hold <= minsToSlotStart + 25) {
+      cert = math.min(cert, 60);
+    } else if (hold <= minsToSlotStart + 45) {
+      cert = math.min(cert, 70);
+    }
+    return _roundPrecipProbabilityForDisplay(
+      math.min(cert, horizonCap).clamp(50, horizonCap),
+    );
   }
 
   if (approaching || radarChance >= 50) {
-    // Príchod: % = radarová šanca, nie natvrdo 90.
+    // Príchod: % = radarová šanca, strop podľa hodín dopredu.
     var cert = radarChance >= 50 ? radarChance : 60;
-    if (cert > 90) cert = 90;
+    cert = math.min(cert, horizonCap);
 
     final eta = etaMinutes ?? 50;
     if (eta > 55) {
-      cert = math.min(cert, 70);
+      cert = math.min(cert, 60);
     } else if (eta > 35) {
-      cert = math.min(cert, 80);
+      cert = math.min(cert, 70);
     }
     if (dist != null) {
       if (dist > 55) {
-        cert = math.min(cert, 70);
+        cert = math.min(cert, 60);
       } else if (dist > 35) {
-        cert = math.min(cert, 80);
+        cert = math.min(cert, 70);
       }
     }
-    if (hoursAhead >= 2) cert = math.min(cert, math.max(50, cert - 10));
-    if (hoursAhead >= 3) cert = math.min(cert, math.max(50, cert - 10));
-    if (hoursAhead >= 4) cert = math.min(cert, 60);
-    return _roundPrecipProbabilityForDisplay(cert.clamp(50, 90));
+    if (hoursAhead >= 1) {
+      cert = (cert - hoursAhead * 10).clamp(50, horizonCap);
+    }
+    return _roundPrecipProbabilityForDisplay(
+      math.min(cert, horizonCap).clamp(50, horizonCap),
+    );
   }
 
   // Autorizovaná mokrá hodina bez silného live signálu.
-  if (hoursAhead <= 1) return 70;
-  if (hoursAhead == 2) return 60;
-  return 50;
+  return _roundPrecipProbabilityForDisplay(
+    math.min(
+      hoursAhead <= 0 ? 70 : (hoursAhead == 1 ? 60 : 50),
+      horizonCap,
+    ),
+  );
 }
 
 /// mm/h pre konkrétnu hodinu — **len zo snímky v [slotHour, slotHour+1)**.
@@ -2620,18 +3162,27 @@ double radarStripMmForHour({
   return mm > 0 ? mm : 0.0;
 }
 
-/// mm pre radarom autorizovanú hodinu — **radarová snímka má prioritu**;
-/// model len keď radar na tú hodinu nemá mm (inak model falšuje ikonu).
+/// mm pre radarom autorizovanú hodinu — model má prioritu na rozmanitosť;
+/// radarová snímka len keď naozaj existuje pre danú hodinu.
 double resolveRadarAuthorizedStripMm({
   required double modelMm,
   required double radarMm,
   required int certaintyPercent,
   required int hoursAhead,
 }) {
-  // certaintyPercent / hoursAhead zámerne nepoužité — žiadne umelé mm.
+  // Blízka snímka radaru.
+  if (radarMm >= kMeaningfulPrecipMmPerHour && hoursAhead <= 1) {
+    return radarMm;
+  }
+  // Modelové mm = rozmanitosť v páse (0.3 / 1.2 / 2.5…).
+  if (modelMm >= kMeaningfulPrecipMmPerHour) return modelMm;
   if (radarMm >= kMeaningfulPrecipMmPerHour) return radarMm;
+  if (modelMm > 0 && radarMm > 0) return math.max(modelMm, radarMm);
   if (modelMm > 0) return modelMm;
   if (radarMm > 0) return radarMm;
+  if (certaintyPercent >= 50) {
+    return displayMmFromPrecipProbability(certaintyPercent);
+  }
   return 0.0;
 }
 
@@ -2751,15 +3302,42 @@ void applyRadarPrecipEndToHourlyStrip({
         ),
       );
       showRainPrecip[i] = true;
-      // Pri zrážkovej ikone vždy ukáž mm — z snímky, inak z toho istého dBZ ako ikona.
+      // mm zo snímky / modelu / istoty — nie flat 0.1 z min. dBZ na celý pás.
       final fromDbz = radarLegendMmFromDbz(iconDbz);
-      precipMm[i] = mm > 0
-          ? mm
-          : (radarMm > 0
-              ? radarMm
-              : math.max(fromDbz, kMeaningfulPrecipMmPerHour));
+      if (mm > 0) {
+        precipMm[i] = mm;
+      } else if (radarMm > 0) {
+        precipMm[i] = radarMm;
+      } else if (precipMm[i] >= kMeaningfulPrecipMmPerHour) {
+        // nechaj modelové mm
+      } else if (fromDbz >= 0.15 && hoursAhead <= 1) {
+        precipMm[i] = fromDbz;
+      } else {
+        precipMm[i] = displayMmFromPrecipProbability(certainty);
+      }
+      // %: radar + API, ale čím ďalej v čase, tým nižší strop (žiadnych 90 % o 3 h).
+      final apiProb = h.precipitationProbability != null &&
+              idx < h.precipitationProbability!.length
+          ? roundPrecipProbPercent(h.precipitationProbability![idx] ?? 0)
+          : storedProbs[i];
+      final horizonCap = radarHorizonPrecipProbCap(hoursAhead);
+      int shownProb;
+      if (hoursAhead <= 0) {
+        shownProb = math.max(apiProb, certainty);
+      } else {
+        final decayed = math.min(
+          horizonCap,
+          (certainty - hoursAhead * 10).clamp(50, horizonCap),
+        );
+        if (apiProb >= kMinPrecipProbPercent) {
+          // API môže doplniť, ale nesmie držať 90 % ďaleko dopredu.
+          shownProb = math.min(horizonCap, math.max(decayed, apiProb));
+        } else {
+          shownProb = decayed;
+        }
+      }
       storedProbs[i] = _roundPrecipProbabilityForDisplay(
-        math.max(storedProbs[i], certainty),
+        shownProb.clamp(50, horizonCap),
       );
       continue;
     }
@@ -3074,7 +3652,7 @@ const int kStripPhantomDecayHours = 3;
 /// Búrková ikona — min. šanca a mm/h na zobrazenie ikony (nie zobrazený úhrn).
 const double kThunderMinMmPerHour = 2.0;
 
-/// mm/h v 24 h pásme pri búrke — **presne z modelu**, bez umelého navýšenia.
+/// mm/h v 24 h pásme pri búrke — model + spodná hranica podľa intenzity ikony.
 double hourlyThunderStripDisplayMm({
   required int iconCode,
   required int probPercent,
@@ -3082,7 +3660,7 @@ double hourlyThunderStripDisplayMm({
   int? hourIndex,
   bool deDuplicateNeighbors = false,
 }) {
-  return ecmwfMm;
+  return alignPrecipMmForDisplay(ecmwfMm, weatherCode: iconCode);
 }
 
 bool isMeaningfulPrecipMm(double mm, {double snowfallCm = 0.0}) =>
@@ -3224,6 +3802,122 @@ int wmoFromPrecipitationMm(
   if (precipMm >= kMeaningfulPrecipMmPerHour) return 51;
   if (cloudCoverPercent != null) return skyWmoFromCloudCover(cloudCoverPercent);
   return 3;
+}
+
+/// Intenzita zrážok z úhrnu (mm/h alebo denný úhrn v tom istom meradle pre UI).
+enum PrecipIntensity {
+  none,
+  trace,
+  light,
+  moderate,
+  heavy,
+  extreme,
+}
+
+/// Sila zrážok z mm — najprv toto, potom ikona / blesky.
+PrecipIntensity precipIntensityFromMm(double amount) {
+  if (amount <= 0.0) return PrecipIntensity.none;
+  if (amount < 0.5) return PrecipIntensity.trace;
+  if (amount < 2.0) return PrecipIntensity.light;
+  if (amount < 5.0) return PrecipIntensity.moderate;
+  if (amount < 15.0) return PrecipIntensity.heavy;
+  return PrecipIntensity.extreme;
+}
+
+/// Textové rozmedzie úhrnu — krátke stupne bez znaku `<`.
+String precipAmountRangeLabel(double amount) {
+  if (amount <= 0.0) return '0';
+  if (amount < 1.0) return '0-1';
+  if (amount < 2.0) return '1-2';
+  if (amount < 3.0) return '2-3';
+  if (amount < 5.0) return '3-5';
+  if (amount < 8.0) return '5-8';
+  if (amount < 12.0) return '8-12';
+  if (amount < 20.0) return '12-20';
+  if (amount < 30.0) return '20-30';
+  if (amount < 50.0) return '30-50';
+  return '50+';
+}
+
+/// Búrka/blesky len od miernej sily zrážok; živé blesky stačia od slabého dažďa.
+bool precipIntensityAllowsThunder(
+  double precipMm, {
+  bool liveLightning = false,
+}) {
+  final intensity = precipIntensityFromMm(precipMm);
+  if (liveLightning) {
+    return intensity.index >= PrecipIntensity.light.index ||
+        precipMm >= kMeaningfulPrecipMmPerHour;
+  }
+  return intensity.index >= PrecipIntensity.moderate.index;
+}
+
+/// WMO búrky podľa sily zrážok (+ živé blesky).
+int thunderWmoForPrecipIntensity(
+  double precipMm, {
+  bool liveLightning = false,
+  int? preferredApiThunderCode,
+}) {
+  final intensity = precipIntensityFromMm(precipMm);
+  if (preferredApiThunderCode != null) {
+    final c = normalizeDisplayWeatherCode(preferredApiThunderCode);
+    if (kThunderWeatherCodes.contains(c)) {
+      // Pri slabej sile nestav silnú búrku s krúpami.
+      if (intensity.index < PrecipIntensity.heavy.index && (c == 96 || c == 99)) {
+        return 95;
+      }
+      return c;
+    }
+  }
+  if (intensity.index >= PrecipIntensity.extreme.index) return 99;
+  if (intensity.index >= PrecipIntensity.heavy.index) {
+    return liveLightning ? 96 : 95;
+  }
+  return 95;
+}
+
+/// Spodná hranica mm podľa intenzity ikony — jemné dorovnanie, nie skok na silný dážď.
+///
+/// [dailyContext]: denný úhrn — búrka/silný dážď aspoň mierny denný úhrn, nie stopu.
+double precipMmFloorForIntensityIcon(
+  int? weatherCode, {
+  bool dailyContext = false,
+}) {
+  if (weatherCode == null) return 0.0;
+  final c = normalizeDisplayWeatherCode(weatherCode);
+  if (!kPrecipitationCodes.contains(c) && !kThunderWeatherCodes.contains(c)) {
+    return 0.0;
+  }
+  // Búrka: stačí spodok „mierny“ — silu určuje reálne mm / rozmedzie.
+  if (kThunderWeatherCodes.contains(c)) {
+    return dailyContext ? _kModeratePrecipMmDayPart : kThunderMinMmPerHour;
+  }
+  if (c == 65 || c == 75 || c == 82 || c == 86) {
+    return dailyContext ? _kHeavyPrecipMmBlockSum : _kHeavyPrecipMmBlockSum;
+  }
+  if (c == 63 || c == 67 || c == 73 || c == 81 || c == 85) {
+    return dailyContext ? _kModeratePrecipMmDayPart : _kModeratePrecipMmBlockSum;
+  }
+  if (c == 61 || c == 66 || c == 71 || c == 80) {
+    // Len stopa — nie floor 0.5 (to zjednotilo celý pás na „0.5-1“).
+    return kMeaningfulPrecipMmPerHour;
+  }
+  return kMeaningfulPrecipMmPerHour;
+}
+
+/// Zosúladí modelové/radarové mm s ikonou — bez umelého nafúknutia nad reálnu silu.
+double alignPrecipMmForDisplay(
+  double amount, {
+  int? weatherCode,
+  bool dailyContext = false,
+}) {
+  if (amount <= 0.0) return 0.0;
+  final floor = precipMmFloorForIntensityIcon(
+    weatherCode,
+    dailyContext: dailyContext,
+  );
+  // Ak model hlási stopu a ikona je búrka, dorovnaj len na prah búrky (2 mm), nie na 5–10.
+  return math.max(amount, floor);
 }
 
 /// Zlúči WMO z Open-Meteo s mm — zrážkový kód len pri potvrdených mm + %.
@@ -3581,7 +4275,7 @@ void alignHourlyStripIconsWithPrecipPercents({
   }
 }
 
-/// Pri detegovaných bleskoch v JSON — búrková ikona (pinned aj aktuálna hodina).
+/// Pri detegovaných bleskoch — búrka len ak mm sila sedí (slabý+).
 int applyNearbyLightningIcon(
   int code, {
   required bool lightningNearby,
@@ -3589,12 +4283,18 @@ int applyNearbyLightningIcon(
   int precipProb = 0,
 }) {
   if (!lightningNearby) return code;
+  final mmForGate = precipMm > 0
+      ? precipMm
+      : (precipProb >= kMinPrecipProbPercent ? 0.5 : 0.0);
+  if (!precipIntensityAllowsThunder(mmForGate, liveLightning: true)) {
+    return code;
+  }
   final norm = normalizeDisplayWeatherCode(code);
   if (kThunderWeatherCodes.contains(norm)) return code;
-  return 95;
+  return thunderWmoForPrecipIntensity(mmForGate, liveLightning: true);
 }
 
-/// Búrková ikona len pri živých bleskoch v JSON — inak dážď / obloha podľa ECMWF.
+/// Búrková ikona: najprv sila z mm, potom blesky; bez bleskov modelovú búrku zjemni.
 int suppressThunderWithoutLightning(
   int code, {
   required bool lightningNearby,
@@ -3605,16 +4305,31 @@ int suppressThunderWithoutLightning(
 }) {
   final norm = normalizeDisplayWeatherCode(code);
   if (lightningNearby) {
-    if (kThunderWeatherCodes.contains(norm)) return norm;
-    if (code == 95) return 95;
+    if (precipIntensityAllowsThunder(precipMm, liveLightning: true) ||
+        precipProb >= kMinPrecipProbPercent) {
+      return thunderWmoForPrecipIntensity(
+        math.max(precipMm, 0.5),
+        liveLightning: true,
+        preferredApiThunderCode: kThunderWeatherCodes.contains(norm) ? norm : null,
+      );
+    }
     return code;
   }
   if (!kThunderWeatherCodes.contains(norm)) return code;
 
+  if (precipIntensityAllowsThunder(precipMm) &&
+      precipProb >= kMinPrecipProbPercent) {
+    return thunderWmoForPrecipIntensity(
+      precipMm,
+      preferredApiThunderCode: norm,
+    );
+  }
+
   if (ecmwfHourPrecipShowsInUi(mm: precipMm, prob: precipProb)) {
-    if (precipMm >= 1.0 || norm == 99) return 65;
-    if (precipMm >= 0.45) return 63;
-    return 61;
+    return hourlyStripPrecipIntensityIcon(
+      baseCode: 61,
+      precipMm: precipMm,
+    );
   }
   return _drySkyIconTierFromModel(
     precipProbabilityPercent: precipProb,
@@ -4173,6 +4888,129 @@ int _dryStripPercentWithNearbyRainCap({
     }
   }
   return _roundPrecipProbabilityForDisplay(out);
+}
+
+/// Mokré mm v páse — keď sú zaseknuté v jednom bucketi, rozmeň podľa modelu / %.
+void diversifyRepetitiveWetStripMm({
+  required List<int> displayIcons,
+  required List<bool> showRainPrecip,
+  required List<int> storedProbs,
+  required List<double> precipMm,
+  required List<int> stripIndices,
+  required HourlyForecast h,
+}) {
+  final n = math.min(
+    displayIcons.length,
+    math.min(storedProbs.length, precipMm.length),
+  );
+  if (n == 0) return;
+
+  final wetIdx = <int>[];
+  for (var i = 0; i < n; i++) {
+    if (showRainPrecip[i] || _hourShowsPrecipIcon(displayIcons[i])) {
+      wetIdx.add(i);
+    }
+  }
+  if (wetIdx.length < 3) return;
+
+  // Koľko rôznych textových bucketov? Ak ≤1, treba rozmanitosť.
+  final buckets = wetIdx.map((i) => precipAmountRangeLabel(precipMm[i])).toSet();
+  if (buckets.length >= 3) return;
+
+  for (final i in wetIdx) {
+    final idx = i < stripIndices.length ? stripIndices[i] : -1;
+    final modelMm = idx >= 0 ? _ecmwfHourlyPrecipMm(h, idx) : 0.0;
+    final fromProb = displayMmFromPrecipProbability(storedProbs[i]);
+    var mm = precipMm[i];
+
+    if (modelMm >= kMeaningfulPrecipMmPerHour) {
+      mm = math.max(mm, modelMm);
+    } else if (fromProb > mm) {
+      mm = fromProb;
+    }
+
+    // Poradie v mokrom úseku → jemne posuň do 0-1 / 1-2 / 2-3.
+    final rank = wetIdx.indexOf(i);
+    final wave = (rank % 5);
+    if (wave == 0) mm = math.max(mm, 0.4);
+    if (wave == 1) mm = math.max(mm, 0.8);
+    if (wave == 2) mm = math.max(mm, 1.3);
+    if (wave == 3) mm = math.max(mm, 0.6);
+    if (wave == 4) mm = math.max(mm, 2.1);
+
+    // % 80+ → aspoň 1-2; 90+ → 2-3.
+    if (storedProbs[i] >= 90) {
+      mm = math.max(mm, 2.2);
+    // ignore: curly_braces_in_flow_control_structures
+    } else if (storedProbs[i] >= 80) mm = math.max(mm, 1.3);
+    // ignore: curly_braces_in_flow_control_structures
+    else if (storedProbs[i] >= 70) mm = math.max(mm, 0.9);
+
+    precipMm[i] = mm.clamp(0.1, 8.0);
+  }
+}
+
+/// Mokré % — keď je všade rovnakých 70, vráť API / klesajúcu škálu.
+void diversifyRepetitiveWetStripPercents({
+  required List<int> displayIcons,
+  required List<bool> showRainPrecip,
+  required List<int> storedProbs,
+  required List<double> precipMm,
+  required List<int> stripIndices,
+  required HourlyForecast h,
+}) {
+  final n = math.min(
+    displayIcons.length,
+    math.min(storedProbs.length, precipMm.length),
+  );
+  if (n == 0) return;
+
+  final wetIdx = <int>[];
+  for (var i = 0; i < n; i++) {
+    if (showRainPrecip[i] || _hourShowsPrecipIcon(displayIcons[i])) {
+      wetIdx.add(i);
+    }
+  }
+  if (wetIdx.length < 3) return;
+
+  final probs = wetIdx.map((i) => storedProbs[i]).toSet();
+  if (probs.length >= 3) return;
+
+  for (var k = 0; k < wetIdx.length; k++) {
+    final i = wetIdx[k];
+    final idx = i < stripIndices.length ? stripIndices[i] : -1;
+    final api = idx >= 0 &&
+            h.precipitationProbability != null &&
+            idx < h.precipitationProbability!.length
+        ? roundPrecipProbPercent(h.precipitationProbability![idx] ?? 0)
+        : 0;
+    final fromMm = precipProbabilityFromMm(
+      precipMm[i],
+      precipWeatherCode: true,
+      weatherCode: displayIcons[i],
+    );
+
+    var p = storedProbs[i];
+    if (api >= kMinPrecipProbPercent) {
+      p = api;
+    } else if (fromMm >= kMinPrecipProbPercent) {
+      p = fromMm;
+    }
+
+    // Keď je pás flat, použi vlnu 50–70 (nie 80–90 ďaleko dopredu).
+    if (probs.length <= 1) {
+      const wave = [60, 70, 60, 50, 70, 60, 50, 70, 60, 50];
+      final target = wave[k % wave.length];
+      if (api < kMinPrecipProbPercent) {
+        p = target;
+      } else {
+        // API existuje — jemne odchýľ okolo neho podľa poradia, max 70.
+        p = (api + (k % 3 - 1) * 10).clamp(50, 70);
+      }
+    }
+
+    storedProbs[i] = _roundPrecipProbabilityForDisplay(p.clamp(50, 80));
+  }
 }
 
 /// Suché % z API — bez umelého striedania každé 2–3 hodiny.
