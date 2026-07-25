@@ -767,14 +767,39 @@ class LocalTestPushService {
     }
   }
 
-  /// Samostatný systémový dialóg oznámení (napr. zapnutie súhrnov v nastaveniach bez OneSignal onboardingu).
-  static Future<void> requestPermissionsFromUserAction() async {
-    if (!_initialized) return;
-    final androidImpl =
-        _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-    await androidImpl?.requestNotificationsPermission();
-    final iosImpl = _plugin.resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>();
-    await iosImpl?.requestPermissions(alert: true, badge: true, sound: true);
+  /// Systémový dialóg oznámení — bez OneSignal (ten vie pri úspore dát visieť).
+  /// Vráti true ak používateľ povolil (alebo už bolo povolené).
+  static Future<bool> requestPermissionsFromUserAction() async {
+    if (kIsWeb) return true;
+    if (!_initialized) {
+      try {
+        await initialize();
+      } catch (_) {
+        return false;
+      }
+    }
+    if (!_initialized) return false;
+    try {
+      if (Platform.isAndroid) {
+        final androidImpl = _plugin
+            .resolvePlatformSpecificImplementation<
+                AndroidFlutterLocalNotificationsPlugin>();
+        final result = await androidImpl?.requestNotificationsPermission();
+        return result ?? false;
+      }
+      if (Platform.isIOS) {
+        final iosImpl = _plugin
+            .resolvePlatformSpecificImplementation<
+                IOSFlutterLocalNotificationsPlugin>();
+        final result = await iosImpl?.requestPermissions(
+          alert: true,
+          badge: true,
+          sound: true,
+        );
+        return result ?? false;
+      }
+    } catch (_) {}
+    return false;
   }
 
   static Future<bool> areSystemNotificationsEnabled() async {
@@ -1094,36 +1119,47 @@ class LocalTestPushService {
 Future<bool> hasInternetConnection() async {
   Future<bool> probe(String host) async {
     try {
-      final result = await InternetAddress.lookup(host).timeout(const Duration(seconds: 4));
+      final result =
+          await InternetAddress.lookup(host).timeout(const Duration(seconds: 2));
       return result.isNotEmpty && result[0].rawAddress.isNotEmpty;
-    } on SocketException catch (_) {
-      return false;
-    } on TimeoutException catch (_) {
-      return false;
-    } catch (_) {
-      return false;
-    }
-  }
-  Future<bool> probeHttp(String url) async {
-    try {
-      final uri = Uri.parse(url);
-      final response = await http.get(uri).timeout(const Duration(seconds: 5));
-      // Stačí, že server odpovie - aj 4xx znamená, že internet funguje.
-      return response.statusCode > 0;
-    } on SocketException catch (_) {
-      return false;
-    } on TimeoutException catch (_) {
-      return false;
     } catch (_) {
       return false;
     }
   }
 
-  if (await probe('api.open-meteo.com')) return true;
-  if (await probe('google.com')) return true;
-  if (await probeHttp('https://api.open-meteo.com/')) return true;
-  if (await probeHttp('https://www.google.com/generate_204')) return true;
-  return false;
+  Future<bool> probeHttp(String url) async {
+    try {
+      final response =
+          await http.get(Uri.parse(url)).timeout(const Duration(seconds: 2));
+      return response.statusCode > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Prvý úspech hneď — pri úspore dát nesekvenčne čakať desiatky sekúnd.
+  final done = Completer<bool>();
+  var pending = 3;
+  void settle(bool ok) {
+    if (ok && !done.isCompleted) {
+      done.complete(true);
+      return;
+    }
+    pending--;
+    if (pending <= 0 && !done.isCompleted) {
+      done.complete(false);
+    }
+  }
+
+  unawaited(probe('api.open-meteo.com').then(settle));
+  unawaited(probe('dns.google').then(settle));
+  unawaited(probeHttp('https://www.google.com/generate_204').then(settle));
+
+  try {
+    return await done.future.timeout(const Duration(seconds: 2));
+  } on TimeoutException {
+    return false;
+  }
 }
 
 /// Získanie aktuálneho cloud cover

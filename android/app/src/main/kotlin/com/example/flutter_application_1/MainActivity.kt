@@ -13,6 +13,9 @@ class MainActivity : FlutterActivity() {
     private var originalStatusBarColor: Int = Color.TRANSPARENT
     private var originalNavBarColor: Int = Color.TRANSPARENT
 
+    /** Rovnaká farba ako Flutter kAmbientBlendColor — len keď appka nie je viditeľná. */
+    private val recentsBarColor: Int = Color.parseColor("#FF172438")
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(
@@ -44,33 +47,41 @@ class MainActivity : FlutterActivity() {
         super.onCreate(savedInstanceState)
         // Edge-to-edge bez enableEdgeToEdge() — to je len pre ComponentActivity, nie FlutterActivity.
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        // Priesvitné system lišty (inak OS pridá svetlý „scrim" pod 3-tlačidlovú navigáciu).
-        window.statusBarColor = Color.TRANSPARENT
-        window.navigationBarColor = Color.TRANSPARENT
+        applyTransparentSystemBars()
         originalStatusBarColor = Color.TRANSPARENT
         originalNavBarColor = Color.TRANSPARENT
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            window.isNavigationBarContrastEnforced = false
-            window.isStatusBarContrastEnforced = false
-        }
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
     }
 
-    override fun onPause() {
-        super.onPause()
-        // Pri pozastavení (app switcher) nastaviť pevnú farbu namiesto transparent
-        // aby sa zabránilo grafickým artefaktom (mriežkam) v náhľade
-        window.statusBarColor = Color.parseColor("#FF2D3A4A")
-        window.navigationBarColor = Color.parseColor("#FF2D3A4A")
+    override fun onStart() {
+        super.onStart()
+        // Späť na obrazovku — priehľadné lišty (aj po systémovom dialógu oprávnení).
+        applyTransparentSystemBars()
     }
 
     override fun onResume() {
         super.onResume()
-        // Pri obnovení vrátiť priehľadné lišty
-        window.statusBarColor = originalStatusBarColor
-        window.navigationBarColor = originalNavBarColor
+        applyTransparentSystemBars()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Len keď appka nie je viditeľná (recents / iná appka).
+        // onPause NIE — systémový dialóg upozornení/polohy pause-uje Activity a inak
+        // by navigation bar zčernal pri „Povoliť upozornenia“.
+        window.statusBarColor = recentsBarColor
+        window.navigationBarColor = recentsBarColor
+    }
+
+    private fun applyTransparentSystemBars() {
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+            window.isStatusBarContrastEnforced = false
+        }
     }
 }

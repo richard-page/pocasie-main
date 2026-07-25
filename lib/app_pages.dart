@@ -1338,25 +1338,9 @@ class _OnboardingPageState extends State<OnboardingPage>
   }
 
   Future<void> _checkInternetAndContinue() async {
-    setState(() {
-      _checkingInternet = true;
-    });
-
-    final hasInternet = await hasInternetConnection();
-
-    if (!hasInternet) {
-      setState(() {
-        _isOffline = true;
-        _checkingInternet = false;
-      });
-      return;
-    }
-
-    setState(() {
-      _checkingInternet = false;
-      _isOffline = false;
-    });
-
+    // Žiadny predbežný internet check — pri úspore dát DNS/HTTP viazlo
+    // a systémový dialóg polohy sa ukazoval až po dlhom „Spracovávam…“.
+    // Reverse geocode po GPS pri výpadku aj tak spadne na manuálny výber.
     await _continueWithLocation();
   }
 
@@ -1395,12 +1379,12 @@ class _OnboardingPageState extends State<OnboardingPage>
       }
 
       Position? pos = await Geolocator.getLastKnownPosition()
-          .timeout(const Duration(milliseconds: 800), onTimeout: () => null);
+          .timeout(const Duration(milliseconds: 500), onTimeout: () => null);
       try {
         pos ??= await Geolocator.getCurrentPosition(
           locationSettings: const LocationSettings(
             accuracy: LocationAccuracy.low,
-            timeLimit: Duration(seconds: 15),
+            timeLimit: Duration(seconds: 4),
           ),
         );
       } catch (_) {
@@ -1425,7 +1409,7 @@ class _OnboardingPageState extends State<OnboardingPage>
         pos.latitude,
         pos.longitude,
         resolveTimezone: false,
-      );
+      ).timeout(const Duration(seconds: 5), onTimeout: () => null);
       if (!mounted) return;
       if (city == null) {
         setState(() => _busy = false);
@@ -1712,19 +1696,25 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
     });
 
     try {
+      // Natívny dialóg hneď — OneSignal.canRequest/requestPermission pri úspore dát
+      // čaká na sieť a dialóg sa ukazoval až po dlhom „Spracovávam…“.
       var granted = false;
-      // false = žiadny anglický OneSignal dialóg; vlastný SK návod nižšie.
-      // Timeout — canRequest/requestPermission vie visieť a nechať „Spracovávam…“.
       try {
-        final canRequest = await OneSignal.Notifications.canRequest()
-            .timeout(const Duration(seconds: 6), onTimeout: () => true);
-        if (canRequest) {
-          granted = await OneSignal.Notifications.requestPermission(false)
-              .timeout(const Duration(seconds: 12), onTimeout: () => false);
-        }
+        granted = await LocalTestPushService.requestPermissionsFromUserAction()
+            .timeout(const Duration(seconds: 30), onTimeout: () => false);
       } catch (_) {
         granted = false;
       }
+      _restoreTransparentSystemBars();
+
+      // OneSignal sync na pozadí (neblokuje UI).
+      unawaited(Future<void>(() async {
+        try {
+          await OneSignal.Notifications.requestPermission(false)
+              .timeout(const Duration(seconds: 8));
+        } catch (_) {}
+      }));
+
       await SettingsManager.setSystemNotificationsEnabled(granted);
 
       if (!granted) {
@@ -1958,134 +1948,151 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
     );
   }
 
+  static const _kTransparentSystemUi = SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.light,
+    statusBarBrightness: Brightness.dark,
+    systemNavigationBarColor: Colors.transparent,
+    systemNavigationBarDividerColor: Colors.transparent,
+    systemNavigationBarIconBrightness: Brightness.light,
+    systemNavigationBarContrastEnforced: false,
+  );
+
+  void _restoreTransparentSystemBars() {
+    SystemChrome.setSystemUIOverlayStyle(_kTransparentSystemUi);
+  }
+
   @override
   Widget build(BuildContext context) {
     final bottomPad = MediaQuery.of(context).padding.bottom;
 
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      body: SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  const SizedBox(height: 24),
-                  const Text(
-                    'Meteo Počasie',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 32,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 0.5,
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _kTransparentSystemUi,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                const SizedBox(height: 24),
+                const Text(
+                  'Meteo Počasie',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 32,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.5,
+                    color: Colors.white,
+                  ),
+                ),
+                const Spacer(),
+                Container(
+                  width: 120,
+                  height: 120,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withAlpha(38),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: Colors.white.withAlpha(76),
+                      width: 2,
+                    ),
+                  ),
+                  child: const Center(
+                    child: Icon(
+                      Icons.notifications_active,
+                      size: 60,
                       color: Colors.white,
                     ),
                   ),
-                  const Spacer(),
-                  Container(
-                    width: 120,
-                    height: 120,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withAlpha(38),
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: Colors.white.withAlpha(76),
-                        width: 2,
-                      ),
-                    ),
-                    child: const Center(
-                      child: Icon(
-                        Icons.notifications_active,
-                        size: 60,
-                        color: Colors.white,
-                      ),
+                ),
+                const SizedBox(height: 32),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: const Text(
+                    'Nenechajte si ujsť dôležité zmeny počasia',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
                     ),
                   ),
-                  const SizedBox(height: 32),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 420),
-                    child: const Text(
-                      'Nenechajte si ujsť dôležité zmeny počasia',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white,
-                      ),
+                ),
+                const SizedBox(height: 16),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: const Text(
+                    'Povoľte oznámenia — budeme vás informovať o výstrahách, silnom vetre, daždi alebo snežení vo vašej lokalite.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 16,
+                      height: 1.4,
+                      color: Colors.white,
                     ),
                   ),
-                  const SizedBox(height: 16),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 420),
-                    child: const Text(
-                      'Povoľte oznámenia — budeme vás informovať o výstrahách, silnom vetre, daždi alebo snežení vo vašej lokalite.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 16,
-                        height: 1.4,
-                        color: Colors.white,
+                ),
+                const SizedBox(height: 32),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: _isProcessing ? null : _enableNotifications,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _kChartLineBlue,
+                      padding: const EdgeInsets.symmetric(
+                          vertical: 16, horizontal: 20),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(30),
                       ),
-                    ),
-                  ),
-                  const SizedBox(height: 32),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: _isProcessing ? null : _enableNotifications,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _kChartLineBlue,
-                        padding: const EdgeInsets.symmetric(
-                            vertical: 16, horizontal: 20),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(30),
-                        ),
-                        shadowColor: Colors.transparent,
-                        surfaceTintColor: Colors.transparent,
-                        splashFactory: NoSplash.splashFactory,
-                      ).copyWith(
-                        overlayColor: WidgetStateProperty.all(Colors.transparent),
-                      ),
-                      child: _isAllowing
-                          ? const Text(
-                              'Spracovávam...',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Text(
-                              'Povoliť notifikácie',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.white,
-                              ),
-                            ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextButton(
-                    onPressed: _isProcessing ? null : _skipNotifications,
-                    style: TextButton.styleFrom(
+                      shadowColor: Colors.transparent,
+                      surfaceTintColor: Colors.transparent,
                       splashFactory: NoSplash.splashFactory,
                     ).copyWith(
                       overlayColor: WidgetStateProperty.all(Colors.transparent),
                     ),
-                    child: Text(
-                      _isSkipping ? 'Spracovávam...' : 'Teraz nie',
-                      style: const TextStyle(
-                        fontSize: 16,
-                        color: Colors.white,
-                        decoration: TextDecoration.none,
-                      ),
+                    child: _isAllowing
+                        ? const Text(
+                            'Spracovávam...',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text(
+                            'Povoliť notifikácie',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                            ),
+                          ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextButton(
+                  onPressed: _isProcessing ? null : _skipNotifications,
+                  style: TextButton.styleFrom(
+                    splashFactory: NoSplash.splashFactory,
+                  ).copyWith(
+                    overlayColor: WidgetStateProperty.all(Colors.transparent),
+                  ),
+                  child: Text(
+                    _isSkipping ? 'Spracovávam...' : 'Teraz nie',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      color: Colors.white,
+                      decoration: TextDecoration.none,
                     ),
                   ),
-                  SizedBox(height: bottomPad + 24),
-                ],
-              ),
+                ),
+                SizedBox(height: bottomPad + 24),
+              ],
             ),
           ),
+        ),
+      ),
     );
   }
 }
@@ -4165,7 +4172,16 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     _okresyReadyPoll?.cancel();
     _okresyReadyPoll = null;
     _notifySafely();
+    unawaited(_thinOkresBorders());
     unawaited(refreshActiveWarningNotice());
+  }
+
+  Future<void> _thinOkresBorders() async {
+    final c = _controller;
+    if (c == null) return;
+    try {
+      await c.runJavaScript(_kVystrahyThinOkresBordersJs);
+    } catch (_) {}
   }
 
   void clearActiveWarning({bool showMapHint = false}) {
@@ -4825,7 +4841,12 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       geoLayer.eachLayer(function(l) {
         try {
           var id = l.feature && l.feature._bezpecneId;
-          l.setStyle({ fillColor: farbaNaDen(dbase[id], off) });
+          l.setStyle({
+            fillColor: farbaNaDen(dbase[id], off),
+            weight: 0.35,
+            color: '#172438',
+            opacity: 0.9
+          });
         } catch (e1) {}
       });
     }
@@ -5372,7 +5393,7 @@ const String _kVystrahyEnsureOkresyFromNetworkJs = r'''
           var color = (typeof farbaNaDen === 'function')
             ? farbaNaDen(db[id], off)
             : '#10b981';
-          return { fillColor: color, weight: 1, color: '#172438', fillOpacity: 1 };
+          return { fillColor: color, weight: 0.35, color: '#172438', opacity: 0.9, fillOpacity: 1 };
         },
         interactive: false
       }).addTo(mapRef);
@@ -5433,7 +5454,7 @@ const String _kVystrahyApplyPrefetchedOkresyJs = r'''
         var color = (typeof farbaNaDen === 'function')
           ? farbaNaDen(db[id], off)
           : '#10b981';
-        return { fillColor: color, weight: 1, color: '#172438', fillOpacity: 1 };
+        return { fillColor: color, weight: 0.35, color: '#172438', opacity: 0.9, fillOpacity: 1 };
       },
       interactive: false
     }).addTo(mapRef);
@@ -5448,11 +5469,46 @@ const String _kVystrahyApplyPrefetchedOkresyJs = r'''
 })();
 ''';
 
+/// Jemnejšie hranice okresov (Leaflet kreslí každú hranicu 2× medzi susedmi).
+const String _kVystrahyThinOkresBordersJs = r'''
+(function() {
+  function thin() {
+    try {
+      if (typeof geoLayer === 'undefined' || !geoLayer || !geoLayer.eachLayer) return false;
+      geoLayer.eachLayer(function(l) {
+        try {
+          l.setStyle({ weight: 0.35, color: '#172438', opacity: 0.9 });
+        } catch (e0) {}
+      });
+      return true;
+    } catch (e1) {
+      return false;
+    }
+  }
+  if (thin()) return;
+  var tries = 0;
+  var t = setInterval(function() {
+    tries++;
+    if (thin() || tries > 40) clearInterval(t);
+  }, 250);
+})();
+''';
+
 /// Sleduje načítanie okresov (geoLayer) a hlási do Flutter cez VystrahyReady.
 const String _kVystrahyOkresyReadyWatchJs = r'''
 (function() {
   if (window.__pocasieVystrahyOkresyWatching) return;
   window.__pocasieVystrahyOkresyWatching = true;
+  function thinBorders() {
+    try {
+      if (typeof geoLayer === 'undefined' || !geoLayer || !geoLayer.eachLayer) return;
+      geoLayer.eachLayer(function(l) {
+        try {
+          l.setStyle({ weight: 0.35, color: '#172438', opacity: 0.9 });
+        } catch (e0) {}
+      });
+    } catch (e1) {}
+  }
   function ready() {
     try {
       if (typeof geoLayer !== 'undefined' && geoLayer && geoLayer.getLayers &&
@@ -5466,6 +5522,7 @@ const String _kVystrahyOkresyReadyWatchJs = r'''
   }
   function notify() {
     window.__pocasieVystrahyOkresyReady = true;
+    thinBorders();
     try {
       if (window.VystrahyReady && VystrahyReady.postMessage) {
         VystrahyReady.postMessage('okresy');
