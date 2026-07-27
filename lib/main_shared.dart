@@ -82,6 +82,9 @@ bool forecastJsonDailyHorizonComplete(Map<String, dynamic> map) {
   if (daily is! Map) return false;
   final times = daily['time'];
   if (times is! List) return false;
+  if (map['source_provider'] == 'weatherapi') {
+    return times.length >= kWeatherApiForecastDaysMin;
+  }
   return times.length >= kForecastDays;
 }
 
@@ -159,8 +162,14 @@ bool forecastJsonHas24HourWindow(Map<String, dynamic> map) =>
 bool forecastDailyHorizonComplete(WeatherData? data) {
   final times = data?.daily?.time;
   if (times == null || times.isEmpty) return false;
+  if (data?.forecastModelId == 'weatherapi') {
+    return times.length >= kWeatherApiForecastDaysMin;
+  }
   return times.length >= kForecastDays;
 }
+
+String weatherApiForecastCacheKey(double lat, double lon) =>
+    'wapi_v2_${lat.toStringAsFixed(2)}_${lon.toStringAsFixed(2)}';
 const String kForecastModelKey = 'forecast_model_v1';
 
 const String kOnboardingDoneKey = 'onboarding_playstore_fix';
@@ -170,7 +179,7 @@ const String kAppInstallEpochKey = 'app_first_install_epoch_ms';
 const String kOpenMeteoForecastApi = 'https://api.open-meteo.com/v1/ecmwf';
 const String kOpenMeteoAttributionUrl = 'https://open-meteo.com/';
 
-// Geocoding zostáva na Open-Meteo (je to samostatná služba)
+// Geocoding — WeatherAPI search (záloha Nominatim v app_pages).
 const String kGeoApi = 'https://geocoding-api.open-meteo.com/v1';
 const String kNominatimSearchApi = 'https://nominatim.openstreetmap.org/search';
 const String kNominatimUserAgent = 'pocasie-app/1.0 (flutter)';
@@ -672,7 +681,9 @@ const String kMeteoRadarPanPerfJs = r'''
 })();
 ''';
 
-/// Radar WebView. Hybrid Composition len vo fullscreen — v scrolle Texture (inak sa UI seká).
+/// Radar WebView.
+/// Náhľad (karta): Hybrid — Texture v scrolle často biela diera.
+/// Fullscreen: Texture — Flutter kryt ostane nad mapou.
 Widget buildMeteoRadarWebView({
   required WebViewController controller,
   bool hybridComposition = false,
@@ -1002,42 +1013,247 @@ Future<void> ensureRadarWarmProxyStarted() {
   return _radarWarmStartFuture!;
 }
 
+/// Epoch náhľadu — Flutter karta sa rebuildne hneď po načítaní CMAX snímky.
+final ValueNotifier<int> radarFastPreviewEpoch = ValueNotifier<int>(0);
+ui.Image? _radarFastPreviewImage;
+String? _radarFastPreviewFrameUrl;
+Future<ui.Image?>? _radarFastPreviewInflight;
+
+bool get radarFastPreviewAvailable => _radarFastPreviewImage != null;
+
+ui.Image? peekRadarFastPreviewImage() => _radarFastPreviewImage;
+
+Future<ui.Image?> _decodeRadarPreviewImage(Uint8List bytes) async {
+  final codec = await ui.instantiateImageCodec(bytes);
+  final frame = await codec.getNextFrame();
+  return frame.image;
+}
+
+/// Posledný CMAX frame z histórie — disk cache + dekód do [radarFastPreviewEpoch].
+/// Toto je rýchla cesta domovskej karty (bez Mapbox WebView).
+Future<ui.Image?> ensureRadarFastPreviewFrame() {
+  final existing = _radarFastPreviewImage;
+  if (existing != null) return Future<ui.Image?>.value(existing);
+  final inflight = _radarFastPreviewInflight;
+  if (inflight != null) return inflight;
+
+  _radarFastPreviewInflight = () async {
+    try {
+      await ensureRadarWarmProxyStarted();
+      final hist = await _radarWarmGetOrFetch(
+        'radar_radar_history_cmax.json',
+        kMeteoRadarHistoryCmaxUrl,
+        contentTypeHint: 'application/json',
+      );
+      if (hist == null) return _radarFastPreviewImage;
+      final data = jsonDecode(utf8.decode(hist.bytes));
+      if (data is! List || data.isEmpty) return _radarFastPreviewImage;
+      final lastFrame = data.last;
+      if (lastFrame is! Map || lastFrame['url'] is! String) {
+        return _radarFastPreviewImage;
+      }
+      var frameUrl = lastFrame['url'] as String;
+      if (frameUrl.startsWith('/')) {
+        frameUrl = '$kMeteoRadarHelkorOrigin$frameUrl';
+      }
+      if (_radarFastPreviewImage != null &&
+          _radarFastPreviewFrameUrl == frameUrl) {
+        return _radarFastPreviewImage;
+      }
+      final key =
+          'radar_frame_${frameUrl.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_')}';
+      final asset = await _radarWarmGetOrFetch(
+        key,
+        frameUrl,
+        contentTypeHint: 'image/png',
+      );
+      if (asset == null || asset.bytes.isEmpty) return _radarFastPreviewImage;
+      final image = await _decodeRadarPreviewImage(
+        Uint8List.fromList(asset.bytes),
+      );
+      final old = _radarFastPreviewImage;
+      _radarFastPreviewImage = image;
+      _radarFastPreviewFrameUrl = frameUrl;
+      old?.dispose();
+      radarFastPreviewEpoch.value = radarFastPreviewEpoch.value + 1;
+      return image;
+    } catch (_) {
+      return _radarFastPreviewImage;
+    } finally {
+      _radarFastPreviewInflight = null;
+    }
+  }();
+  return _radarFastPreviewInflight!;
+}
+
+/// Domovský náhľad radaru bez WebView — CMAX PNG v Mapbox mercator projekcii.
+class RadarHomeFastPreview extends StatelessWidget {
+  const RadarHomeFastPreview({
+    super.key,
+    required this.lat,
+    required this.lon,
+    this.showLocationDot = true,
+  });
+
+  final double lat;
+  final double lon;
+  final bool showLocationDot;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(
+      valueListenable: radarFastPreviewEpoch,
+      builder: (context, _, __) {
+        final image = _radarFastPreviewImage;
+        return CustomPaint(
+          painter: _RadarFastPreviewPainter(
+            image: image,
+            lat: lat,
+            lon: lon,
+            showLocationDot: showLocationDot,
+          ),
+          size: Size.infinite,
+        );
+      },
+    );
+  }
+}
+
+class _RadarFastPreviewPainter extends CustomPainter {
+  _RadarFastPreviewPainter({
+    required this.image,
+    required this.lat,
+    required this.lon,
+    required this.showLocationDot,
+  });
+
+  final ui.Image? image;
+  final double lat;
+  final double lon;
+  final bool showLocationDot;
+
+  static const double _tileSize = 512;
+
+  double _projectX(double longitude, double world) =>
+      ((longitude + 180.0) / 360.0) * world;
+
+  double _projectY(double latitude, double world) {
+    final s = math.sin(latitude * math.pi / 180.0);
+    final y = 0.5 - math.log((1 + s) / (1 - s)) / (4 * math.pi);
+    return y * world;
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(
+      Offset.zero & size,
+      Paint()..color = kAmbientBlendColor,
+    );
+    final img = image;
+    if (img == null || size.width <= 0 || size.height <= 0) return;
+
+    final world = _tileSize * math.pow(2.0, kMeteoRadarCityZoom).toDouble();
+    final cx = _projectX(lon, world);
+    final cy = _projectY(lat, world);
+    final x0 = _projectX(kRadarExtentLonMin, world);
+    final x1 = _projectX(kRadarExtentLonMax, world);
+    final y0 = _projectY(kRadarExtentLatMax, world);
+    final y1 = _projectY(kRadarExtentLatMin, world);
+
+    final left = x0 - (cx - size.width / 2);
+    final top = y0 - (cy - size.height / 2);
+    final dest = Rect.fromLTWH(left, top, x1 - x0, y1 - y0);
+    canvas.drawImageRect(
+      img,
+      Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
+      dest,
+      Paint()..filterQuality = FilterQuality.medium,
+    );
+
+    if (!showLocationDot) return;
+    final center = Offset(size.width / 2, size.height / 2);
+    canvas.drawCircle(
+      center,
+      7,
+      Paint()..color = const Color(0x6622A6F2),
+    );
+    canvas.drawCircle(
+      center,
+      4.2,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.6,
+    );
+    canvas.drawCircle(center, 2.6, Paint()..color = const Color(0xFF22A6F2));
+  }
+
+  @override
+  bool shouldRepaint(covariant _RadarFastPreviewPainter oldDelegate) {
+    return oldDelegate.image != image ||
+        oldDelegate.lat != lat ||
+        oldDelegate.lon != lon ||
+        oldDelegate.showLocationDot != showLocationDot;
+  }
+}
+
 /// HTTP prefetch radaru (geojson / história / Mapbox) — DNS+TCP ešte pred WebView.
+/// Kľúčové: [ensureRadarFastPreviewFrame] — Flutter náhľad bez Mapboxu.
 /// WebView ide priamo na Helkor (proxy lámal Mapbox dlaždice).
 Future<void> prefetchRadarMapAssets([GeoCity? city]) async {
   final last = _radarPrefetchLastRun;
   if (last != null && DateTime.now().difference(last) < const Duration(seconds: 45)) {
+    // Aj pri debounce hneď ťahaj frame náhľadu (môže byť ešte null).
+    unawaited(ensureRadarFastPreviewFrame());
     return;
   }
   _radarPrefetchLastRun = DateTime.now();
 
   unawaited(() async {
-    await Future.wait(
-      meteoRadarPrefetchUrls(city: city).map((url) async {
-        try {
-          final r = await http
-              .get(Uri.parse(url))
-              .timeout(const Duration(seconds: 20));
-          if (url.contains('radar_history_cmax.json') && r.statusCode == 200) {
-            try {
-              final data = jsonDecode(r.body);
-              if (data is List && data.isNotEmpty) {
-                final lastFrame = data.last;
-                if (lastFrame is Map && lastFrame['url'] is String) {
-                  var frameUrl = lastFrame['url'] as String;
-                  if (frameUrl.startsWith('/')) {
-                    frameUrl = '$kMeteoRadarHelkorOrigin$frameUrl';
-                  }
-                  await http
-                      .get(Uri.parse(frameUrl))
-                      .timeout(const Duration(seconds: 15));
-                }
-              }
-            } catch (_) {}
-          }
-        } catch (_) {}
-      }),
-    );
+    try {
+      await ensureRadarWarmProxyStarted();
+    } catch (_) {}
+
+    // Najprv frame náhľadu — to je to, čo user vidí do 1 s.
+    await ensureRadarFastPreviewFrame();
+
+    await Future.wait([
+      _radarWarmGetOrFetch(
+        'mapbox-gl.js',
+        kMeteoRadarMapboxGlJsUrl,
+        contentTypeHint: 'application/javascript',
+      ),
+      _radarWarmGetOrFetch(
+        'mapbox-gl.css',
+        kMeteoRadarMapboxGlCssUrl,
+        contentTypeHint: 'text/css',
+      ),
+      _radarWarmGetOrFetch(
+        'radar_slovakia.geojson',
+        kMeteoRadarSlovakiaGeoJsonUrl,
+        contentTypeHint: 'application/geo+json',
+      ),
+      _radarWarmGetOrFetch(
+        'radar_romania.geojson',
+        kMeteoRadarRomaniaGeoJsonUrl,
+        contentTypeHint: 'application/geo+json',
+      ),
+      _radarWarmGetOrFetch(
+        'radar_radar_history_cmax.json',
+        kMeteoRadarHistoryCmaxUrl,
+        contentTypeHint: 'application/json',
+      ),
+    ]);
+
+    final lat = city?.lat ?? 48.7;
+    final lon = city?.lon ?? 19.5;
+    try {
+      await http
+          .get(Uri.parse(
+            '$kMeteoRadarHelkorOrigin/radar/?lat=$lat&lon=$lon&zoom=7&hideUI=true',
+          ))
+          .timeout(const Duration(seconds: 20));
+    } catch (_) {}
   }());
 }
 
@@ -1785,20 +2001,29 @@ const Set<String> kRadarOpenDataCountryCodes = {
 bool cityEligibleForRadarNowcast(String countryCode) =>
     kRadarOpenDataCountryCodes.contains(countryCode.toUpperCase());
 
-/// SHMÚ/Helkor radar mapa v UI — len open-data štáty v rámci kompozitu (0–30°E, 43–58°N).
-bool radarCoverageForCity(GeoCity city) =>
-    cityEligibleForRadarNowcast(city.countryCode) &&
-    coordsWithinRadarMapExtent(city.lat, city.lon);
+/// ISO kód pre radar — WeatherAPI GPS často vráti prázdny countryCode.
+String effectiveRadarCountryCode(GeoCity city) {
+  final cc = city.countryCode.trim().toUpperCase();
+  if (cc.isNotEmpty) return cc;
+  return weatherApiCountryCodeFromName(city.country);
+}
+
+/// SHMÚ/Helkor radar mapa v UI — open-data štáty v rámci kompozitu (0–30°E, 43–58°N).
+/// Pri chýbajúcom ISO (čerstvá GPS po onboardingu) stačí extent + názov krajiny / SK bbox.
+bool radarCoverageForCity(GeoCity city) {
+  if (!coordsWithinRadarMapExtent(city.lat, city.lon)) return false;
+  final cc = effectiveRadarCountryCode(city);
+  if (cc.isNotEmpty) return cityEligibleForRadarNowcast(cc);
+  // Prázdny kód aj názov (starý cache) — na SK extent ukáž radar.
+  return coordsWithinSlovakiaVystrahyExtent(city.lat, city.lon);
+}
 
 /// RainViewer API nowcast — globálne pokrytie (nezávisle od Helkor mapy).
 bool rainViewerNowcastForCity(GeoCity city) =>
-    city.lat >= -60.0 &&
-    city.lat <= 72.0 &&
-    city.lon >= -180.0 &&
-    city.lon <= 180.0;
+    false;
 
 /// Zrážkový nowcast + ECMWF sync — RainViewer kdekoľvek, Helkor fallback len v [radarCoverageForCity].
-bool radarNowcastActiveForCity(GeoCity city) => rainViewerNowcastForCity(city);
+bool radarNowcastActiveForCity(GeoCity city) => false;
 
 /// Geografický rámec kompozitu (helkor mapExtentCoordinates) — pixel mapovanie cez Web Mercator.
 const double kRadarExtentLonMin = 0.0;

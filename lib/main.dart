@@ -20,6 +20,7 @@ import 'package:onesignal_flutter/onesignal_flutter.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:home_widget/home_widget.dart';
+import 'package:pocasie/weatherapi_shared.dart';
 import 'package:pocasie/weather_hero_ambient.dart';
 import 'package:pocasie/weather_home_widget.dart';
 import 'package:pocasie/weather_labels_sk.dart';
@@ -44,6 +45,7 @@ part 'app_pages.dart';
 part 'weather_page.dart';
 part 'weather_chart_page.dart';
 part 'openmeteo_fetch.dart';
+part 'weatherapi_fetch.dart';
 part 'lightning_fetch.dart';
 part 'radar_nowcast_fetch.dart';
 part 'rainviewer_fetch.dart';
@@ -2319,6 +2321,28 @@ Future<GeoCity?> reverseGeocode(double lat, double lon, {bool resolveTimezone = 
   }
 
   try {
+    final wapiCity = await _reverseGeocodeWeatherApi(lat, lon);
+    if (wapiCity != null) {
+      final timezone =
+          resolveTimezone ? await _getTimezoneForCoordinates(lat, lon) : null;
+      var countryCode = wapiCity.countryCode.trim().toUpperCase();
+      if (countryCode.isEmpty) {
+        countryCode = weatherApiCountryCodeFromName(wapiCity.country);
+      }
+      final finalCity = GeoCity(
+        name: wapiCity.name,
+        lat: lat,
+        lon: lon,
+        country: wapiCity.country,
+        countryCode: countryCode,
+        admin1: wapiCity.admin1,
+        admin2: wapiCity.admin2,
+        timezone: timezone ?? 'auto',
+      );
+      await CacheManager.saveGeoCity(lat, lon, finalCity);
+      return finalCity;
+    }
+
     final uri = Uri.parse(
         '$kGeoApi/reverse?latitude=$lat&longitude=$lon&count=1&language=sk&format=json');
     final r = await http

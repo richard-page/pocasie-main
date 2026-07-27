@@ -31,9 +31,9 @@ Color _chartTemperatureColor(double? temp) {
 Color _chartTextOn(Color background) =>
     background.computeLuminance() > 0.52 ? const Color(0xFF1A2433) : Colors.white;
 
-const _kChartTextPrimary = Color(0xFFF2F6FA);
-const _kChartTextSecondary = Color(0xFFD4DEE9);
-const _kChartTextMuted = Color(0xFFAEBBCC);
+const _kChartTextPrimary = Color(0xFFFFFFFF);
+const _kChartTextSecondary = Color(0xFF9CA3AF);
+const _kChartTextMuted = Color(0xFF9CA3AF);
 
 const _kChartLineBlue = kAppAccentBlue;
 const _kChartIconBlue = kAppAccentBlueBright;
@@ -483,7 +483,7 @@ PreferredSizeWidget _forecastSubpageAppBar({
   List<Widget>? actions,
 }) {
   return AppBar(
-    backgroundColor: Colors.transparent,
+    backgroundColor: kAmbientBlendColor,
     surfaceTintColor: Colors.transparent,
     elevation: 0,
     scrolledUnderElevation: 0,
@@ -511,7 +511,7 @@ Widget _forecastGlassBody({required Widget child, EdgeInsets? padding}) {
   );
 }
 
-/// Rovnaké pozadie ako graf — ambient cez app + sklenený panel obsahu.
+/// Rovnaké pozadie ako domov — NIE transparent (inak pri pop animácii prekvita domov cez peľ/graf).
 class ForecastSubpageScaffold extends StatelessWidget {
   final String title;
   final Widget body;
@@ -535,7 +535,7 @@ class ForecastSubpageScaffold extends StatelessWidget {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: _kForecastSubpageSystemUi,
       child: Scaffold(
-        backgroundColor: Colors.transparent,
+        backgroundColor: kAmbientBlendColor,
         resizeToAvoidBottomInset: resizeToAvoidBottomInset,
         appBar: _forecastSubpageAppBar(
           title: title,
@@ -571,6 +571,8 @@ class WeatherChartPage extends StatefulWidget {
 class _WeatherChartPageState extends State<WeatherChartPage> {
   late WeatherData _data;
   bool _extendingHorizon = false;
+  /// Prvý frame = len chrome (okamžitý open); ťažký graf až potom.
+  bool _bodyReady = false;
 
   GeoCity get city => widget.city;
   RadarNowcastContext get radarCtx => widget.radarCtx;
@@ -583,9 +585,13 @@ class _WeatherChartPageState extends State<WeatherChartPage> {
   void initState() {
     super.initState();
     _data = widget.data;
-    if (!forecastDailyHorizonComplete(_data)) {
-      unawaited(_extendHorizonInBackground());
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() => _bodyReady = true);
+      if (!forecastDailyHorizonComplete(_data)) {
+        unawaited(_extendHorizonInBackground());
+      }
+    });
   }
 
   Future<void> _extendHorizonInBackground() async {
@@ -619,7 +625,7 @@ class _WeatherChartPageState extends State<WeatherChartPage> {
     final dayCount = math.min(daily?.time.length ?? 0, kChartForecastDays);
 
     return Scaffold(
-      backgroundColor: Colors.transparent,
+      backgroundColor: kAmbientBlendColor,
       body: SafeArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -674,9 +680,9 @@ class _WeatherChartPageState extends State<WeatherChartPage> {
               padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
               child: Text(
                 _radarAugmentsChart
-                    ? 'Denné maximum, minimum a pravdepodobnosť zrážok z Open-Meteo (ECMWF). '
+                    ? 'Denné maximum, minimum a pravdepodobnosť zrážok z WeatherAPI. '
                         'Ak radarové snímky detekujú dážď alebo sneženie, zobrazí sa zrážková ikona.'
-                    : 'Denné maximum, minimum, pravdepodobnosť zrážok a typ počasia z aktuálnej predpovede Open-Meteo.',
+                    : 'Denné maximum, minimum, pravdepodobnosť zrážok a typ počasia z aktuálnej predpovede WeatherAPI.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.72),
@@ -725,6 +731,8 @@ class _WeatherChartPageState extends State<WeatherChartPage> {
                   ),
                 ),
               )
+            else if (!_bodyReady)
+              const Expanded(child: ColoredBox(color: kAmbientBlendColor))
             else
               Expanded(
                 child: Align(

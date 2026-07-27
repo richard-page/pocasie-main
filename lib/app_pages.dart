@@ -3076,7 +3076,13 @@ class _CitySearchPageState extends State<CitySearchPage> {
     if (!mounted) return;
     setState(() => _loading = true);
     try {
-      var cities = await _searchOpenMeteo(q);
+      var cities = await _searchWeatherApi(q);
+      if (!mounted || serial != _searchSerial) return;
+      if (cities.length < 8) {
+        final openMeteo = await _searchOpenMeteo(q);
+        if (!mounted || serial != _searchSerial) return;
+        cities = [...cities, ...openMeteo];
+      }
       if (!mounted || serial != _searchSerial) return;
       if (cities.length < 8) {
         final nominatim = await _searchNominatim(q);
@@ -3599,22 +3605,13 @@ class OfflineScreen extends StatelessWidget {
 }
 
 class FullscreenRadarPage extends StatefulWidget {
-  /// Zdieľaný controller z náhľadu — bez druhého loadRequest / Mapbox cold startu.
-  final WebViewController? controller;
   final String initialUrl;
-  final bool contentAlreadyReady;
-  /// Dlaždice už načítané vo full veľkosti pred push.
-  final bool tilesPreloaded;
-  /// Kam pinovať kameru po setFullscreen/resize (inak Helkor skočí na celú SR).
   final double? pinLat;
   final double? pinLon;
 
   const FullscreenRadarPage({
     super.key,
     required this.initialUrl,
-    this.controller,
-    this.contentAlreadyReady = false,
-    this.tilesPreloaded = false,
     this.pinLat,
     this.pinLon,
   });
@@ -3623,42 +3620,33 @@ class FullscreenRadarPage extends StatefulWidget {
   State<FullscreenRadarPage> createState() => _FullscreenRadarPageState();
 }
 
-class _FullscreenRadarPageState extends State<FullscreenRadarPage>
-    with WidgetsBindingObserver {
+class _FullscreenRadarPageState extends State<FullscreenRadarPage> {
   WebViewController? _controller;
   Widget? _radarView;
   bool _surfaceReady = false;
-  bool _ownsController = false;
-  /// Počas info dialógu — nekompozitovať živý PlatformView (inak zasek / banding).
+  bool _mapCoverVisible = true;
   bool _coverRadarForDialog = false;
+  bool _attachInFlight = false;
+  bool _revealed = false;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     unawaited(_boot());
   }
 
   Future<void> _boot() async {
-    final shared = widget.controller;
-    if (shared != null) {
-      _ownsController = false;
-      _controller = shared;
-      _radarView = buildMeteoRadarWebView(
-        controller: shared,
-        hybridComposition: true,
-      );
-      if (!mounted) return;
-      setState(() => _surfaceReady = true);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        unawaited(_attachRadarSurface());
+    // Frame 0+: len navy + chrome. WebView až potom pod krytom.
+    if (mounted) {
+      setState(() {
+        _surfaceReady = false;
+        _mapCoverVisible = true;
       });
-      // Už načítané (alebo práve ťahá) v náhľade — žiadny druhý loadRequest.
-      return;
     }
+    await WidgetsBinding.instance.endOfFrame;
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
 
-    _ownsController = true;
     late final PlatformWebViewControllerCreationParams params;
     if (WebViewPlatform.instance is AndroidWebViewPlatform) {
       params = AndroidWebViewControllerCreationParams();
@@ -3690,9 +3678,13 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
     _controller = controller;
     _radarView = buildMeteoRadarWebView(
       controller: controller,
-      hybridComposition: true,
+      // Texture vo full — Flutter kryt „Načítavam“ musí mapu prekryť.
+      hybridComposition: false,
     );
-    setState(() => _surfaceReady = true);
+    setState(() {
+      _surfaceReady = true;
+      _mapCoverVisible = true;
+    });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -3700,127 +3692,128 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
     });
   }
 
-  Future<void> _attachRadarSurface() async {
-    final ctrl = _controller;
-    if (ctrl == null || !mounted) return;
-    final soft = widget.tilesPreloaded;
-    final lat = widget.pinLat;
-    final lon = widget.pinLon;
-    final hasPin = lat != null && lon != null;
+  Future<bool> _mapReady(WebViewController ctrl) async {
     try {
-      if (hasPin) {
-        await ctrl.runJavaScript(buildMeteoRadarPinCityJs(
-          lat: lat,
-          lon: lon,
-          fullscreen: true,
-          removeChrome: true,
-          hideLayersUntilPinned: !soft,
-        ));
-      } else {
-        await ctrl.runJavaScript('''
+      final raw = await ctrl.runJavaScriptReturningResult(r"""
+(function(){
+  try {
+    if (typeof map === 'undefined' || !map) return '0';
+    if (map.isStyleLoaded && !map.isStyleLoaded()) return '0';
+    if (!document.querySelector('.mapboxgl-canvas')) return '0';
+    return '1';
+  } catch (e) { return '0'; }
+})()
+""");
+      return raw.toString().contains('1');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _injectGate(WebViewController ctrl) async {
+    try {
+      await ctrl.runJavaScript(r"""
 (function(){
   try {
     document.documentElement.classList.add('hide-ui');
-    ${soft ? '' : "document.documentElement.classList.remove('radar-layers-ready');"}
-    var chrome = document.getElementById('app-radar-chrome');
-    if (chrome) chrome.remove();
-    if (window.setFullscreen) window.setFullscreen(true);
-    if (typeof map !== 'undefined' && map && map.resize) map.resize();
-    window.dispatchEvent(new Event('resize'));
-    ${soft ? "document.documentElement.classList.add('radar-layers-ready');" : ''}
+    document.documentElement.classList.remove('radar-layers-ready');
+    if (!document.getElementById('app-radar-gate')) {
+      var s = document.createElement('style');
+      s.id = 'app-radar-gate';
+      s.textContent =
+        'html.hide-ui .legend-panel,html.hide-ui .controls-wrapper,' +
+        'html.hide-ui .settings-btn,html.hide-ui .settings-menu,' +
+        'html.hide-ui #radarLegendImg{display:none!important;}' +
+        'html,body,#mapa,.mapboxgl-map,.mapboxgl-canvas-container{background:#172438!important;}' +
+        '#mapa,.mapboxgl-map{opacity:1!important;}';
+      (document.head || document.documentElement).appendChild(s);
+    }
   } catch (e) {}
 })();
-''');
-      }
-      await ctrl.runJavaScript(kMeteoRadarPanPerfJs);
+""");
     } catch (_) {}
-    if (soft) {
-      // Dlaždice už vo full veľkosti — druhý pin po resize (setFullscreen inak nechá SR).
-      await Future<void>.delayed(const Duration(milliseconds: 32));
+  }
+
+  Future<void> _attachRadarSurface() async {
+    if (_attachInFlight || _revealed) return;
+    _attachInFlight = true;
+    try {
+      final ctrl = _controller;
+      if (ctrl == null || !mounted) return;
+      await _injectGate(ctrl);
       if (!mounted || _controller != ctrl) return;
+
+      final lat = widget.pinLat;
+      final lon = widget.pinLon;
       try {
-        if (hasPin) {
+        if (lat != null && lon != null) {
           await ctrl.runJavaScript(buildMeteoRadarPinCityJs(
             lat: lat,
             lon: lon,
             fullscreen: true,
+            removeChrome: true,
+            hideLayersUntilPinned: true,
           ));
         } else {
-          await ctrl.runJavaScript(r'''
+          await ctrl.runJavaScript(r"""
 (function(){
   try {
+    document.documentElement.classList.add('hide-ui');
+    document.documentElement.classList.remove('radar-layers-ready');
+    if (window.setFullscreen) window.setFullscreen(true);
     if (typeof map !== 'undefined' && map && map.resize) map.resize();
-    document.documentElement.classList.add('radar-layers-ready');
   } catch (e) {}
 })();
-''');
+""");
         }
+        await ctrl.runJavaScript(kMeteoRadarPanPerfJs);
       } catch (_) {}
-      return;
-    }
-    // Cold path — počkaj na dlaždice pred odhalením mapy.
-    await Future<void>.delayed(const Duration(milliseconds: 48));
-    if (!mounted || _controller != ctrl) return;
-    for (var i = 0; i < 24; i++) {
+
+      for (var i = 0; i < 50; i++) {
+        if (!mounted || _controller != ctrl) return;
+        if (await _mapReady(ctrl)) break;
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
       if (!mounted || _controller != ctrl) return;
+
       try {
-        final raw = await ctrl.runJavaScriptReturningResult(r'''
+        if (lat != null && lon != null) {
+          await ctrl.runJavaScript(buildMeteoRadarPinCityJs(
+            lat: lat,
+            lon: lon,
+            fullscreen: true,
+            removeChrome: true,
+          ));
+        }
+        await ctrl.runJavaScript(r"""
 (function(){
   try {
-    if (typeof map === 'undefined' || !map) return '0';
-    if (typeof map.areTilesLoaded === 'function') return map.areTilesLoaded() ? '1' : '0';
-    if (typeof map.loaded === 'function') return map.loaded() ? '1' : '0';
-    return '1';
-  } catch (e) { return '0'; }
-})()
-''');
-        if (raw.toString().contains('1')) break;
-      } catch (_) {}
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-    }
-    if (!mounted || _controller != ctrl) return;
-    try {
-      if (hasPin) {
-        await ctrl.runJavaScript(buildMeteoRadarPinCityJs(
-          lat: lat,
-          lon: lon,
-          fullscreen: true,
-        ));
-      } else {
-        await ctrl.runJavaScript(r'''
-(function(){
-  try {
-    if (typeof map !== 'undefined' && map && map.resize) map.resize();
+    document.documentElement.classList.add('hide-ui');
     document.documentElement.classList.add('radar-layers-ready');
+    if (typeof map !== 'undefined' && map && map.resize) map.resize();
   } catch (e) {}
 })();
-''');
-      }
-    } catch (_) {}
+""");
+      } catch (_) {}
+
+      await WidgetsBinding.instance.endOfFrame;
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      if (!mounted) return;
+      setState(() => _mapCoverVisible = false);
+      _revealed = true;
+    } finally {
+      _attachInFlight = false;
+    }
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    // Nevolaj setFullscreen/resize tu — pri pop by to posunulo kameru ešte pred
-    // remountom do náhľadu (krátky teleport). WeatherPage to spraví s jumpTo.
-    if (_ownsController) {
-      _controller = null;
-    }
+    _controller = null;
     super.dispose();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      unawaited(_attachRadarSurface());
-    }
-  }
-
   void _closeRadar(BuildContext context) {
-    if (context.mounted) {
-      Navigator.of(context).pop();
-    }
+    if (context.mounted) Navigator.of(context).pop();
   }
 
   Widget _radarChromeButton({
@@ -3846,8 +3839,6 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
 
   Future<void> _showRadarSourceInfo(BuildContext context) async {
     if (_coverRadarForDialog) return;
-    // Najprv prekry PlatformView nepriehľadnou vrstvou — animácia dialógu cez
-    // Hybrid Composition WebView na Androide seká a robí „schody“ vo farbách.
     setState(() => _coverRadarForDialog = true);
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted) return;
@@ -3856,7 +3847,6 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
         context: context,
         barrierDismissible: true,
         barrierLabel: 'Zavrieť',
-        // Skoro nepriehľadné — žiadny prehľad cez živú mapu.
         barrierColor: const Color(0xE6172438),
         transitionDuration: Duration.zero,
         pageBuilder: (dialogContext, _, __) {
@@ -3940,32 +3930,20 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
         },
       );
     } finally {
-      if (mounted) {
-        setState(() => _coverRadarForDialog = false);
-      }
+      if (mounted) setState(() => _coverRadarForDialog = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final mapBody = !_surfaceReady || _radarView == null
-        ? const ColoredBox(
-            color: kAmbientBlendColor,
-            child: Center(
-              child: Text(
-                'Načítavam radar...',
-                style: TextStyle(color: Colors.white70, fontSize: 14),
-              ),
-            ),
-          )
+        ? const ColoredBox(color: kAmbientBlendColor)
         : _radarView!;
 
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop) {
-          _closeRadar(context);
-        }
+        if (!didPop) _closeRadar(context);
       },
       child: AnnotatedRegion<SystemUiOverlayStyle>(
         value: const SystemUiOverlayStyle(
@@ -3975,59 +3953,80 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
         ),
         child: Scaffold(
           backgroundColor: kAmbientBlendColor,
-          extendBodyBehindAppBar: true,
-          appBar: AppBar(
-            backgroundColor: Colors.transparent,
-            surfaceTintColor: Colors.transparent,
-            elevation: 0,
-            scrolledUnderElevation: 0,
-            forceMaterialTransparency: true,
-            foregroundColor: Colors.white,
-            centerTitle: true,
-            automaticallyImplyLeading: false,
-            leadingWidth: 56,
-            leading: _radarChromeButton(
-              icon: Icons.arrow_back_rounded,
-              onTap: () => _closeRadar(context),
-            ),
-            title: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              decoration: BoxDecoration(
-                color: kAppCardNavyElevated.withValues(alpha: 0.92),
-                borderRadius: BorderRadius.circular(999),
-                border: Border.all(color: kAppCardNavyBorder),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.25),
-                    blurRadius: 6,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
-              child: const Text(
-                'Meteo Radar',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                  letterSpacing: 0.2,
-                ),
-              ),
-            ),
-            actions: [
-              _radarChromeButton(
-                icon: Icons.info_outline_rounded,
-                onTap: () => unawaited(_showRadarSourceInfo(context)),
-                margin: const EdgeInsets.only(top: 8, bottom: 8, right: 8, left: 4),
-              ),
-            ],
-          ),
           body: Stack(
             fit: StackFit.expand,
             children: [
               mapBody,
-              if (_coverRadarForDialog)
+              if (_mapCoverVisible)
+                const ColoredBox(
+                  color: kAmbientBlendColor,
+                  child: Center(
+                    child: Text(
+                      'Načítavam radar...',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                )
+              else if (_coverRadarForDialog)
                 const ColoredBox(color: kAmbientBlendColor),
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: SafeArea(
+                  bottom: false,
+                  child: SizedBox(
+                    height: kToolbarHeight,
+                    child: Row(
+                      children: [
+                        _radarChromeButton(
+                          icon: Icons.arrow_back_rounded,
+                          onTap: () => _closeRadar(context),
+                        ),
+                        Expanded(
+                          child: Center(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 8,
+                              ),
+                              decoration: BoxDecoration(
+                                color:
+                                    kAppCardNavyElevated.withValues(alpha: 0.92),
+                                borderRadius: BorderRadius.circular(999),
+                                border: Border.all(color: kAppCardNavyBorder),
+                              ),
+                              child: const Text(
+                                'Meteo Radar',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                  letterSpacing: 0.2,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        _radarChromeButton(
+                          icon: Icons.info_outline_rounded,
+                          onTap: () => unawaited(_showRadarSourceInfo(context)),
+                          margin: const EdgeInsets.only(
+                            top: 8,
+                            bottom: 8,
+                            right: 8,
+                            left: 4,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -4035,6 +4034,7 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage>
     );
   }
 }
+
 
 class VystrahyWebViewPreloader extends ChangeNotifier {
   VystrahyWebViewPreloader._();

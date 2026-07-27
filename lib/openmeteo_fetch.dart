@@ -517,7 +517,7 @@ Future<Map<String, dynamic>?> _downloadEcmwfCloudCover(
   }
 }
 
-/// Stiahne predpoveď z Open-Meteo API podľa zvoleného modelu.
+/// Stiahne predpoveď — WeatherAPI.
 Future<Map<String, dynamic>?> _downloadOpenMeteoForecast(
   double lat,
   double lon,
@@ -525,99 +525,10 @@ Future<Map<String, dynamic>?> _downloadOpenMeteoForecast(
   required WeatherForecastModel model,
   required bool forceRefresh,
 }) async {
-  final cacheKey = _openMeteoCacheKey(lat, lon, model);
-  debugPrint(
-    'Open-Meteo (${model.uiTitle}): cache key $cacheKey for lat=$lat, lon=$lon',
+  return _downloadWeatherApiForecast(
+    lat,
+    lon,
+    timezone,
+    forceRefresh: forceRefresh,
   );
-
-  if (!forceRefresh) {
-    final cachedJson = await CacheManager.getWeather(lat, lon, cacheKey);
-    if (cachedJson != null) {
-      try {
-        final cached = json.decode(cachedJson) as Map<String, dynamic>;
-        if (cached['error'] != true &&
-            cached.containsKey('hourly') &&
-            forecastJsonDailyHorizonComplete(cached) &&
-            forecastJsonHas24HourWindow(cached) &&
-            (model != WeatherForecastModel.bestMatch ||
-                (cached['ecmwf_cloud_overlay'] == true &&
-                    cached['precip_blend'] == true))) {
-          debugPrint('Open-Meteo (${model.uiTitle}): using cached data for $lat,$lon');
-          return cached;
-        }
-        if (cached.containsKey('hourly') &&
-            !forecastJsonHas24HourWindow(cached)) {
-          debugPrint(
-            'Open-Meteo (${model.uiTitle}): cache bez 24 h '
-            '(${forecastJsonUpcomingHourlyCount(cached)} h) — sťahujem znova',
-          );
-        }
-      } catch (_) {}
-    }
-  }
-
-  try {
-    final uri = _openMeteoForecastUri(lat, lon, timezone, model);
-    debugPrint('Open-Meteo (${model.uiTitle}): GET $uri');
-    final r = await http.get(
-      uri,
-      headers: const {
-        'Accept': 'application/json',
-        'User-Agent': 'pocasie-app/1.0 (flutter)',
-      },
-    ).timeout(const Duration(seconds: 30));
-
-    if (r.statusCode != 200) {
-      debugPrint('Open-Meteo HTTP ${r.statusCode} (${model.uiTitle})');
-      return null;
-    }
-
-    final raw = json.decode(r.body) as Map<String, dynamic>;
-    if (!raw.containsKey('hourly')) {
-      debugPrint('Open-Meteo: chýba hourly v odpovedi');
-      return null;
-    }
-
-    var map = _normalizeOpenMeteoForecast(raw, model);
-
-    // Best Match: oblačnosť (jasno / polooblačno) z ECMWF — BM ju často podhodnocuje.
-    if (model == WeatherForecastModel.bestMatch) {
-      final ecmwfCloud = await _downloadEcmwfCloudCover(lat, lon, timezone);
-      if (ecmwfCloud != null) {
-        map = _mergeEcmwfCloudIntoBestMatch(map, ecmwfCloud);
-        debugPrint(
-          'Best Match: ECMWF cloud overlay '
-          '(${map['ecmwf_cloud_hours'] ?? 0} h)',
-        );
-      } else {
-        map = {...map, 'ecmwf_cloud_overlay': false};
-      }
-
-      // Multi-model zrážky: Best Match + ICON + ECMWF + GFS → zhoda / medián mm / %.
-      final precipExtras =
-          await _downloadPrecipBlendModels(lat, lon, timezone);
-      if (precipExtras.isNotEmpty) {
-        map = _mergePrecipBlendIntoBestMatch(map, precipExtras);
-        debugPrint(
-          'Best Match: precip blend '
-          '${map['precip_blend_models']} modelov, '
-          '${map['precip_blend_wet_hours'] ?? 0} mokrých h '
-          '(${precipExtras.map((e) => e.id).join(', ')})',
-        );
-      } else {
-        map = {...map, 'precip_blend': false, 'precip_blend_models': 1};
-      }
-    }
-
-    await CacheManager.saveWeather(lat, lon, cacheKey, json.encode(map));
-    debugPrint(
-      'Open-Meteo (${model.uiTitle}): OK '
-      '${forecastJsonUpcomingHourlyCount(map)} budúcich hodín, '
-      '${(map['daily'] as Map?)?['time']?.length ?? 0} dní',
-    );
-    return map;
-  } catch (e) {
-    debugPrint('Open-Meteo fetch failed (${model.uiTitle}): $e');
-    return null;
-  }
 }
