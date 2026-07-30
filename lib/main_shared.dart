@@ -682,8 +682,8 @@ const String kMeteoRadarPanPerfJs = r'''
 ''';
 
 /// Radar WebView.
-/// Náhľad (karta): Hybrid — Texture v scrolle často biela diera.
-/// Fullscreen: Texture — Flutter kryt ostane nad mapou.
+/// Domovský náhľad aj fullscreen: Texture (Hybrid Composition na emulátore
+/// zabíja FPS). Loading overlay kryje prípadnú bielu dieru v scrolle.
 Widget buildMeteoRadarWebView({
   required WebViewController controller,
   bool hybridComposition = false,
