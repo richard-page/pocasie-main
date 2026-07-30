@@ -456,12 +456,12 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     _scheduleRadarWarmLoad(city);
   }
 
-  /// Spustí WebView hneď; ostáva v karte radaru (presun medzi hostmi láme PlatformView).
+  /// Spustí WebView až po idle — hneď pri štarte zabíja main thread (Skipped N frames).
   void _scheduleRadarWarmLoad(GeoCity city) {
     if (!_supportsRadarForCity(city)) return;
     _radarWarmLoadTimer?.cancel();
-    _radarWarmLoadTimer = null;
     if (_radarController != null) {
+      _radarWarmLoadTimer = null;
       final cityChanged = _lastRadarCity != null &&
           ((_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
               (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
@@ -482,78 +482,35 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     }
     final force = _pendingRadarForceReload;
     _pendingRadarForceReload = false;
-    _setupRadarController(city, forceReload: force);
+    // Prvý load — daj UI ~1,2 s na paint/scroll, potom až PlatformView.
+    _radarWarmLoadTimer = Timer(const Duration(milliseconds: 1200), () {
+      _radarWarmLoadTimer = null;
+      if (!mounted || _radarController != null) return;
+      if (!_supportsRadarForCity(currentCity ?? city)) return;
+      _setupRadarController(currentCity ?? city, forceReload: force);
+    });
   }
 
   void _scheduleRadarMapUiIfNeeded(GeoCity city) {
     prefetchRadarMapAssets(city);
-    _scheduleRadarWarmLoad(city);
-
-    if (_radarMapUiReady) {
-      final cityChanged = _lastRadarCity != null &&
-          ((_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
-              (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
-              _lastRadarCity!.name != city.name);
-      if (_radarController == null || cityChanged || _pendingRadarForceReload) {
-        final hardReload = _radarController == null ||
-            _radarShouldHardReloadOnCityChange(
-              cityChanged: cityChanged,
-              pendingForce: _pendingRadarForceReload,
-            );
-        _setupRadarController(
-          city,
-          forceReload: hardReload,
-          preferRecenter: cityChanged && _radarController != null && !hardReload,
-        );
-        _pendingRadarForceReload = false;
-      }
-      return;
+    if (!_radarMapUiReady) {
+      _radarMapUiReady = true;
+      _radarMapUiTimer?.cancel();
+      _radarMapUiTimer = null;
+      if (mounted) setState(() {});
     }
-    _revealRadarMapUi(city);
+    // Vždy cez warm load — prvý PlatformView je oddialený, ďalšie hneď.
+    _scheduleRadarWarmLoad(city);
   }
 
   void _revealRadarMapUi(GeoCity city) {
-    if (_radarMapUiReady) {
-      final cityChanged = _lastRadarCity != null &&
-          ((_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
-              (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
-              _lastRadarCity!.name != city.name);
-      if (cityChanged || _pendingRadarForceReload) {
-        final hardReload = _radarShouldHardReloadOnCityChange(
-          cityChanged: cityChanged,
-          pendingForce: _pendingRadarForceReload,
-        );
-        _setupRadarController(
-          city,
-          forceReload: hardReload,
-          preferRecenter: cityChanged && !hardReload,
-        );
-        _pendingRadarForceReload = false;
-      }
-      return;
+    if (!_radarMapUiReady) {
+      _radarMapUiReady = true;
+      _radarMapUiTimer?.cancel();
+      _radarMapUiTimer = null;
+      if (mounted) setState(() {});
     }
-    _radarMapUiReady = true;
-    _radarMapUiTimer?.cancel();
-    _radarMapUiTimer = null;
-    final cityChanged = _lastRadarCity != null &&
-        ((_lastRadarCity!.lat - city.lat).abs() > 0.0001 ||
-            (_lastRadarCity!.lon - city.lon).abs() > 0.0001 ||
-            _lastRadarCity!.name != city.name);
-    if (_radarController == null || cityChanged || _pendingRadarForceReload) {
-      final hardReload = _radarController == null ||
-          _radarShouldHardReloadOnCityChange(
-            cityChanged: cityChanged,
-            pendingForce: _pendingRadarForceReload,
-          );
-      _setupRadarController(
-        city,
-        forceReload: hardReload,
-        preferRecenter: cityChanged && _radarController != null && !hardReload,
-      );
-    }
-    _pendingRadarForceReload = false;
-    if (mounted) setState(() {});
-    _nudgeRadarPlatformViewSize();
+    _scheduleRadarWarmLoad(city);
   }
 
   void _markRadarContentReady() {
@@ -947,14 +904,36 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     });
   }
 
-  /// Off-screen host — WebView musí byť v strome (opacity 0 zabíja Mapbox na Androide).
-  Widget _buildRadarWarmupHost() {
-    if (_radarHomeCardVisible ||
-        _radarWebViewWidget == null ||
-        _isRadarFullscreen ||
-        _radarFullscreenPreload) {
-      return const SizedBox.shrink();
+  bool _onHomeScrollNotification(ScrollNotification notification) {
+    if (notification.depth != 0) return false;
+    if (notification is ScrollStartNotification ||
+        notification is ScrollUpdateNotification) {
+      _radarScrollSettleTimer?.cancel();
+      if (!_radarScrollActive && _radarWebViewWidget != null) {
+        setState(() => _radarScrollActive = true);
+      } else {
+        _radarScrollActive = true;
+      }
+    } else if (notification is ScrollEndNotification) {
+      _radarScrollSettleTimer?.cancel();
+      _radarScrollSettleTimer = Timer(const Duration(milliseconds: 320), () {
+        _radarScrollSettleTimer = null;
+        if (!mounted || !_radarScrollActive) return;
+        setState(() => _radarScrollActive = false);
+        _nudgeRadarPlatformViewSize();
+      });
     }
+    return false;
+  }
+
+  /// Off-screen host — WebView musí byť v strome (opacity 0 zabíja Mapbox na Androide).
+  /// Aj počas scrollu: drž WebView mimo scrolle, inak Android PlatformView seká.
+  Widget _buildRadarWarmupHost() {
+    final showOffscreen = _radarWebViewWidget != null &&
+        !_isRadarFullscreen &&
+        !_radarFullscreenPreload &&
+        (!_radarHomeCardVisible || _radarScrollActive);
+    if (!showOffscreen) return const SizedBox.shrink();
     final w = MediaQuery.sizeOf(context).width;
     final width = w > 0 ? w : 360.0;
     return Positioned(
@@ -1299,6 +1278,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
   Timer? _radarLoadTimeoutTimer;
   Timer? _radarConnectivityTimer;
   bool _radarConnectivityCheckInFlight = false;
+  bool _radarScrollActive = false;
+  Timer? _radarScrollSettleTimer;
 
   final GlobalKey _radarPanelHostKey = GlobalKey();
   final GlobalKey _radarWebViewKey = GlobalKey(debugLabel: 'meteoRadarWebView');
@@ -1437,9 +1418,8 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
       final bootCity = _normalizeCityCountryCode(widget.initialCity!);
       currentCity = bootCity;
       if (_supportsRadarForCity(bootCity)) {
+        // Len prefetch assetov — WebView až po idle (inak Skipped N frames).
         prefetchRadarMapAssets(bootCity);
-        // WebView hneď — CMAX náhľad na karte kryje, kým Mapbox beží.
-        _deferRadarSetup(bootCity);
       }
       // Výstrahy: HTTP hneď; WebView až po radare (inak 2 PlatformView = sekanie).
       if (_supportsVystrahyForCity(bootCity)) {
@@ -1480,6 +1460,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
     _radarMapUiTimer?.cancel();
     _radarWarmLoadTimer?.cancel();
     _radarContentReadyTimer?.cancel();
+    _radarScrollSettleTimer?.cancel();
     VystrahyWebViewPreloader.instance.cancelScheduledWarmup();
     super.dispose();
   }
@@ -5538,11 +5519,11 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
               )
             else if (!_isRadarReturning && !_radarLoadFailed)
               const ColoredBox(color: kAmbientBlendColor),
-            // WebView vždy v strome pri opacity 1 — Opacity+PlatformView na
-            // emulátore seká UI. Počas loadu ho kryje opaque overlay nižšie.
+            // WebView v karte len keď sa nescrolluje — inak offscreen host.
             if (_radarWebViewWidget != null &&
                 !_isRadarReturning &&
-                !_radarLoadFailed)
+                !_radarLoadFailed &&
+                !_radarScrollActive)
               Positioned.fill(
                 child: IgnorePointer(child: _radarWebViewWidget!),
               ),
@@ -5605,16 +5586,22 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
                   child: ColoredBox(
                     color: kAmbientBlendColor,
                     child: Center(
-                      child: SizedBox(
-                        width: 32,
-                        height: 32,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 3,
-                          valueColor: AlwaysStoppedAnimation<Color>(
-                            kAppAccentBlueBright.withValues(alpha: 0.8),
-                          ),
-                        ),
-                      ),
+                      child: _radarScrollActive
+                          ? Icon(
+                              Icons.radar,
+                              color: kAppAccentBlueBright.withValues(alpha: 0.8),
+                              size: 28,
+                            )
+                          : SizedBox(
+                              width: 32,
+                              height: 32,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 3,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  kAppAccentBlueBright.withValues(alpha: 0.8),
+                                ),
+                              ),
+                            ),
                     ),
                   ),
                 ),
@@ -7808,7 +7795,7 @@ class _WeatherPageState extends State<WeatherPage> with WidgetsBindingObserver {
         fit: StackFit.expand,
         children: [
           NotificationListener<ScrollNotification>(
-            onNotification: (notification) => false,
+            onNotification: _onHomeScrollNotification,
             child: RefreshIndicator(
               onRefresh: _onRefresh,
               backgroundColor: kAppCardNavy,
