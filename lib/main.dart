@@ -56,7 +56,10 @@ final ValueNotifier<bool> _showOnboardingNotifier = ValueNotifier<bool>(false);
 GeoCity? _bootWeatherInitialCity;
 bool _bootDeferRadarWarmup = false;
 
-/// Pri minimalizácii skryť WebView (Android PlatformView inak snapshotne „štvorčeky“ cez celú appku).
+/// Pri pozadí / recentoch vypnúť grain — inak Android thumbnail ukáže „bodkový“ vzor.
+final ValueNotifier<bool> appPauseSimplifyAmbient = ValueNotifier<bool>(false);
+
+/// Legacy notifier — už neschovávame celé UI pri dialógu.
 final ValueNotifier<bool> appRecentsCoverNotifier = ValueNotifier<bool>(false);
 
 class AppAmbientSnapshot {
@@ -212,6 +215,9 @@ Future<void> _initServicesInBackground() async {
 }
 
 Future<void> _initDeferredServices() async {
+  // Radar assets hneď na pozadí — WebView potom nestíha cold start.
+  unawaited(prefetchRadarMapAssets());
+
   try {
     await SettingsManager.applyAlertDefaultsOffMigrationIfNeeded();
     OneSignal.Debug.setLogLevel(OSLogLevel.none);
@@ -282,12 +288,28 @@ class _WeatherAppState extends State<WeatherApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // WebView v recent apps NEskrývame — skrytie spôsobovalo prázdny radar
-    // v náhľade a krátke prebliknutie. PlatformView bleed riešime inde.
-    if (state == AppLifecycleState.resumed &&
-        appRecentsCoverNotifier.value) {
-      appRecentsCoverNotifier.value = false;
-      if (mounted) setState(() {});
+    // inactive: len vypnúť grain (thumbnail často tu) — NEkryť UI, NEschovať WebView
+    //   (inak sek pri návrate z nastavení / search).
+    // paused/hidden: solid cover = čistá recent karta bez mriežky.
+    if (state == AppLifecycleState.inactive) {
+      if (!appPauseSimplifyAmbient.value) {
+        appPauseSimplifyAmbient.value = true;
+      }
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      if (!appPauseSimplifyAmbient.value) {
+        appPauseSimplifyAmbient.value = true;
+      }
+      if (!appRecentsCoverNotifier.value) {
+        appRecentsCoverNotifier.value = true;
+      }
+    } else if (state == AppLifecycleState.resumed) {
+      if (appPauseSimplifyAmbient.value) {
+        appPauseSimplifyAmbient.value = false;
+      }
+      if (appRecentsCoverNotifier.value) {
+        appRecentsCoverNotifier.value = false;
+      }
     }
   }
 
@@ -338,12 +360,16 @@ class _WeatherAppState extends State<WeatherApp> with WidgetsBindingObserver {
             supportedLocales: const <Locale>[Locale('sk', 'SK')],
             locale: const Locale('sk', 'SK'),
             pageRouteBuilder: <T>(RouteSettings settings, WidgetBuilder builder) {
-              return MaterialPageRoute<T>(settings: settings, builder: builder);
+              return appInstantRoute<T>(settings: settings, builder: builder);
             },
             builder: (context, child) {
               if (child == null) return const SizedBox.shrink();
               return AnimatedBuilder(
-                animation: appAmbientSnapshot,
+                animation: Listenable.merge([
+                  appAmbientSnapshot,
+                  appPauseSimplifyAmbient,
+                  appRecentsCoverNotifier,
+                ]),
                 builder: (context, _) {
                   final snap = appAmbientSnapshot.value;
                   return Stack(
@@ -355,9 +381,15 @@ class _WeatherAppState extends State<WeatherApp> with WidgetsBindingObserver {
                           weatherCode: snap.weatherCode,
                           isDay: snap.isDay,
                           blendColor: kAmbientBlendColor,
+                          simplifyForRecents: appPauseSimplifyAmbient.value,
                         ),
                       ),
                       Positioned.fill(child: child),
+                      // Recent karty: čisté navy — grain + PlatformView tam robia mriežku.
+                      if (appRecentsCoverNotifier.value)
+                        const Positioned.fill(
+                          child: ColoredBox(color: kAmbientBlendColor),
+                        ),
                     ],
                   );
                 },
@@ -751,8 +783,20 @@ bool isDaytimeForHour(String hourTimeUTC, DailyForecast? daily) {
   }
 }
 
-/// Rozmedzie úhrnu v UI — krátke stupne (`0-1`, `1-2`, …).
-String _precipitationAmountRange(double amount) => precipAmountRangeLabel(amount);
+/// Zobrazí mm/cm **ako z API** (zaokrúhlené), nie umelé rozmedzie z %.
+String _formatPrecipNumber(double amount) {
+  if (amount <= 0) return '0';
+  if (amount < 0.05) return '0';
+  if (amount < 10) {
+    final tenths = (amount * 10).round() / 10.0;
+    if (tenths <= 0) return '0';
+    if ((tenths - tenths.roundToDouble()).abs() < 0.05) {
+      return '${tenths.round()}';
+    }
+    return tenths.toStringAsFixed(1);
+  }
+  return '${amount.round()}';
+}
 
 String _formatPrecipitation(
   double amount, {
@@ -765,13 +809,9 @@ String _formatPrecipitation(
     isSnow = snowCodes.contains(weatherCode);
   }
 
-  final aligned = alignPrecipMmForDisplay(
-    amount,
-    weatherCode: weatherCode,
-    dailyContext: daily,
-  );
+  // Bez nafukovania podľa ikony — UI má ukazovať API úhrn.
   final unit = isSnow ? 'cm' : 'mm';
-  return '${_precipitationAmountRange(aligned)} $unit';
+  return '${_formatPrecipNumber(amount)} $unit';
 }
 
 
@@ -2299,6 +2339,140 @@ int resolveDailyCardMainIconCode({
   return _capDailyMainThunderByPartIcons(code, partIconCodes);
 }
 
+/// Starý lastKnown (emulátor mock) nesmie ísť pred čerstvým fixom.
+bool _isUsableCachedPosition(
+  Position pos, {
+  Duration maxAge = const Duration(minutes: 5),
+  double maxAccuracyM = 25000,
+}) {
+  final age = DateTime.now().difference(pos.timestamp);
+  if (age.isNegative || age > maxAge) return false;
+  // accuracy == 0 často = neznáma — pri čerstvom čase OK.
+  if (pos.accuracy > 0 && pos.accuracy > maxAccuracyM) return false;
+  return true;
+}
+
+LocationSettings _platformLocationSettings({
+  required LocationAccuracy accuracy,
+  required Duration timeLimit,
+}) {
+  if (Platform.isAndroid) {
+    return AndroidSettings(
+      accuracy: accuracy,
+      timeLimit: timeLimit,
+      intervalDuration: const Duration(seconds: 1),
+    );
+  }
+  if (Platform.isIOS) {
+    return AppleSettings(
+      accuracy: accuracy,
+      timeLimit: timeLimit,
+      activityType: ActivityType.other,
+    );
+  }
+  return LocationSettings(accuracy: accuracy, timeLimit: timeLimit);
+}
+
+Future<Position?> _tryCurrentPosition({
+  required LocationAccuracy accuracy,
+  required Duration timeLimit,
+}) async {
+  try {
+    return await Geolocator.getCurrentPosition(
+      locationSettings: _platformLocationSettings(
+        accuracy: accuracy,
+        timeLimit: timeLimit,
+      ),
+    );
+  } catch (e) {
+    debugPrint('getCurrentPosition($accuracy) failed: $e');
+    return null;
+  }
+}
+
+/// Low (sieť) + medium naraz → high → lastKnown. Nový user nesmie skončiť na null.
+Future<Position?> obtainDevicePosition({
+  bool preferFresh = true,
+  Duration currentTimeout = const Duration(seconds: 12),
+  LocationAccuracy accuracy = LocationAccuracy.low,
+  /// Po čerstvom povolení — dialóg už bol, netreba 300 ms pauzu.
+  bool afterPermissionGrant = false,
+}) async {
+  Position? lastKnown;
+  try {
+    lastKnown = await Geolocator.getLastKnownPosition()
+        .timeout(const Duration(milliseconds: 600), onTimeout: () => null);
+  } catch (_) {
+    lastKnown = null;
+  }
+
+  if (!afterPermissionGrant) {
+    // Po povolení oprávnenia Android občas potrebuje krátku pauzu.
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+  } else {
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+  }
+
+  // Low + medium paralelne — prvý ne-null vyhrá (fail jedného nezruší druhý).
+  final race = Completer<Position?>();
+  var remaining = 2;
+  void offer(Position? pos) {
+    if (pos != null && !race.isCompleted) {
+      race.complete(pos);
+      return;
+    }
+    remaining--;
+    if (remaining <= 0 && !race.isCompleted) {
+      race.complete(null);
+    }
+  }
+
+  unawaited(_tryCurrentPosition(
+    accuracy: LocationAccuracy.low,
+    timeLimit: currentTimeout,
+  ).then(offer));
+  unawaited(_tryCurrentPosition(
+    accuracy: accuracy == LocationAccuracy.high
+        ? LocationAccuracy.high
+        : LocationAccuracy.medium,
+    timeLimit: currentTimeout + const Duration(seconds: 3),
+  ).then(offer));
+
+  final raced = await race.future;
+  if (raced != null) return raced;
+
+  final high = await _tryCurrentPosition(
+    accuracy: LocationAccuracy.high,
+    timeLimit: const Duration(seconds: 10),
+  );
+  if (high != null) return high;
+
+  if (lastKnown != null &&
+      _isUsableCachedPosition(
+        lastKnown,
+        maxAge: preferFresh
+            ? const Duration(minutes: 10)
+            : const Duration(hours: 2),
+      )) {
+    return lastKnown;
+  }
+  return null;
+}
+
+GeoCity geoCityFromCoordinates(double lat, double lon) {
+  return GeoCity(
+    name: 'Poloha (${lat.toStringAsFixed(4)}, ${lon.toStringAsFixed(4)})',
+    lat: lat,
+    lon: lon,
+    country: '',
+    countryCode: '',
+    admin1: '',
+    admin2: '',
+    population: null,
+    timezone: 'auto',
+  );
+}
+
 Future<GeoCity?> reverseGeocode(double lat, double lon, {bool resolveTimezone = true}) async {
   final cachedCity = await CacheManager.getGeoCity(lat, lon);
   if (cachedCity != null) {
@@ -2320,67 +2494,64 @@ Future<GeoCity?> reverseGeocode(double lat, double lon, {bool resolveTimezone = 
     return cachedCity;
   }
 
-  try {
-    final wapiCity = await _reverseGeocodeWeatherApi(lat, lon);
-    if (wapiCity != null) {
-      final timezone =
-          resolveTimezone ? await _getTimezoneForCoordinates(lat, lon) : null;
-      var countryCode = wapiCity.countryCode.trim().toUpperCase();
-      if (countryCode.isEmpty) {
-        countryCode = weatherApiCountryCodeFromName(wapiCity.country);
-      }
-      final finalCity = GeoCity(
-        name: wapiCity.name,
-        lat: lat,
-        lon: lon,
-        country: wapiCity.country,
-        countryCode: countryCode,
-        admin1: wapiCity.admin1,
-        admin2: wapiCity.admin2,
-        timezone: timezone ?? 'auto',
-      );
-      await CacheManager.saveGeoCity(lat, lon, finalCity);
-      return finalCity;
+  Future<GeoCity?> finish(GeoCity base) async {
+    final timezone =
+        resolveTimezone ? await _getTimezoneForCoordinates(lat, lon) : null;
+    var countryCode = base.countryCode.trim().toUpperCase();
+    if (countryCode.isEmpty) {
+      countryCode = weatherApiCountryCodeFromName(base.country);
     }
-
-    final uri = Uri.parse(
-        '$kGeoApi/reverse?latitude=$lat&longitude=$lon&count=1&language=sk&format=json');
-    final r = await http
-        .get(uri)
-        .timeout(const Duration(milliseconds: 10000));
-    if (r.statusCode == 200) {
-      final data = json.decode(r.body) as Map<String, dynamic>;
-      final results = (data['results'] as List?) ?? [];
-      if (results.isNotEmpty) {
-        final city = GeoCity.fromGeoJson(results.first);
-        final timezone =
-            resolveTimezone ? await _getTimezoneForCoordinates(lat, lon) : null;
-
-        final finalCity = GeoCity(
-          name: city.name,
-          lat: lat,
-          lon: lon,
-          country: city.country,
-          countryCode: city.countryCode,
-          admin1: city.admin1,
-          admin2: city.admin2,
-          population: city.population,
-          timezone: timezone ?? 'auto',
-        );
-
-        await CacheManager.saveGeoCity(lat, lon, finalCity);
-        return finalCity;
-      }
-    }
-  // ignore: empty_catches
-  } catch (e) {}
+    final finalCity = GeoCity(
+      name: base.name,
+      lat: lat,
+      lon: lon,
+      country: base.country,
+      countryCode: countryCode,
+      admin1: base.admin1,
+      admin2: base.admin2,
+      population: base.population,
+      timezone: timezone ?? base.timezone,
+    );
+    await CacheManager.saveGeoCity(lat, lon, finalCity);
+    return finalCity;
+  }
 
   try {
+    // Paralelne — onboarding nesmie čakať 10 s na jedno API.
+    final wapiFuture = _reverseGeocodeWeatherApi(lat, lon);
+    final openMeteoFuture = () async {
+      try {
+        final uri = Uri.parse(
+            '$kGeoApi/reverse?latitude=$lat&longitude=$lon&count=1&language=sk&format=json');
+        final r = await http.get(uri).timeout(const Duration(seconds: 4));
+        if (r.statusCode != 200) return null;
+        final data = json.decode(r.body) as Map<String, dynamic>;
+        final results = (data['results'] as List?) ?? [];
+        if (results.isEmpty) return null;
+        return GeoCity.fromGeoJson(results.first);
+      } catch (_) {
+        return null;
+      }
+    }();
+
+    final wapiCity = await wapiFuture.timeout(
+      const Duration(seconds: 4),
+      onTimeout: () => null,
+    );
+    if (wapiCity != null && wapiCity.name.trim().isNotEmpty) {
+      return finish(wapiCity);
+    }
+
+    final omCity = await openMeteoFuture;
+    if (omCity != null && omCity.name.trim().isNotEmpty) {
+      return finish(omCity);
+    }
+
     final uri = Uri.parse(
         'https://nominatim.openstreetmap.org/reverse?lat=$lat&lon=$lon&format=jsonv2&accept-language=sk');
     final r = await http.get(uri, headers: const {
       'User-Agent': kNominatimUserAgent
-    }).timeout(const Duration(milliseconds: 10000));
+    }).timeout(const Duration(seconds: 4));
     if (r.statusCode == 200) {
       final data = json.decode(r.body) as Map<String, dynamic>;
       final addr = data['address'] as Map<String, dynamic>?;
@@ -2395,14 +2566,12 @@ Future<GeoCity?> reverseGeocode(double lat, double lon, {bool resolveTimezone = 
 
         final name = pick(['city', 'town', 'village', 'municipality', 'suburb', 'county']);
         final admin1 = pick(['state', 'region']);
-        final admin2 = pick(['county', 'state_district']); 
+        final admin2 = pick(['county', 'state_district']);
         final country = pick(['country']);
         final countryCode = pick(['country_code']).toUpperCase();
-        final timezone =
-            resolveTimezone ? await _getTimezoneForCoordinates(lat, lon) : null;
 
         if (name.isNotEmpty || admin1.isNotEmpty || country.isNotEmpty) {
-          final finalCity = GeoCity(
+          return finish(GeoCity(
             name: name.isNotEmpty ? name : (admin1.isNotEmpty ? admin1 : country),
             lat: lat,
             lon: lon,
@@ -2411,29 +2580,16 @@ Future<GeoCity?> reverseGeocode(double lat, double lon, {bool resolveTimezone = 
             admin1: admin1,
             admin2: admin2,
             population: null,
-            timezone: timezone ?? 'auto',
-          );
-          await CacheManager.saveGeoCity(lat, lon, finalCity);
-          return finalCity;
+            timezone: 'auto',
+          ));
         }
       }
     }
   // ignore: empty_catches
   } catch (e) {}
 
-  final formattedLat = lat.toStringAsFixed(4);
-  final formattedLon = lon.toStringAsFixed(4);
-  return GeoCity(
-    name: 'Poloha ($formattedLat, $formattedLon)',
-    lat: lat,
-    lon: lon,
-    country: '',
-    countryCode: '',
-    admin1: '',
-    admin2: '',
-    population: null,
-    timezone: 'auto',
-  );
+  // Nikdy null — počasie podľa GPS súradníc aj bez názvu mesta.
+  return geoCityFromCoordinates(lat, lon);
 }
 
 /// Detekuje timezone podľa geografických súradníc bez externého API
@@ -2498,3 +2654,5 @@ Future<void> openUrl(String url) async {
     } catch (e2) {}
   }
 }
+
+//test

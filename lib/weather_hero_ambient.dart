@@ -185,11 +185,13 @@ class _HeroBackdropPainter extends CustomPainter {
     required this.kind,
     required this.isDay,
     required this.blendColor,
+    this.simplifyForRecents = false,
   });
 
   final WeatherAmbientKind kind;
   final bool isDay;
   final Color blendColor;
+  final bool simplifyForRecents;
 
   void _grain(Canvas canvas, Rect rect, {required double intensity}) {
     final w = rect.width;
@@ -263,7 +265,10 @@ class _HeroBackdropPainter extends CustomPainter {
         ),
     );
 
-    _grain(canvas, rect, intensity: 0.42);
+    // Grain v recentoch = viditeľná mriežka bodiek — pri pause vynechať.
+    if (!simplifyForRecents) {
+      _grain(canvas, rect, intensity: 0.42);
+    }
 
     // Oblaky (iba pár mäkkých „bubble“, staticky).
     const cloudTintDayBright = Color(0xFFE2EAF4);
@@ -336,7 +341,9 @@ class _HeroBackdropPainter extends CustomPainter {
           extraBaseYFrac: extraY);
     }
 
-    if (!isDay && (kind == WeatherAmbientKind.clear || kind == WeatherAmbientKind.partlyCloudy)) {
+    if (!simplifyForRecents &&
+        !isDay &&
+        (kind == WeatherAmbientKind.clear || kind == WeatherAmbientKind.partlyCloudy)) {
       final p = Paint()..style = PaintingStyle.fill;
       for (var i = 0; i < 22; i++) {
         final sx = _hash01(i, 1) * size.width;
@@ -452,7 +459,10 @@ class _HeroBackdropPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _HeroBackdropPainter oldDelegate) {
-    return oldDelegate.kind != kind || oldDelegate.isDay != isDay || oldDelegate.blendColor != blendColor;
+    return oldDelegate.kind != kind ||
+        oldDelegate.isDay != isDay ||
+        oldDelegate.blendColor != blendColor ||
+        oldDelegate.simplifyForRecents != simplifyForRecents;
   }
 }
 
@@ -463,11 +473,13 @@ class WeatherHeroAmbient extends StatelessWidget {
     required this.weatherCode,
     required this.isDay,
     required this.blendColor,
+    this.simplifyForRecents = false,
   });
 
   final int weatherCode;
   final bool isDay;
   final Color blendColor;
+  final bool simplifyForRecents;
 
   @override
   Widget build(BuildContext context) {
@@ -478,6 +490,7 @@ class WeatherHeroAmbient extends StatelessWidget {
           kind: kind,
           isDay: isDay,
           blendColor: blendColor,
+          simplifyForRecents: simplifyForRecents,
         ),
         child: const SizedBox.expand(),
       ),

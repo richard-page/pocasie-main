@@ -1341,11 +1341,9 @@ class _OnboardingPageState extends State<OnboardingPage>
 
   Future<void> _continueWithLocation() async {
     if (_busy) return;
-    setState(() => _busy = true);
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
-        if (mounted) setState(() => _busy = false);
         // ignore: use_build_context_synchronously
         final turnOn = await showLocationAccuracyDialog(context);
         if (turnOn == true) {
@@ -1355,36 +1353,32 @@ class _OnboardingPageState extends State<OnboardingPage>
         return;
       }
 
+      // Dialóg polohy HNEĎ — nie až po „Spracovávam…“.
       LocationPermission perm = await Geolocator.checkPermission();
       if (perm == LocationPermission.denied) {
         perm = await Geolocator.requestPermission();
         await SettingsManager.setLocationPermissionPromptShown(true);
       }
       if (perm == LocationPermission.deniedForever) {
-        if (mounted) setState(() => _busy = false);
         await _chooseLocationManually();
         return;
       }
       if (perm != LocationPermission.always &&
           perm != LocationPermission.whileInUse) {
-        // Prvé odmietnutie — skús manuálny výber, nie „navždy“.
-        if (mounted) setState(() => _busy = false);
         await _chooseLocationManually();
         return;
       }
 
-      Position? pos = await Geolocator.getLastKnownPosition()
-          .timeout(const Duration(milliseconds: 500), onTimeout: () => null);
-      try {
-        pos ??= await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.low,
-            timeLimit: Duration(seconds: 4),
-          ),
-        );
-      } catch (_) {
-        pos ??= await Geolocator.getLastKnownPosition();
-      }
+      if (!mounted) return;
+      setState(() => _busy = true);
+
+      // Krátky GPS fix — onboarding nesmie čakať 15+ s.
+      final Position? pos = await obtainDevicePosition(
+        preferFresh: true,
+        accuracy: LocationAccuracy.low,
+        currentTimeout: const Duration(seconds: 5),
+        afterPermissionGrant: true,
+      );
 
       if (pos == null) {
         if (mounted) setState(() => _busy = false);
@@ -1400,34 +1394,32 @@ class _OnboardingPageState extends State<OnboardingPage>
         return;
       }
 
-      final city = await reverseGeocode(
-        pos.latitude,
-        pos.longitude,
-        resolveTimezone: false,
-      ).timeout(const Duration(seconds: 5), onTimeout: () => null);
-      if (!mounted) return;
-      if (city == null) {
-        setState(() => _busy = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Lokalitu sa nepodarilo určiť. Vyberte mesto manuálne.'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-        await _chooseLocationManually();
-        return;
+      GeoCity city;
+      try {
+        city = await reverseGeocode(
+          pos.latitude,
+          pos.longitude,
+          resolveTimezone: false,
+        ).timeout(
+          const Duration(seconds: 3),
+          onTimeout: () => geoCityFromCoordinates(pos.latitude, pos.longitude),
+        ) ??
+            geoCityFromCoordinates(pos.latitude, pos.longitude);
+      } catch (_) {
+        city = geoCityFromCoordinates(pos.latitude, pos.longitude);
       }
 
-      if (mounted) {
-        Navigator.of(context).pushReplacement(
-          _onboardingRoute(
-            NotificationPermissionPage(
-              city: city,
-              myLocationEnabled: true,
-            ),
+      unawaited(prefetchRadarMapAssets(city));
+
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(
+        _onboardingRoute(
+          NotificationPermissionPage(
+            city: city,
+            myLocationEnabled: true,
           ),
-        );
-      }
+        ),
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
@@ -1686,13 +1678,9 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
 
   Future<void> _enableNotifications() async {
     if (_isProcessing) return;
-    setState(() {
-      _isAllowing = true;
-    });
 
     try {
-      // Natívny dialóg hneď — OneSignal.canRequest/requestPermission pri úspore dát
-      // čaká na sieť a dialóg sa ukazoval až po dlhom „Spracovávam…“.
+      // Natívny dialóg HNEĎ — „Spracovávam…“ až po odpovedi používateľa.
       var granted = false;
       try {
         granted = await LocalTestPushService.requestPermissionsFromUserAction()
@@ -1700,7 +1688,16 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
       } catch (_) {
         granted = false;
       }
+      if (!mounted) return;
       _restoreTransparentSystemBars();
+
+      if (!granted) {
+        await SettingsManager.setSystemNotificationsEnabled(false);
+        if (mounted) _showNotificationSettingsHintDialog();
+        return;
+      }
+
+      setState(() => _isAllowing = true);
 
       // OneSignal sync na pozadí (neblokuje UI).
       unawaited(Future<void>(() async {
@@ -1708,36 +1705,26 @@ class _NotificationPermissionPageState extends State<NotificationPermissionPage>
           await OneSignal.Notifications.requestPermission(false)
               .timeout(const Duration(seconds: 8));
         } catch (_) {}
+        try {
+          OneSignal.User.addTags({
+            "city": widget.city.name,
+            "notifications_enabled": "true",
+          });
+        } catch (_) {}
       }));
 
-      await SettingsManager.setSystemNotificationsEnabled(granted);
-
-      if (!granted) {
-        if (mounted) setState(() => _isAllowing = false);
-        if (mounted) _showNotificationSettingsHintDialog();
-        return;
-      }
-
+      await SettingsManager.setSystemNotificationsEnabled(true);
       await _completeOnboardingAndNavigate(
         city: widget.city,
         myLocationEnabled: widget.myLocationEnabled,
       );
-
-      unawaited(Future<void>(() async {
-        OneSignal.User.addTags({
-          "city": widget.city.name,
-          "notifications_enabled": "true",
-        });
-      }));
     } catch (e) {
       await SettingsManager.setSystemNotificationsEnabled(false);
       if (mounted) setState(() => _isAllowing = false);
       if (mounted) _showNotificationSettingsHintDialog();
     } finally {
       if (mounted && _isAllowing) {
-        setState(() {
-          _isAllowing = false;
-        });
+        setState(() => _isAllowing = false);
       }
     }
   }
@@ -2102,6 +2089,8 @@ class DailyPollen {
   final double? mugwort;
   final double? ragweed;
   final double? olive;
+  final double? hazel;
+  final double? oak;
 
   DailyPollen({
     required this.dateStr,
@@ -2111,6 +2100,8 @@ class DailyPollen {
     this.mugwort,
     this.ragweed,
     this.olive,
+    this.hazel,
+    this.oak,
   });
 }
 
@@ -2148,10 +2139,11 @@ class PollenForecastPage extends StatelessWidget {
   }
 
   int _getPollenLevel(double? grains) {
+    // WeatherAPI grains/m³ stupnica.
     if (grains == null || grains < 1) return 0;
-    if (grains < 15) return 1;
-    if (grains < 50) return 2;
-    if (grains < 150) return 3;
+    if (grains < 20) return 1;
+    if (grains < 100) return 2;
+    if (grains < 300) return 3;
     return 4;
   }
 
@@ -2182,6 +2174,8 @@ class PollenForecastPage extends StatelessWidget {
       double? currentMugwort = data.mugwort != null && data.mugwort!.length > i ? data.mugwort![i] : null;
       double? currentRagweed = data.ragweed != null && data.ragweed!.length > i ? data.ragweed![i] : null;
       double? currentOlive = data.olive != null && data.olive!.length > i ? data.olive![i] : null;
+      double? currentHazel = data.hazel != null && data.hazel!.length > i ? data.hazel![i] : null;
+      double? currentOak = data.oak != null && data.oak!.length > i ? data.oak![i] : null;
 
       if (!dailyMap.containsKey(dateStr)) {
         dailyMap[dateStr] = DailyPollen(
@@ -2192,6 +2186,8 @@ class PollenForecastPage extends StatelessWidget {
           mugwort: currentMugwort,
           ragweed: currentRagweed,
           olive: currentOlive,
+          hazel: currentHazel,
+          oak: currentOak,
         );
       } else {
         DailyPollen existing = dailyMap[dateStr]!;
@@ -2203,6 +2199,8 @@ class PollenForecastPage extends StatelessWidget {
           mugwort: maxVal(existing.mugwort, currentMugwort),
           ragweed: maxVal(existing.ragweed, currentRagweed),
           olive: maxVal(existing.olive, currentOlive),
+          hazel: maxVal(existing.hazel, currentHazel),
+          oak: maxVal(existing.oak, currentOak),
         );
       }
     }
@@ -2399,8 +2397,8 @@ class PollenForecastPage extends StatelessWidget {
           _buildAllergenRow('Palina', dayData.mugwort),
           _buildAllergenRow('Ambrózia', dayData.ragweed),
           _buildAllergenRow('Oliva', dayData.olive),
-          _buildAllergenRow('Lieska', null),
-          _buildAllergenRow('Dub', null),
+          _buildAllergenRow('Lieska', dayData.hazel),
+          _buildAllergenRow('Dub', dayData.oak),
           _buildAllergenRow('Jaseň', null),
           _buildAllergenRow('Skorocel', null),
           _chartSectionDivider(),
@@ -3110,7 +3108,8 @@ class _CitySearchPageState extends State<CitySearchPage> {
 
   List<GeoCity> _finalizeSearchResults(List<GeoCity> cities, String q) {
     final Map<String, GeoCity> uniqueByDedupKey = {};
-    for (final c in cities) {
+    for (final raw in cities) {
+      final c = _withResolvedCountryCode(raw);
       final key = _cityDedupKey(c);
       final prev = uniqueByDedupKey[key];
       if (prev == null) {
@@ -3125,25 +3124,59 @@ class _CitySearchPageState extends State<CitySearchPage> {
         _mergeNearDuplicateCities(uniqueByDedupKey.values.toList());
     final normalizedQuery = _normalizeSearchPart(q);
     return mergedCities
+        .map(_withResolvedCountryCode)
         .where((c) => _isRelevantCityForQuery(c, normalizedQuery))
         .toList();
   }
 
   /// Lepší záznam pri zhode z Open-Meteo + Nominatim (populácia, diakritika, úplnejší kraj).
   bool _preferSearchCity(GeoCity candidate, GeoCity current) {
+    final candCc = candidate.countryCode.trim().length == 2;
+    final currCc = current.countryCode.trim().length == 2;
+    if (candCc != currCc) return candCc;
+    final candDia = _hasDiacritics(candidate.name);
+    final currDia = _hasDiacritics(current.name);
+    if (candDia != currDia) return candDia;
+    // Preferuj lokalizovaný názov krajiny (Švédsko) pred anglickým (Sweden).
+    final candLocalCountry = _looksLocalizedCountry(candidate.country);
+    final currLocalCountry = _looksLocalizedCountry(current.country);
+    if (candLocalCountry != currLocalCountry) return candLocalCountry;
     final candHasRegion = candidate.admin1.trim().isNotEmpty;
     final currHasRegion = current.admin1.trim().isNotEmpty;
     if (candHasRegion != currHasRegion) return candHasRegion;
     final candPop = candidate.population ?? 0;
     final currPop = current.population ?? 0;
     if (candPop != currPop) return candPop > currPop;
-    if (_hasDiacritics(candidate.name) != _hasDiacritics(current.name)) {
-      return _hasDiacritics(candidate.name);
-    }
     if (candidate.admin1.length != current.admin1.length) {
       return candidate.admin1.length > current.admin1.length;
     }
     return false;
+  }
+
+  bool _looksLocalizedCountry(String country) {
+    final c = country.trim();
+    if (c.isEmpty) return false;
+    // Anglické názvy zo WeatherAPI — slabšie ako SK lokalizácia z Open-Meteo.
+    const english = {
+      'sweden',
+      'norway',
+      'denmark',
+      'finland',
+      'germany',
+      'poland',
+      'slovakia',
+      'czech republic',
+      'czechia',
+      'austria',
+      'hungary',
+      'france',
+      'italy',
+      'spain',
+      'united kingdom',
+      'united states',
+      'united states of america',
+    };
+    return !english.contains(c.toLowerCase());
   }
 
   Future<List<GeoCity>> _searchOpenMeteo(String q) async {
@@ -3284,12 +3317,45 @@ class _CitySearchPageState extends State<CitySearchPage> {
     });
   }
 
-  String _flag(String code) => code.length == 2
-      ? String.fromCharCodes([
-          0x1F1E6 - 'A'.codeUnitAt(0) + code.toUpperCase().codeUnitAt(0),
-          0x1F1E6 - 'A'.codeUnitAt(0) + code.toUpperCase().codeUnitAt(1),
-        ])
-      : '';
+  String _flag(String code) {
+    final cc = code.trim().toUpperCase();
+    if (cc.length != 2) return '🏳️';
+    return String.fromCharCodes([
+      0x1F1E6 - 'A'.codeUnitAt(0) + cc.codeUnitAt(0),
+      0x1F1E6 - 'A'.codeUnitAt(0) + cc.codeUnitAt(1),
+    ]);
+  }
+
+  GeoCity _withResolvedCountryCode(GeoCity c) {
+    final existing = c.countryCode.trim().toUpperCase();
+    if (existing.length == 2) {
+      if (existing == c.countryCode) return c;
+      return GeoCity(
+        name: c.name,
+        lat: c.lat,
+        lon: c.lon,
+        country: c.country,
+        countryCode: existing,
+        admin1: c.admin1,
+        admin2: c.admin2,
+        population: c.population,
+        timezone: c.timezone,
+      );
+    }
+    final fromName = weatherApiCountryCodeFromName(c.country);
+    if (fromName.isEmpty) return c;
+    return GeoCity(
+      name: c.name,
+      lat: c.lat,
+      lon: c.lon,
+      country: c.country,
+      countryCode: fromName,
+      admin1: c.admin1,
+      admin2: c.admin2,
+      population: c.population,
+      timezone: c.timezone,
+    );
+  }
 
   /// Kľúč deduplikácie — rovnaké mesto z viacerých API (Košický vs Košický kraj).
   /// Bez lat/lon: Open-Meteo a Nominatim majú iný stred sídla (inak 2 rovnaké riadky).
@@ -3315,7 +3381,26 @@ class _CitySearchPageState extends State<CitySearchPage> {
     return math.sqrt(dLat * dLat + dLon * dLon);
   }
 
+  bool _sameSearchCountry(GeoCity a, GeoCity b) {
+    final ca = a.countryCode.trim().toUpperCase();
+    final cb = b.countryCode.trim().toUpperCase();
+    if (ca.length == 2 && cb.length == 2) return ca == cb;
+    if (ca.length == 2) {
+      final fromB = weatherApiCountryCodeFromName(b.country);
+      return fromB.isEmpty || fromB == ca;
+    }
+    if (cb.length == 2) {
+      final fromA = weatherApiCountryCodeFromName(a.country);
+      return fromA.isEmpty || fromA == cb;
+    }
+    final na = _normalizeSearchPart(a.country);
+    final nb = _normalizeSearchPart(b.country);
+    if (na.isEmpty || nb.isEmpty) return true;
+    return na == nb;
+  }
+
   bool _citiesAreNearDuplicates(GeoCity a, GeoCity b) {
+    if (!_sameSearchCountry(a, b)) return false;
     final regionA = _normalizeAdminRegion(
       a.admin1.trim().isNotEmpty ? a.admin1 : a.admin2,
     );
@@ -3330,19 +3415,22 @@ class _CitySearchPageState extends State<CitySearchPage> {
     if (sameRegion && distKm <= 55) return true;
     // Rovnaký text pod názvom v zozname → jedna položka.
     if (_citySubtitle(a) == _citySubtitle(b) && distKm <= 80) return true;
+    // Rovnaký názov (po fold) + rovnaký štát — WeatherAPI ASCII vs Open-Meteo diakritika.
+    if (_normalizeSearchPart(a.name) == _normalizeSearchPart(b.name) &&
+        distKm <= 40) {
+      return true;
+    }
     return false;
   }
 
   /// Druhý stupeň: rovnaký názov + krajina v blízkosti → jedna položka
-  /// (Open-Meteo + Nominatim, alebo mesto vs. obec so slabšími dátami).
+  /// (WeatherAPI ASCII + Open-Meteo diakritika, mesto vs. obec).
   List<GeoCity> _mergeNearDuplicateCities(List<GeoCity> input) {
-    // Zoskup podľa názvu + štátu (admin1 môže líšiť: okres vs kraj, voj. obvod…).
+    // Zoskup podľa názvu — countryCode môže chýbať (WeatherAPI) vs SE (Open-Meteo).
     final Map<String, List<GeoCity>> groups = <String, List<GeoCity>>{};
     for (final c in input) {
-      final key = [
-        _normalizeSearchPart(c.name),
-        _normalizeSearchPart(c.countryCode),
-      ].join('|');
+      final key = _normalizeSearchPart(c.name);
+      if (key.isEmpty) continue;
       groups.putIfAbsent(key, () => <GeoCity>[]).add(c);
     }
 
@@ -3471,7 +3559,9 @@ class _CitySearchPageState extends State<CitySearchPage> {
   String _normalizeAdminRegion(String v) {
     var x = _normalizeSearchPart(v);
     x = x.replaceAll(
-      RegExp(r'\s+(kraj|region|county|oblast|okres|district|kraje)$'),
+      RegExp(
+        r'\s+(kraj|region|county|oblast|okres|district|kraje|lan|län|commune|kommun|municipality)$',
+      ),
       '',
     );
     return x.trim();
@@ -3479,12 +3569,14 @@ class _CitySearchPageState extends State<CitySearchPage> {
 
   String _foldDiacritics(String input) {
     const map = <String, String>{
-      'á': 'a', 'ä': 'a', 'č': 'c', 'ď': 'd', 'é': 'e', 'ě': 'e', 'í': 'i',
-      'ĺ': 'l', 'ľ': 'l', 'ň': 'n', 'ó': 'o', 'ô': 'o', 'ö': 'o', 'ř': 'r',
-      'ŕ': 'r', 'š': 's', 'ť': 't', 'ú': 'u', 'ů': 'u', 'ü': 'u', 'ý': 'y', 'ž': 'z',
-      'Á': 'A', 'Ä': 'A', 'Č': 'C', 'Ď': 'D', 'É': 'E', 'Ě': 'E', 'Í': 'I',
-      'Ĺ': 'L', 'Ľ': 'L', 'Ň': 'N', 'Ó': 'O', 'Ô': 'O', 'Ö': 'O', 'Ř': 'R',
-      'Ŕ': 'R', 'Š': 'S', 'Ť': 'T', 'Ú': 'U', 'Ů': 'U', 'Ü': 'U', 'Ý': 'Y', 'Ž': 'Z',
+      'á': 'a', 'ä': 'a', 'å': 'a', 'č': 'c', 'ď': 'd', 'é': 'e', 'ě': 'e',
+      'í': 'i', 'ĺ': 'l', 'ľ': 'l', 'ň': 'n', 'ó': 'o', 'ô': 'o', 'ö': 'o',
+      'ř': 'r', 'ŕ': 'r', 'š': 's', 'ť': 't', 'ú': 'u', 'ů': 'u', 'ü': 'u',
+      'ý': 'y', 'ž': 'z',
+      'Á': 'A', 'Ä': 'A', 'Å': 'A', 'Č': 'C', 'Ď': 'D', 'É': 'E', 'Ě': 'E',
+      'Í': 'I', 'Ĺ': 'L', 'Ľ': 'L', 'Ň': 'N', 'Ó': 'O', 'Ô': 'O', 'Ö': 'O',
+      'Ř': 'R', 'Ŕ': 'R', 'Š': 'S', 'Ť': 'T', 'Ú': 'U', 'Ů': 'U', 'Ü': 'U',
+      'Ý': 'Y', 'Ž': 'Z',
     };
     final sb = StringBuffer();
     for (final rune in input.runes) {
@@ -3609,44 +3701,46 @@ class FullscreenRadarPage extends StatefulWidget {
   final double? pinLat;
   final double? pinLon;
 
+  /// Domáci náhľad už mal mapu ready — dlaždice/JS sú v cache, kratší spinner.
+  final bool previewAlreadyWarm;
+
   const FullscreenRadarPage({
     super.key,
     required this.initialUrl,
     this.pinLat,
     this.pinLon,
+    this.previewAlreadyWarm = false,
   });
 
   @override
   State<FullscreenRadarPage> createState() => _FullscreenRadarPageState();
 }
 
-class _FullscreenRadarPageState extends State<FullscreenRadarPage> {
+class _FullscreenRadarPageState extends State<FullscreenRadarPage>
+    with SingleTickerProviderStateMixin {
   WebViewController? _controller;
   Widget? _radarView;
   bool _surfaceReady = false;
   bool _mapCoverVisible = true;
-  bool _coverRadarForDialog = false;
   bool _attachInFlight = false;
   bool _revealed = false;
+  Timer? _readyPollTimer;
+  Timer? _refreshRectTimer;
+  final ValueNotifier<Rect?> _refreshBtnRect = ValueNotifier<Rect?>(null);
+  late final AnimationController _refreshSpin;
 
   @override
   void initState() {
     super.initState();
+    _refreshSpin = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 850),
+    );
     unawaited(_boot());
   }
 
   Future<void> _boot() async {
-    // Frame 0+: len navy + chrome. WebView až potom pod krytom.
-    if (mounted) {
-      setState(() {
-        _surfaceReady = false;
-        _mapCoverVisible = true;
-      });
-    }
-    await WidgetsBinding.instance.endOfFrame;
-    await WidgetsBinding.instance.endOfFrame;
-    if (!mounted) return;
-
+    // Ako prehliadač: WebView viditeľný hneď, spinner len kým dôjde HTML.
     late final PlatformWebViewControllerCreationParams params;
     if (WebViewPlatform.instance is AndroidWebViewPlatform) {
       params = AndroidWebViewControllerCreationParams();
@@ -3654,13 +3748,17 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage> {
       params = const PlatformWebViewControllerCreationParams();
     }
 
-    final controller = WebViewController.fromPlatformCreationParams(params)
+    final controller = WebViewController.fromPlatformCreationParams(params);
+    controller
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(kAmbientBlendColor)
       ..setNavigationDelegate(
         NavigationDelegate(
+          onPageStarted: (_) {
+            unawaited(_injectGate(controller));
+          },
           onPageFinished: (_) {
-            unawaited(_attachRadarSurface());
+            unawaited(_revealFullscreenLikeBrowser());
           },
         ),
       );
@@ -3676,30 +3774,44 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage> {
 
     if (!mounted) return;
     _controller = controller;
-    _radarView = buildMeteoRadarWebView(
-      controller: controller,
-      // Texture vo full — Flutter kryt „Načítavam“ musí mapu prekryť.
-      hybridComposition: false,
-    );
+    // Koliesko ostáva až do reveal — žiadna prázdna navy fáza.
+    _radarView = null;
     setState(() {
       _surfaceReady = true;
       _mapCoverVisible = true;
     });
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      controller.loadRequest(Uri.parse(widget.initialUrl));
+    final warmMs = widget.previewAlreadyWarm ? 180 : 400;
+    await Future<void>.delayed(Duration(milliseconds: warmMs));
+    if (!mounted || _controller != controller) return;
+
+    // WebView pod krytom s CPI — fullscreen: Hybrid Composition = plynulejší pan.
+    _radarView = buildMeteoRadarWebView(
+      controller: controller,
+      hybridComposition: true,
+    );
+    if (mounted) setState(() {});
+    unawaited(controller.loadRequest(Uri.parse(widget.initialUrl)));
+
+    // Fallback — až keď je mapa aspoň soft-ready, inak max timeout.
+    final revealMs = widget.previewAlreadyWarm ? 2200 : 3500;
+    Future<void>.delayed(Duration(milliseconds: revealMs), () {
+      if (!mounted || _revealed) return;
+      unawaited(_revealFullscreenLikeBrowser(force: true));
     });
   }
 
-  Future<bool> _mapReady(WebViewController ctrl) async {
+  Future<bool> _mapReady(WebViewController ctrl, {bool soft = false}) async {
     try {
       final raw = await ctrl.runJavaScriptReturningResult(r"""
 (function(){
   try {
     if (typeof map === 'undefined' || !map) return '0';
     if (map.isStyleLoaded && !map.isStyleLoaded()) return '0';
-    if (!document.querySelector('.mapboxgl-canvas')) return '0';
+    var canvas = document.querySelector('.mapboxgl-canvas');
+    if (!canvas) return '0';
+    if (canvas.width < 8 || canvas.height < 8) return '0';
+    if (!soft && typeof map.areTilesLoaded === 'function' && !map.areTilesLoaded()) return '0';
     return '1';
   } catch (e) { return '0'; }
 })()
@@ -3712,29 +3824,12 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage> {
 
   Future<void> _injectGate(WebViewController ctrl) async {
     try {
-      await ctrl.runJavaScript(r"""
-(function(){
-  try {
-    document.documentElement.classList.add('hide-ui');
-    document.documentElement.classList.remove('radar-layers-ready');
-    if (!document.getElementById('app-radar-gate')) {
-      var s = document.createElement('style');
-      s.id = 'app-radar-gate';
-      s.textContent =
-        'html.hide-ui .legend-panel,html.hide-ui .controls-wrapper,' +
-        'html.hide-ui .settings-btn,html.hide-ui .settings-menu,' +
-        'html.hide-ui #radarLegendImg{display:none!important;}' +
-        'html,body,#mapa,.mapboxgl-map,.mapboxgl-canvas-container{background:#172438!important;}' +
-        '#mapa,.mapboxgl-map{opacity:1!important;}';
-      (document.head || document.documentElement).appendChild(s);
-    }
-  } catch (e) {}
-})();
-""");
+      await ctrl.runJavaScript(kMeteoRadarFullscreenChromeJs);
     } catch (_) {}
   }
 
-  Future<void> _attachRadarSurface() async {
+  /// Odhaľ WebView až keď je mapa pripravená — koliesko dovtedy ostáva.
+  Future<void> _revealFullscreenLikeBrowser({bool force = false}) async {
     if (_attachInFlight || _revealed) return;
     _attachInFlight = true;
     try {
@@ -3751,15 +3846,16 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage> {
             lat: lat,
             lon: lon,
             fullscreen: true,
-            removeChrome: true,
-            hideLayersUntilPinned: true,
+            removeChrome: false,
           ));
         } else {
           await ctrl.runJavaScript(r"""
 (function(){
   try {
-    document.documentElement.classList.add('hide-ui');
-    document.documentElement.classList.remove('radar-layers-ready');
+    document.documentElement.classList.add('app-radar-full');
+    document.documentElement.classList.remove('hide-ui');
+    document.documentElement.classList.remove('app-radar-preview');
+    document.documentElement.classList.add('radar-layers-ready');
     if (window.setFullscreen) window.setFullscreen(true);
     if (typeof map !== 'undefined' && map && map.resize) map.resize();
   } catch (e) {}
@@ -3767,48 +3863,167 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage> {
 """);
         }
         await ctrl.runJavaScript(kMeteoRadarPanPerfJs);
+        await ctrl.runJavaScript(kMeteoRadarFullscreenChromeJs);
       } catch (_) {}
 
-      for (var i = 0; i < 50; i++) {
+      // Čakaj na canvas; pri force ešte skús tiles — inak flash prázdnej navy.
+      final maxTries = force ? 40 : 32;
+      for (var i = 0; i < maxTries; i++) {
         if (!mounted || _controller != ctrl) return;
-        if (await _mapReady(ctrl)) break;
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+        final wantTiles = force || i > 10;
+        if (await _mapReady(ctrl, soft: !wantTiles)) break;
+        await Future<void>.delayed(const Duration(milliseconds: 55));
       }
+
       if (!mounted || _controller != ctrl) return;
-
-      try {
-        if (lat != null && lon != null) {
-          await ctrl.runJavaScript(buildMeteoRadarPinCityJs(
-            lat: lat,
-            lon: lon,
-            fullscreen: true,
-            removeChrome: true,
-          ));
-        }
-        await ctrl.runJavaScript(r"""
-(function(){
-  try {
-    document.documentElement.classList.add('hide-ui');
-    document.documentElement.classList.add('radar-layers-ready');
-    if (typeof map !== 'undefined' && map && map.resize) map.resize();
-  } catch (e) {}
-})();
-""");
-      } catch (_) {}
-
-      await WidgetsBinding.instance.endOfFrame;
-      await Future<void>.delayed(const Duration(milliseconds: 120));
-      if (!mounted) return;
-      setState(() => _mapCoverVisible = false);
+      _readyPollTimer?.cancel();
+      _readyPollTimer = null;
+      _radarView ??= buildMeteoRadarWebView(
+        controller: ctrl,
+        hybridComposition: true,
+      );
+      setState(() {
+        _mapCoverVisible = false;
+      });
       _revealed = true;
+      _startRefreshRectTracking();
     } finally {
       _attachInFlight = false;
     }
   }
 
+  void _startRefreshRectTracking() {
+    _refreshRectTimer?.cancel();
+    // Bez periodického JS pollu (seká pan) — len pár syncov po reveal.
+    unawaited(_syncRefreshBtnRect());
+    for (final ms in const [80, 200, 500, 1200, 2500]) {
+      Future<void>.delayed(Duration(milliseconds: ms), () {
+        if (mounted && _revealed && !_mapCoverVisible) {
+          unawaited(_syncRefreshBtnRect());
+        }
+      });
+    }
+  }
+
+  Future<void> _syncRefreshBtnRect() async {
+    final ctrl = _controller;
+    if (ctrl == null || !mounted || _mapCoverVisible) return;
+    try {
+      // Počas ťahania mapy neťahaj JS bridge.
+      final busy = await ctrl.runJavaScriptReturningResult(r'''
+(function(){ try { return window.__appRadarUserInteracting ? '1' : '0'; } catch(e){ return '0'; } })()
+''');
+      if (busy.toString().contains('1')) return;
+
+      final raw = await ctrl.runJavaScriptReturningResult(r'''
+(function(){
+  try {
+    var b = document.querySelector('.refresh-btn')
+      || document.querySelector('button.refresh-btn')
+      || document.querySelector('[class*="refresh"]');
+    if (!b) return '';
+    var r = b.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8) return '';
+    return [r.left, r.top, r.width, r.height].join(',');
+  } catch (e) { return ''; }
+})()
+''');
+      final s = raw.toString().replaceAll('"', '').trim();
+      if (s.isEmpty) return;
+      final parts = s.split(',');
+      if (parts.length != 4) return;
+      final next = Rect.fromLTWH(
+        double.parse(parts[0]),
+        double.parse(parts[1]),
+        double.parse(parts[2]),
+        double.parse(parts[3]),
+      );
+      final prev = _refreshBtnRect.value;
+      if (prev != null &&
+          (prev.left - next.left).abs() < 0.5 &&
+          (prev.top - next.top).abs() < 0.5 &&
+          (prev.width - next.width).abs() < 0.5 &&
+          (prev.height - next.height).abs() < 0.5) {
+        return;
+      }
+      if (mounted) _refreshBtnRect.value = next;
+    } catch (_) {}
+  }
+
+  Future<void> _onFlutterRefreshTap() async {
+    if (_refreshSpin.isAnimating) return;
+    final ctrl = _controller;
+    // Flutter vsync spin — mimo Mapbox GPU (CSS .spinning seká).
+    _refreshSpin.repeat();
+    try {
+      if (ctrl != null) {
+        await ctrl.runJavaScript(r'''
+(function(){
+  try {
+    var btn = document.querySelector('.refresh-btn');
+    if (btn) btn.click();
+    else if (typeof obnovRadar === 'function') obnovRadar();
+    else if (typeof refreshRadar === 'function') refreshRadar();
+  } catch (e) {}
+})();
+''');
+        // Drž spin kým Helkor „spinning“ alebo min. 1,1 s / max 2,8 s.
+        final started = DateTime.now();
+        while (mounted &&
+            DateTime.now().difference(started).inMilliseconds < 2800) {
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          if (!mounted || ctrl != _controller) break;
+          final elapsed =
+              DateTime.now().difference(started).inMilliseconds;
+          if (elapsed < 1100) continue;
+          try {
+            final raw = await ctrl.runJavaScriptReturningResult(r'''
+(function(){
+  try {
+    var b = document.querySelector('.refresh-btn');
+    if (!b) return '0';
+    if (b.classList.contains('spinning')) return '1';
+    var svg = b.querySelector('svg');
+    if (svg && svg.classList.contains('spinning')) return '1';
+    return '0';
+  } catch (e) { return '0'; }
+})()
+''');
+            if (!raw.toString().contains('1')) break;
+          } catch (_) {
+            break;
+          }
+        }
+      } else {
+        await Future<void>.delayed(const Duration(milliseconds: 1200));
+      }
+    } finally {
+      if (mounted) {
+        _refreshSpin
+          ..stop()
+          ..reset();
+      }
+    }
+  }
+
   @override
   void dispose() {
+    _readyPollTimer?.cancel();
+    _readyPollTimer = null;
+    _refreshRectTimer?.cancel();
+    _refreshRectTimer = null;
+    _refreshBtnRect.dispose();
+    _refreshSpin.dispose();
+    final ctrl = _controller;
     _controller = null;
+    _radarView = null;
+    if (ctrl != null) {
+      unawaited(() async {
+        try {
+          await ctrl.loadRequest(Uri.parse('about:blank'));
+        } catch (_) {}
+      }());
+    }
     super.dispose();
   }
 
@@ -3838,100 +4053,92 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage> {
   }
 
   Future<void> _showRadarSourceInfo(BuildContext context) async {
-    if (_coverRadarForDialog) return;
-    setState(() => _coverRadarForDialog = true);
-    await WidgetsBinding.instance.endOfFrame;
-    if (!mounted) return;
-    try {
-      await showGeneralDialog<void>(
-        context: context,
-        barrierDismissible: true,
-        barrierLabel: 'Zavrieť',
-        barrierColor: const Color(0xE6172438),
-        transitionDuration: Duration.zero,
-        pageBuilder: (dialogContext, _, __) {
-          return Center(
-            child: Material(
-              type: MaterialType.transparency,
-              child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 24),
-                decoration: appInfoDialogDecoration(),
-                child: Padding(
-                  padding: const EdgeInsets.all(20.0),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      appInfoDialogIcon(Icons.info_rounded),
-                      const SizedBox(height: 16),
-                      const Text(
-                        'Zdroj dát',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white,
-                        ),
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Zavrieť',
+      barrierColor: const Color(0x99000000),
+      transitionDuration: Duration.zero,
+      pageBuilder: (dialogContext, _, __) {
+        return Center(
+          child: Material(
+            type: MaterialType.transparency,
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 24),
+              decoration: appInfoDialogDecoration(),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    appInfoDialogIcon(Icons.info_rounded),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Zdroj dát',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
                       ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'Radarové dáta sú spracované z otvorených dát SHMÚ (SK), ČHMÚ (CZ), IMGW (PL), DWD (DE) a ANM (RO).',
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Radarové dáta sú spracované z otvorených dát SHMÚ (SK), ČHMÚ (CZ), IMGW (PL), DWD (DE) a ANM (RO).',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.white70,
+                        height: 1.4,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Blesky: EUMETSAT',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.white70,
+                        height: 1.4,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    GestureDetector(
+                      onTap: () =>
+                          launchUrl(Uri.parse('https://www.eumetsat.int')),
+                      child: const Text(
+                        'https://www.eumetsat.int',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           fontSize: 14,
-                          color: Colors.white70,
-                          height: 1.4,
+                          color: kAppAccentBlue,
+                          decoration: TextDecoration.underline,
+                          decorationColor: kAppAccentBlue,
                         ),
                       ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'Blesky: EUMETSAT',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.white70,
-                          height: 1.4,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      GestureDetector(
-                        onTap: () =>
-                            launchUrl(Uri.parse('https://www.eumetsat.int')),
+                    ),
+                    const SizedBox(height: 24),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.of(dialogContext).pop(),
+                        style: appInfoDialogCloseButtonStyle(),
                         child: const Text(
-                          'https://www.eumetsat.int',
-                          textAlign: TextAlign.center,
+                          'Zavrieť',
                           style: TextStyle(
-                            fontSize: 14,
-                            color: kAppAccentBlue,
-                            decoration: TextDecoration.underline,
-                            decorationColor: kAppAccentBlue,
+                            color: Colors.white70,
+                            fontWeight: FontWeight.w700,
                           ),
                         ),
                       ),
-                      const SizedBox(height: 24),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: () => Navigator.of(dialogContext).pop(),
-                          style: appInfoDialogCloseButtonStyle(),
-                          child: const Text(
-                            'Zavrieť',
-                            style: TextStyle(
-                              color: Colors.white70,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
             ),
-          );
-        },
-      );
-    } finally {
-      if (mounted) setState(() => _coverRadarForDialog = false);
-    }
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -3956,23 +4163,32 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage> {
           body: Stack(
             fit: StackFit.expand,
             children: [
-              mapBody,
+              // WebView pod krytom; CPI kým !_mapCoverVisible.
+              if (_radarView != null)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    ignoring: _mapCoverVisible,
+                    child: mapBody,
+                  ),
+                ),
               if (_mapCoverVisible)
                 const ColoredBox(
                   color: kAmbientBlendColor,
                   child: Center(
-                    child: Text(
-                      'Načítavam radar...',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
+                    child: RepaintBoundary(
+                      child: SizedBox(
+                        width: 32,
+                        height: 32,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 3,
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            kAppAccentBlueBright,
+                          ),
+                        ),
                       ),
                     ),
                   ),
-                )
-              else if (_coverRadarForDialog)
-                const ColoredBox(color: kAmbientBlendColor),
+                ),
               Positioned(
                 top: 0,
                 left: 0,
@@ -4027,6 +4243,50 @@ class _FullscreenRadarPageState extends State<FullscreenRadarPage> {
                   ),
                 ),
               ),
+              // Presne nad Helkor .refresh-btn — Flutter spin (Mapbox CSS seká).
+              // Vnorený Stack: sync rectu neprebuildí WebView parent.
+              if (!_mapCoverVisible)
+                Positioned.fill(
+                  child: ValueListenableBuilder<Rect?>(
+                    valueListenable: _refreshBtnRect,
+                    builder: (context, rect, _) {
+                      if (rect == null) return const SizedBox.shrink();
+                      return Stack(
+                        children: [
+                          Positioned(
+                            left: rect.left,
+                            top: rect.top,
+                            width: rect.width,
+                            height: rect.height,
+                            child: RepaintBoundary(
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () =>
+                                    unawaited(_onFlutterRefreshTap()),
+                                child: DecoratedBox(
+                                  decoration: const BoxDecoration(
+                                    color: kAppAccentBlue,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Center(
+                                    child: RotationTransition(
+                                      turns: _refreshSpin,
+                                      child: const Icon(
+                                        Icons.refresh_rounded,
+                                        size: 22,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
             ],
           ),
         ),
@@ -4094,6 +4354,40 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
       _controller != null && loaded && mapContentReady && !failed;
   bool get hasActiveWarningNotice => activeWarningNotice?.shouldShow == true;
   int get activeWarningRank => activeWarningNotice?.rank ?? 0;
+
+  /// Zhodí výstrahy WebView pred radar fullscreen — 2–3 PlatformView = OOM crash.
+  void suspendForHeavyRadar() {
+    cancelScheduledWarmup();
+    _okresyReadyPoll?.cancel();
+    _okresyReadyPoll = null;
+    _loadTimeout?.cancel();
+    _loadTimeout = null;
+    for (final t in _mapResizeInjectTimers) {
+      t.cancel();
+    }
+    _mapResizeInjectTimers.clear();
+    final c = _controller;
+    _controller = null;
+    _warming = false;
+    loaded = false;
+    mapContentReady = false;
+    loading = false;
+    softReloading = false;
+    _notifySafely();
+    if (c != null) {
+      unawaited(() async {
+        try {
+          await c.loadRequest(Uri.parse('about:blank'));
+        } catch (_) {}
+      }());
+    }
+  }
+
+  void resumeAfterHeavyRadar({
+    Duration delay = const Duration(milliseconds: 500),
+  }) {
+    scheduleWarmup(delay: delay);
+  }
 
   void _notifySafely() {
     final binding = WidgetsBinding.instance;
@@ -4547,9 +4841,9 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
     final c = _controller;
     if (c == null || _attachedToPage) return const SizedBox.shrink();
     final size = MediaQuery.sizeOf(context);
-    // Teplá veľkosť blízka stránke — 1×1 nútilo Leaflet fitBounds pri otvorení.
+    // Rovnaká výška ako stránka — malý strip menil innerHeight → fitBounds skok.
     final w = size.width > 0 ? size.width : 360.0;
-    final h = (size.height * 0.36).clamp(260.0, 420.0);
+    final h = size.height > 0 ? size.height : 640.0;
     return IgnorePointer(
       child: Opacity(
         opacity: 0,
@@ -4813,9 +5107,9 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
           var id = l.feature && l.feature._bezpecneId;
           l.setStyle({
             fillColor: farbaNaDen(dbase[id], off),
-            weight: 0.9,
+            weight: 1.2,
             color: '#172438',
-            opacity: 0.9
+            opacity: 0.82
           });
         } catch (e1) {}
       });
@@ -4910,12 +5204,13 @@ class VystrahyWebViewPreloader extends ChangeNotifier {
   }
 
   void prepareForDisplay() {
-    // Jedno settle po layoute — bez scroll+resize+pin naraz v tom istom ticku.
+    // Jemné settle — bez opakovaného fitBounds (to robí skok mapy).
     cancelPendingMapInjects();
     _mapResizeInjectTimers.add(
-      Timer(const Duration(milliseconds: 48), () async {
+      Timer(const Duration(milliseconds: 32), () async {
         await _disableVystrahyAndroidScrollbars();
         await scrollToTop();
+        // Len invalidateSize + pin; fitBounds už spravil warmup.
         await _injectMapResize(withLocation: true);
       }),
     );
@@ -4929,7 +5224,11 @@ class _VystrahyWarmupWebView extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = VystrahyWebViewPreloader.instance.controller;
     if (controller == null) return const SizedBox.shrink();
-    return WebViewWidget(controller: controller);
+    // Hybrid Composition — rovnako ako fullscreen radar (plynulý scroll/pan).
+    return buildMeteoRadarWebView(
+      controller: controller,
+      hybridComposition: true,
+    );
   }
 }
 
@@ -5102,13 +5401,16 @@ class _MeteoVystrahyPageState extends State<MeteoVystrahyPage>
                 fit: StackFit.expand,
                 children: [
                   if (controller != null)
-                    WebViewWidget(
-                      controller: controller,
-                      gestureRecognizers: {
-                        Factory<OneSequenceGestureRecognizer>(
-                          () => EagerGestureRecognizer(),
-                        ),
-                      },
+                    RepaintBoundary(
+                      child: buildMeteoRadarWebView(
+                        controller: controller,
+                        hybridComposition: true,
+                        gestureRecognizers: {
+                          Factory<OneSequenceGestureRecognizer>(
+                            () => EagerGestureRecognizer(),
+                          ),
+                        },
+                      ),
                     ),
                   // Skryť prázdnu mapu s pinom, kým nie sú okresy (geoLayer).
                   if (!failed && !_preloader.mapContentReady)
@@ -5198,7 +5500,11 @@ const String _kVystrahyMobileInjectJs = r'''
   document.body.style.padding = '0';
   document.body.style.minHeight = '100%';
   document.body.style.webkitTextSizeAdjust = '100%';
-  document.body.style.touchAction = 'manipulation';
+  // pan-y = plynulý vertikálny scroll (manipulation brzdí WebView scroll).
+  document.documentElement.style.touchAction = 'pan-y';
+  document.body.style.touchAction = 'pan-y';
+  document.documentElement.style.overscrollBehaviorY = 'contain';
+  document.body.style.overscrollBehaviorY = 'contain';
 
   // Skryť scrollbar pri scrollovaní (WebView + stránka).
   (function hideScrollbars() {
@@ -5209,9 +5515,12 @@ const String _kVystrahyMobileInjectJs = r'''
       document.head.appendChild(style);
     }
     style.textContent =
-      'html,body{scrollbar-width:none!important;-ms-overflow-style:none!important;}' +
+      'html,body{scrollbar-width:none!important;-ms-overflow-style:none!important;' +
+      '-webkit-overflow-scrolling:touch!important;overscroll-behavior-y:contain!important;' +
+      'touch-action:pan-y!important;}' +
       'html::-webkit-scrollbar,body::-webkit-scrollbar,' +
       '*::-webkit-scrollbar{width:0!important;height:0!important;display:none!important;background:transparent!important;}' +
+      '.leaflet-container{touch-action:pan-x pan-y!important;}' +
       '.leaflet-container::-webkit-scrollbar{width:0!important;height:0!important;display:none!important;}';
   })();
 
@@ -5254,10 +5563,15 @@ const String _kVystrahyMobileInjectJs = r'''
   function resizeVystrahyMap() {
     var wrapper = document.getElementById('mapWrapper') || document.querySelector('.map-wrapper');
     var mapEl = document.getElementById('map');
-    var h = 320;
-    if (wrapper && mapEl) {
-      var viewportH = window.innerHeight || document.documentElement.clientHeight || 640;
+    var viewportH = window.innerHeight || document.documentElement.clientHeight || 640;
+    // Po prvom layoute uzamkni výšku — warmup→page inak mení h a skáče fitBounds.
+    var h;
+    if (typeof window.__pocasieVystrahyMapH === 'number' && window.__pocasieVystrahyMapH > 0) {
+      h = window.__pocasieVystrahyMapH;
+    } else {
       h = Math.round(Math.max(260, Math.min(420, viewportH * 0.36)));
+    }
+    if (wrapper && mapEl) {
       wrapper.style.height = h + 'px';
       wrapper.style.minHeight = h + 'px';
       mapEl.style.position = 'absolute';
@@ -5268,31 +5582,33 @@ const String _kVystrahyMobileInjectJs = r'''
       mapEl.style.minHeight = h + 'px';
       mapEl.style.display = 'block';
     }
-    if (window.dispatchEvent) {
-      window.dispatchEvent(new Event('resize'));
-    }
     var lm = findLeafletMap(mapEl);
     var sizeKey = Math.round(window.innerWidth || 0) + 'x' + h;
-    var sameSize = window.__pocasieVystrahySizeKey === sizeKey;
     if (lm && lm.invalidateSize) {
       try {
         lm.invalidateSize({ animate: false, pan: false });
       } catch (e1) {
-        try { lm.invalidateSize(true); } catch (e2) {}
+        try { lm.invalidateSize(false); } catch (e2) {}
       }
-      // fitBounds len pri zmene veľkosti — opakované volania mapu „skáču“.
-      if (!sameSize || !window.__pocasieVystrahyBoundsDone) {
+      // fitBounds LEN raz — opakované volanie pri otvorení stránky = skok mapy.
+      if (!window.__pocasieVystrahyBoundsDone) {
         try {
+          if (window.dispatchEvent) {
+            window.dispatchEvent(new Event('resize'));
+          }
           if (typeof prerozdelBounndy === 'function') {
             prerozdelBounndy();
           } else if (lm.fitBounds) {
             lm.fitBounds([[47.73, 16.83], [49.61, 22.58]], { animate: false, padding: [12, 12] });
           }
           window.__pocasieVystrahyBoundsDone = true;
+          window.__pocasieVystrahyMapH = h;
           window.__pocasieVystrahySizeKey = sizeKey;
         } catch (e3) {}
+      } else {
+        window.__pocasieVystrahySizeKey = sizeKey;
       }
-    } else if (!sameSize && typeof prerozdelBounndy === 'function') {
+    } else if (!window.__pocasieVystrahyBoundsDone && typeof prerozdelBounndy === 'function') {
       try { prerozdelBounndy(); } catch (e4) {}
       findLeafletMap(mapEl);
     }
@@ -5359,7 +5675,7 @@ const String _kVystrahyEnsureOkresyFromNetworkJs = r'''
           var color = (typeof farbaNaDen === 'function')
             ? farbaNaDen(db[id], off)
             : '#10b981';
-          return { fillColor: color, weight: 0.9, color: '#172438', opacity: 0.9, fillOpacity: 1 };
+          return { fillColor: color, weight: 1.2, color: '#172438', opacity: 0.82, fillOpacity: 1 };
         },
         interactive: false
       }).addTo(mapRef);
@@ -5420,7 +5736,7 @@ const String _kVystrahyApplyPrefetchedOkresyJs = r'''
         var color = (typeof farbaNaDen === 'function')
           ? farbaNaDen(db[id], off)
           : '#10b981';
-        return { fillColor: color, weight: 0.9, color: '#172438', opacity: 0.9, fillOpacity: 1 };
+        return { fillColor: color, weight: 1.2, color: '#172438', opacity: 0.82, fillOpacity: 1 };
       },
       interactive: false
     }).addTo(mapRef);
@@ -5435,7 +5751,7 @@ const String _kVystrahyApplyPrefetchedOkresyJs = r'''
 })();
 ''';
 
-/// Jemnejšie hranice okresov (Leaflet kreslí každú hranicu 2× medzi susedmi).
+/// Stredná hrúbka hraníc okresov (Leaflet kreslí každú 2× medzi susedmi).
 const String _kVystrahyThinOkresBordersJs = r'''
 (function() {
   function thin() {
@@ -5443,7 +5759,7 @@ const String _kVystrahyThinOkresBordersJs = r'''
       if (typeof geoLayer === 'undefined' || !geoLayer || !geoLayer.eachLayer) return false;
       geoLayer.eachLayer(function(l) {
         try {
-          l.setStyle({ weight: 0.9, color: '#172438', opacity: 0.9 });
+          l.setStyle({ weight: 1.2, color: '#172438', opacity: 0.82 });
         } catch (e0) {}
       });
       return true;
@@ -5470,7 +5786,7 @@ const String _kVystrahyOkresyReadyWatchJs = r'''
       if (typeof geoLayer === 'undefined' || !geoLayer || !geoLayer.eachLayer) return;
       geoLayer.eachLayer(function(l) {
         try {
-          l.setStyle({ weight: 0.9, color: '#172438', opacity: 0.9 });
+          l.setStyle({ weight: 1.2, color: '#172438', opacity: 0.82 });
         } catch (e0) {}
       });
     } catch (e1) {}

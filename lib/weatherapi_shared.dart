@@ -32,6 +32,7 @@ String weatherApiCountryCodeFromName(String country) {
       .toLowerCase()
       .replaceAll('á', 'a')
       .replaceAll('ä', 'a')
+      .replaceAll('å', 'a')
       .replaceAll('č', 'c')
       .replaceAll('ď', 'd')
       .replaceAll('é', 'e')
@@ -40,10 +41,12 @@ String weatherApiCountryCodeFromName(String country) {
       .replaceAll('ň', 'n')
       .replaceAll('ó', 'o')
       .replaceAll('ô', 'o')
+      .replaceAll('ö', 'o')
       .replaceAll('ŕ', 'r')
       .replaceAll('š', 's')
       .replaceAll('ť', 't')
       .replaceAll('ú', 'u')
+      .replaceAll('ü', 'u')
       .replaceAll('ý', 'y')
       .replaceAll('ž', 'z');
   if (n.isEmpty) return '';
@@ -59,6 +62,68 @@ String weatherApiCountryCodeFromName(String country) {
     'serbia' || 'srbsko' => 'RS',
     'croatia' || 'chorvatsko' => 'HR',
     'slovenia' || 'slovinsko' => 'SI',
+    'sweden' || 'svedsko' || 'sverige' => 'SE',
+    'norway' || 'norsko' || 'norge' => 'NO',
+    'denmark' || 'dansko' || 'danmark' => 'DK',
+    'finland' || 'finsko' || 'suomi' => 'FI',
+    'france' || 'francuzsko' || 'frankreich' => 'FR',
+    'italy' || 'taliansko' || 'italia' => 'IT',
+    'spain' || 'spanielsko' || 'espana' => 'ES',
+    'portugal' || 'portugalsko' => 'PT',
+    'netherlands' || 'holandsko' || 'nederland' => 'NL',
+    'belgium' || 'belgicko' || 'belgie' => 'BE',
+    'switzerland' || 'svajciarsko' || 'schweiz' || 'suisse' => 'CH',
+    'united kingdom' ||
+    'uk' ||
+    'great britain' ||
+    'britain' ||
+    'england' ||
+    'velka britania' ||
+    'spojene kralovstvo' =>
+      'GB',
+    'ireland' || 'irsko' || 'eire' => 'IE',
+    'iceland' || 'island' => 'IS',
+    'greece' || 'grecko' || 'ellas' || 'ellada' => 'GR',
+    'bulgaria' || 'bulharsko' => 'BG',
+    'bosnia and herzegovina' ||
+    'bosnia' ||
+    'bosna a hercegovina' ||
+    'bosna' =>
+      'BA',
+    'montenegro' || 'cierna hora' => 'ME',
+    'north macedonia' || 'macedonia' || 'severne makedonsko' || 'makedonsko' =>
+      'MK',
+    'albania' || 'albansko' => 'AL',
+    'lithuania' || 'litva' => 'LT',
+    'latvia' || 'lotyssko' => 'LV',
+    'estonia' || 'estonsko' => 'EE',
+    'belarus' || 'bielorusko' => 'BY',
+    'moldova' || 'moldavsko' => 'MD',
+    'turkey' || 'turkiye' || 'turecko' => 'TR',
+    'united states of america' ||
+    'united states' ||
+    'usa' ||
+    'us' ||
+    'spojene staty' ||
+    'spojene staty americke' =>
+      'US',
+    'canada' || 'kanada' => 'CA',
+    'mexico' || 'mexiko' => 'MX',
+    'brazil' || 'brazilia' => 'BR',
+    'argentina' => 'AR',
+    'chile' || 'cile' => 'CL',
+    'australia' => 'AU',
+    'new zealand' || 'novy zeland' => 'NZ',
+    'japan' || 'japonsko' => 'JP',
+    'south korea' || 'korea' || 'juzna korea' => 'KR',
+    'china' || 'cina' => 'CN',
+    'india' => 'IN',
+    'russia' || 'rusko' || 'russian federation' => 'RU',
+    'israel' || 'izrael' => 'IL',
+    'united arab emirates' || 'uae' || 'spojene arabske emiraty' => 'AE',
+    'saudi arabia' || 'saudska arabia' => 'SA',
+    'egypt' => 'EG',
+    'south africa' || 'juhoafricka republika' || 'jar' => 'ZA',
     _ => '',
   };
 }
@@ -292,7 +357,12 @@ Map<String, dynamic> weatherApiToOpenMeteoShape(
   };
 }
 
-Uri weatherApiForecastUri(double lat, double lon, {required int days}) {
+Uri weatherApiForecastUri(
+  double lat,
+  double lon, {
+  required int days,
+  bool pollen = false,
+}) {
   return Uri.parse('$kWeatherApiBase/forecast.json').replace(
     queryParameters: <String, String>{
       'key': kWeatherApiKey,
@@ -300,6 +370,7 @@ Uri weatherApiForecastUri(double lat, double lon, {required int days}) {
       'days': days.toString(),
       'aqi': 'no',
       'alerts': 'no',
+      if (pollen) 'pollen': 'yes',
     },
   );
 }
@@ -367,4 +438,124 @@ int widgetEffectiveWeatherCodeFromForecast(Map<String, dynamic> forecast) {
     45 || 48 => 3,
     _ => rawCode ?? 0,
   };
+}
+
+String _weatherApiHourTimeIso(String raw) {
+  final t = raw.trim();
+  if (t.contains('T')) return t;
+  // "2026-08-01 12:00" → "2026-08-01T12:00"
+  return t.replaceFirst(' ', 'T');
+}
+
+double? _weatherApiPollenGrain(Map<String, dynamic>? pollen, String key) {
+  if (pollen == null) return null;
+  final v = weatherApiNum(pollen[key]);
+  return v?.toDouble();
+}
+
+/// WeatherAPI `pollen=yes` → tvar kompatibilný s [AirQualityData.fromJson].
+///
+/// WeatherAPI: Hazel, Alder, Birch, Oak, Grass, Mugwort, Ragweed (bez Olive).
+Map<String, dynamic>? weatherApiRawToAirQualityPollenJson(
+  Map<String, dynamic> raw,
+) {
+  final forecast = raw['forecast'];
+  if (forecast is! Map) return null;
+  final days = forecast['forecastday'];
+  if (days is! List || days.isEmpty) return null;
+
+  final times = <String>[];
+  final alder = <double?>[];
+  final birch = <double?>[];
+  final grass = <double?>[];
+  final mugwort = <double?>[];
+  final olive = <double?>[];
+  final ragweed = <double?>[];
+  final hazel = <double?>[];
+  final oak = <double?>[];
+  var sawAnyPollen = false;
+
+  void addPollen(Map<String, dynamic>? pollen, String timeIso) {
+    if (pollen != null) sawAnyPollen = true;
+    times.add(timeIso);
+    alder.add(_weatherApiPollenGrain(pollen, 'Alder'));
+    birch.add(_weatherApiPollenGrain(pollen, 'Birch'));
+    grass.add(_weatherApiPollenGrain(pollen, 'Grass'));
+    mugwort.add(_weatherApiPollenGrain(pollen, 'Mugwort'));
+    olive.add(null); // WeatherAPI Olive nemá
+    ragweed.add(_weatherApiPollenGrain(pollen, 'Ragweed'));
+    hazel.add(_weatherApiPollenGrain(pollen, 'Hazel'));
+    oak.add(_weatherApiPollenGrain(pollen, 'Oak'));
+  }
+
+  for (final dayDyn in days) {
+    if (dayDyn is! Map) continue;
+    final day = Map<String, dynamic>.from(dayDyn);
+    final hours = day['hour'];
+    if (hours is List && hours.isNotEmpty) {
+      for (final hourDyn in hours) {
+        if (hourDyn is! Map) continue;
+        final hour = Map<String, dynamic>.from(hourDyn);
+        final pollenRaw = hour['pollen'];
+        final pollen = pollenRaw is Map
+            ? Map<String, dynamic>.from(pollenRaw)
+            : null;
+        addPollen(pollen, _weatherApiHourTimeIso('${hour['time'] ?? ''}'));
+      }
+      continue;
+    }
+
+    // Fallback: denný peľ (1 slot na deň).
+    final dayBlock = day['day'];
+    final pollenRaw = dayBlock is Map ? dayBlock['pollen'] : day['pollen'];
+    final pollen =
+        pollenRaw is Map ? Map<String, dynamic>.from(pollenRaw) : null;
+    if (pollen == null) continue;
+    final date = '${day['date'] ?? ''}';
+    if (date.isEmpty) continue;
+    addPollen(pollen, '${date}T12:00');
+  }
+
+  if (!sawAnyPollen || times.isEmpty) return null;
+
+  return <String, dynamic>{
+    'source_provider': 'weatherapi',
+    'current': <String, dynamic>{},
+    'hourly': <String, dynamic>{
+      'time': times,
+      'alder_pollen': alder,
+      'birch_pollen': birch,
+      'grass_pollen': grass,
+      'mugwort_pollen': mugwort,
+      'olive_pollen': olive,
+      'ragweed_pollen': ragweed,
+      'hazel_pollen': hazel,
+      'oak_pollen': oak,
+    },
+  };
+}
+
+/// Peľ z WeatherAPI (`pollen=yes`) — 3 dni stačia pre UI kartu.
+Future<Map<String, dynamic>?> downloadWeatherApiPollenAirQualityMap(
+  double lat,
+  double lon, {
+  String userAgent = 'pocasie-app/1.0 (flutter)',
+}) async {
+  if (kWeatherApiKey.isEmpty) return null;
+  try {
+    final uri = weatherApiForecastUri(lat, lon, days: 3, pollen: true);
+    final r = await http.get(
+      uri,
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': userAgent,
+      },
+    ).timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) return null;
+    final raw = json.decode(r.body) as Map<String, dynamic>;
+    if (raw.containsKey('error')) return null;
+    return weatherApiRawToAirQualityPollenJson(raw);
+  } catch (_) {
+    return null;
+  }
 }

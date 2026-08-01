@@ -184,15 +184,12 @@ const String kGeoApi = 'https://geocoding-api.open-meteo.com/v1';
 const String kNominatimSearchApi = 'https://nominatim.openstreetmap.org/search';
 const String kNominatimUserAgent = 'pocasie-app/1.0 (flutter)';
 
-// Peľ a kvalita ovzdušia cez Open-Meteo (CAMS)
-const String kAirQualityApi = 'https://air-quality-api.open-meteo.com/v1';
-
 // Historické dáta cez ECMWF ERA5
 const String kHistoricalApi = 'https://cds.climate.copernicus.eu/api/v2';
 
 const String kSearchHistoryKey = 'search_history_v7';
 const String kWeatherCachePrefix = 'cache_weather_v10_';
-const String kAirQualityCachePrefix = 'cache_aqi_v7_';
+const String kAirQualityCachePrefix = 'cache_pollen_wapi_v1_';
 const String kGeoCachePrefix = 'cache_geo_v7_';
 const String kLastLocationKey = 'last_location_v7';
 
@@ -477,6 +474,190 @@ String _helkorRadarPageUrl(GeoCity city, {bool cacheBust = false}) {
 String buildMeteoRadarUrl(GeoCity city, {bool cacheBust = false}) =>
     _helkorRadarPageUrl(city, cacheBust: cacheBust);
 
+/// Fullscreen — bez hideUI, aby Helkor nechal play/slider; chrome riadime CSS.
+String buildMeteoRadarFullscreenUrl(GeoCity city, {bool cacheBust = false}) {
+  final base =
+      '$kMeteoRadarHelkorOrigin/radar/?lat=${city.lat}&lon=${city.lon}&zoom=${kMeteoRadarCityZoom.toStringAsFixed(0)}';
+  if (!cacheBust) return base;
+  return '$base&_cb=${DateTime.now().millisecondsSinceEpoch}';
+}
+
+/// Náhľad: Helkor `hideUI` neskryje posuvník — CSS hide bez MutationObserver
+/// (observer + style mutate = nekonečná slučka a radar sa nenačíta).
+const String kMeteoRadarPreviewHideChromeJs = r'''
+(function(){
+  try {
+    var root = document.documentElement;
+    root.classList.add('hide-ui');
+    root.classList.add('app-radar-preview');
+    root.classList.remove('app-radar-full');
+    var old = document.getElementById('app-radar-gate');
+    if (old) old.remove();
+    var s = document.createElement('style');
+    s.id = 'app-radar-gate';
+    s.textContent =
+      'html.app-radar-preview .controls-wrapper,' +
+      'html.app-radar-preview .play-btn,' +
+      'html.app-radar-preview .slider-container,' +
+      'html.app-radar-preview .time-display,' +
+      'html.app-radar-preview .refresh-btn,' +
+      'html.app-radar-preview .legend-panel,' +
+      'html.app-radar-preview .settings-btn,' +
+      'html.app-radar-preview .settings-menu,' +
+      'html.app-radar-preview #radarLegendImg,' +
+      'html.app-radar-preview .info-btn,' +
+      'html.hide-ui .controls-wrapper,' +
+      'html.hide-ui .play-btn,' +
+      'html.hide-ui .slider-container,' +
+      'html.hide-ui .time-display,' +
+      'html.hide-ui .refresh-btn,' +
+      'html.hide-ui .legend-panel,' +
+      'html.hide-ui .settings-btn,' +
+      'html.hide-ui .settings-menu,' +
+      'html.hide-ui #radarLegendImg,' +
+      'html.hide-ui .info-btn{' +
+      'display:none!important;opacity:0!important;visibility:hidden!important;' +
+      'pointer-events:none!important;}' +
+      'html,body,#mapa,.mapboxgl-map,.mapboxgl-canvas-container{background:#172438!important;}' +
+      '#mapa,.mapboxgl-map{opacity:1!important;}';
+    (document.head || document.documentElement).appendChild(s);
+    var loader = document.getElementById('loader-wrapper');
+    if (loader) {
+      loader.style.display = 'none';
+      loader.style.opacity = '0';
+      loader.style.visibility = 'hidden';
+    }
+    if (window.ukazLoader) window.ukazLoader = function(){};
+    if (window.skryLoader) window.skryLoader = function(){};
+  } catch (e) {}
+})();
+''';
+
+/// Fullscreen: ukáž play/slider/refresh v Helkor rozmeroch; schovaj len settings/legend.
+const String kMeteoRadarFullscreenChromeJs = r'''
+(function(){
+  try {
+    var root = document.documentElement;
+    root.classList.remove('app-radar-preview');
+    root.classList.remove('hide-ui');
+    root.classList.add('app-radar-full');
+    root.classList.add('radar-layers-ready');
+    var old = document.getElementById('app-radar-gate');
+    if (old) old.remove();
+    var s = document.createElement('style');
+    s.id = 'app-radar-gate';
+    // Nemeň width/height tlačidiel — inak sa z 44×44 kruhov stanú elipsy.
+    // bottom vyššie — inak posuvník prekryje Mapbox logo vľavo dole.
+    s.textContent =
+      'html.app-radar-full .legend-panel,' +
+      'html.app-radar-full .settings-btn,' +
+      'html.app-radar-full .settings-menu,' +
+      'html.app-radar-full #radarLegendImg,' +
+      'html.app-radar-full .info-btn{' +
+      'display:none!important;}' +
+      'html.app-radar-full .controls-wrapper{' +
+      'display:flex!important;opacity:1!important;visibility:visible!important;' +
+      'pointer-events:auto!important;overflow:visible!important;' +
+      // Vyššie od gesture/nav baru — prirodzenejšia zóna pre posuvník.
+      'bottom:56px!important;left:50%!important;' +
+      'transform:translateX(-50%) translateZ(0)!important;' +
+      // Rovnaký voľný okraj vľavo aj vpravo (play vs refresh).
+      'padding-left:10px!important;padding-right:10px!important;gap:0!important;' +
+      'box-sizing:border-box!important;}' +
+      // Nemeň width lišty — Helkor má vlastné rozmery; my len ukážeme ovládanie.
+      'html.app-radar-full .play-btn{' +
+      'display:flex!important;opacity:1!important;visibility:visible!important;' +
+      'pointer-events:auto!important;' +
+      'width:44px!important;height:44px!important;min-width:44px!important;' +
+      'min-height:44px!important;max-width:44px!important;max-height:44px!important;' +
+      'border-radius:50%!important;flex-shrink:0!important;aspect-ratio:1/1!important;' +
+      'box-sizing:border-box!important;' +
+      'margin-left:0!important;margin-right:0!important;}' +
+      // Miesto v lište áno, vizuál nie — Flutter overlay točí plynulo.
+      'html.app-radar-full .refresh-btn,' +
+      'html.app-radar-full.hide-ui .refresh-btn,' +
+      'html.hide-ui.app-radar-full .refresh-btn{' +
+      'display:flex!important;opacity:0!important;visibility:visible!important;' +
+      'pointer-events:none!important;' +
+      'width:44px!important;height:44px!important;min-width:44px!important;' +
+      'min-height:44px!important;max-width:44px!important;max-height:44px!important;' +
+      'border-radius:50%!important;flex-shrink:0!important;aspect-ratio:1/1!important;' +
+      'box-sizing:border-box!important;' +
+      'margin-left:0!important;margin-right:0!important;}' +
+      'html.app-radar-full .play-btn svg{' +
+      'width:20px!important;height:20px!important;flex-shrink:0!important;' +
+      'display:block!important;opacity:1!important;visibility:visible!important;}' +
+      'html.app-radar-full .refresh-btn svg{' +
+      'opacity:0!important;}' +
+      'html.app-radar-full .slider-container{' +
+      'display:flex!important;opacity:1!important;visibility:visible!important;' +
+      'pointer-events:auto!important;' +
+      'margin-left:6px!important;margin-right:4px!important;' +
+      'padding-right:0!important;}' +
+      'html.app-radar-full .time-display{' +
+      'display:block!important;opacity:1!important;visibility:visible!important;' +
+      'pointer-events:auto!important;' +
+      'margin-left:4px!important;margin-right:6px!important;' +
+      'padding-left:0!important;padding-right:0!important;}' +
+      'html.app-radar-full .mapboxgl-ctrl-bottom-left{' +
+      'bottom:8px!important;left:8px!important;z-index:1!important;}' +
+      'html.app-radar-full .mapboxgl-ctrl-bottom-right{' +
+      'bottom:8px!important;z-index:1!important;}' +
+      // Helkor refresh: miesto v lište ostane, ikona/ťuk Flutter (CSS spin v Mapboxe seká).
+      'html.app-radar-full .refresh-btn{' +
+      'opacity:0!important;pointer-events:none!important;}' +
+      'html.app-radar-full .refresh-btn.spinning svg,' +
+      'html.app-radar-full .spinning svg,' +
+      'html.app-radar-full .refresh-btn.spinning{' +
+      'animation:none!important;transform:none!important;}' +
+      'html,body,#mapa,.mapboxgl-map,.mapboxgl-canvas-container{background:#172438!important;}' +
+      '#mapa,.mapboxgl-map{opacity:1!important;}';
+    (document.head || document.documentElement).appendChild(s);
+    function forceShowRefresh() {
+      try {
+        root.classList.remove('hide-ui');
+        var wrap = document.querySelector('.controls-wrapper');
+        if (wrap) {
+          wrap.style.setProperty('padding-left', '10px', 'important');
+          wrap.style.setProperty('padding-right', '10px', 'important');
+          wrap.style.setProperty('box-sizing', 'border-box', 'important');
+        }
+        var play = document.querySelector('.play-btn');
+        if (play) {
+          play.style.setProperty('margin-left', '0', 'important');
+          play.style.setProperty('margin-right', '0', 'important');
+        }
+        var nodes = document.querySelectorAll('.refresh-btn');
+        for (var i = 0; i < nodes.length; i++) {
+          var el = nodes[i];
+          // Zachovaj layout (šírka/miesto), len skry vizuál — Flutter overlay.
+          el.style.setProperty('display', 'flex', 'important');
+          el.style.setProperty('opacity', '0', 'important');
+          el.style.setProperty('pointer-events', 'none', 'important');
+          el.style.setProperty('visibility', 'visible', 'important');
+          el.style.setProperty('width', '44px', 'important');
+          el.style.setProperty('height', '44px', 'important');
+          el.style.setProperty('min-width', '44px', 'important');
+          el.style.setProperty('flex-shrink', '0', 'important');
+          el.style.setProperty('margin-left', '0', 'important');
+          el.style.setProperty('margin-right', '0', 'important');
+        }
+      } catch (eF) {}
+    }
+    forceShowRefresh();
+    setTimeout(forceShowRefresh, 0);
+    setTimeout(forceShowRefresh, 120);
+    setTimeout(forceShowRefresh, 400);
+    var loader = document.getElementById('loader-wrapper');
+    if (loader) {
+      loader.style.display = 'none';
+      loader.style.opacity = '0';
+      loader.style.visibility = 'hidden';
+    }
+  } catch (e) {}
+})();
+''';
+
 /// Pin Mapbox kamery na mesto.
 ///
 /// Helkor pri resize späť do náhľadu (`innerHeight <= 380`) v `requestAnimationFrame`
@@ -500,6 +681,16 @@ String buildMeteoRadarPinCityJs({
     if (window.setFullscreen) {
       try { window.setFullscreen(${fullscreen ? 'true' : 'false'}); } catch (eF) {}
     }''';
+  final modeClasses = fullscreen == true
+      ? '''
+    document.documentElement.classList.remove('hide-ui');
+    document.documentElement.classList.remove('app-radar-preview');
+    document.documentElement.classList.add('app-radar-full');
+    document.documentElement.classList.add('radar-layers-ready');'''
+      : '''
+    document.documentElement.classList.add('hide-ui');
+    document.documentElement.classList.add('app-radar-preview');
+    document.documentElement.classList.remove('app-radar-full');''';
   final chrome = removeChrome
       ? '''
     var chrome = document.getElementById('app-radar-chrome');
@@ -526,7 +717,7 @@ String buildMeteoRadarPinCityJs({
   return '''
 (function() {
   try {
-    document.documentElement.classList.add('hide-ui');
+    $modeClasses
     $hideLayers
     $chrome
     var lat = $lat;
@@ -631,59 +822,61 @@ String buildMeteoRadarPinCityJs({
 ''';
 }
 
-/// Počas panovania: nepinuj kameru. Hranice SK ostávajú vždy viditeľné.
+/// Počas panovania: nepinuj kameru + schovaj hranice (ľahší Mapbox paint).
 const String kMeteoRadarPanPerfJs = r'''
 (function() {
   try {
-    if (window.__appRadarPanPerfV2) return;
+    if (window.__appRadarPanPerfV3) return;
     if (typeof map === 'undefined' || !map || typeof map.on !== 'function') return;
-    window.__appRadarPanPerfV2 = true;
+    window.__appRadarPanPerfV3 = true;
     window.__appRadarPanPerf = true;
     var borderIds = [
       'sk-borders-glow', 'ro-borders-glow',
       'sk-borders-layer', 'ro-borders-layer'
     ];
-    function restoreBorders() {
+    function setBordersVisible(vis) {
       for (var i = 0; i < borderIds.length; i++) {
         try {
           if (map.getLayer(borderIds[i])) {
-            map.setLayoutProperty(borderIds[i], 'visibility', 'visible');
+            map.setLayoutProperty(borderIds[i], 'visibility', vis ? 'visible' : 'none');
           }
         } catch (eL) {}
       }
     }
-    restoreBorders();
+    setBordersVisible(true);
     var endTimer = null;
     function onMoveStart() {
       window.__appRadarUserInteracting = true;
       if (endTimer) { clearTimeout(endTimer); endTimer = null; }
-      // Ak stará verzia schovala hranice, hneď ich vráť.
-      requestAnimationFrame(restoreBorders);
+      setBordersVisible(false);
     }
     function onMoveEnd() {
       if (endTimer) clearTimeout(endTimer);
       endTimer = setTimeout(function() {
         endTimer = null;
         window.__appRadarUserInteracting = false;
-        restoreBorders();
-      }, 130);
+        setBordersVisible(true);
+      }, 420);
     }
     map.on('movestart', onMoveStart);
     map.on('zoomstart', onMoveStart);
+    map.on('dragstart', onMoveStart);
     map.on('moveend', onMoveEnd);
     map.on('zoomend', onMoveEnd);
+    map.on('dragend', onMoveEnd);
     try {
       if (map.dragPan && map.dragPan.enable) map.dragPan.enable();
       if (map.touchZoomRotate && map.touchZoomRotate.enable) map.touchZoomRotate.enable();
       if (map.touchZoomRotate.disableRotation) map.touchZoomRotate.disableRotation();
+      if (map.scrollZoom && map.scrollZoom.enable) map.scrollZoom.enable();
     } catch (eD) {}
   } catch (e) {}
 })();
 ''';
 
-/// Radar WebView.
-/// Náhľad (karta): Hybrid — Texture v scrolle často biela diera.
-/// Fullscreen: Texture — Flutter kryt ostane nad mapou.
+/// Platform WebView (radar / výstrahy).
+/// Domovský radar náhľad: Texture (Hybrid + scroll zoznamu seká).
+/// Fullscreen radar + výstrahy: Hybrid Composition — plynulejší pan/scroll.
 Widget buildMeteoRadarWebView({
   required WebViewController controller,
   bool hybridComposition = false,
@@ -744,6 +937,8 @@ Directory? _radarWarmDir;
 final Map<String, _RadarWarmAsset> _radarWarmMem = {};
 final Map<String, Future<_RadarWarmAsset?>> _radarWarmInflight = {};
 DateTime? _radarPrefetchLastRun;
+double? _radarPrefetchLastLat;
+double? _radarPrefetchLastLon;
 
 Duration _radarWarmTtlForKey(String key) {
   if (key.contains('mapbox-gl')) return const Duration(days: 30);
@@ -1202,12 +1397,22 @@ class _RadarFastPreviewPainter extends CustomPainter {
 /// WebView ide priamo na Helkor (proxy lámal Mapbox dlaždice).
 Future<void> prefetchRadarMapAssets([GeoCity? city]) async {
   final last = _radarPrefetchLastRun;
-  if (last != null && DateTime.now().difference(last) < const Duration(seconds: 45)) {
+  final sameCity = city == null ||
+      (_radarPrefetchLastLat != null &&
+          (_radarPrefetchLastLat! - city.lat).abs() < 0.05 &&
+          (_radarPrefetchLastLon! - city.lon).abs() < 0.05);
+  if (last != null &&
+      sameCity &&
+      DateTime.now().difference(last) < const Duration(seconds: 20)) {
     // Aj pri debounce hneď ťahaj frame náhľadu (môže byť ešte null).
     unawaited(ensureRadarFastPreviewFrame());
     return;
   }
   _radarPrefetchLastRun = DateTime.now();
+  if (city != null) {
+    _radarPrefetchLastLat = city.lat;
+    _radarPrefetchLastLon = city.lon;
+  }
 
   unawaited(() async {
     try {
@@ -1247,12 +1452,19 @@ Future<void> prefetchRadarMapAssets([GeoCity? city]) async {
 
     final lat = city?.lat ?? 48.7;
     final lon = city?.lon ?? 19.5;
+    // DNS + TCP + HTML Helkor — WebView potom berie z HTTP cache.
     try {
       await http
           .get(Uri.parse(
             '$kMeteoRadarHelkorOrigin/radar/?lat=$lat&lon=$lon&zoom=7&hideUI=true',
           ))
-          .timeout(const Duration(seconds: 20));
+          .timeout(const Duration(seconds: 12));
+    } catch (_) {}
+    // Mapbox CDN — zahrej spojenie (JS/CSS už v warm cache).
+    try {
+      await http
+          .head(Uri.parse(kMeteoRadarMapboxGlJsUrl))
+          .timeout(const Duration(seconds: 6));
     } catch (_) {}
   }());
 }
@@ -3042,19 +3254,7 @@ void applyThunderStripDisplayMm({
   required List<int> storedProbs,
   required List<double> precipMm,
 }) {
-  final len = math.min(displayIcons.length, math.min(storedProbs.length, precipMm.length));
-  for (var i = 0; i < len; i++) {
-    final icon = displayIcons[i];
-    final c = normalizeDisplayWeatherCode(icon);
-    if (!kPrecipitationCodes.contains(c) && !kThunderWeatherCodes.contains(c)) {
-      continue;
-    }
-    if (precipMm[i] <= 0 && !kThunderWeatherCodes.contains(c)) {
-      // Suchý model + mokrá ikona len pri búrke / už potvrdenom mm.
-      continue;
-    }
-    precipMm[i] = alignPrecipMmForDisplay(precipMm[i], weatherCode: icon);
-  }
+  // Nechaj API/radar mm — nenaťahuj úhrn podľa ikony.
 }
 
 /// Blízke hodiny po všetkých OM/align krokoch — zrážková ikona len podľa
@@ -5115,7 +5315,7 @@ int _dryStripPercentWithNearbyRainCap({
   return _roundPrecipProbabilityForDisplay(out);
 }
 
-/// Mokré mm v páse — keď sú zaseknuté v jednom bucketi, rozmeň podľa modelu / %.
+/// Mokré mm v páse — drž API/modelové hodnoty, neinventuj mm z % ani „vlny“.
 void diversifyRepetitiveWetStripMm({
   required List<int> displayIcons,
   required List<bool> showRainPrecip,
@@ -5130,48 +5330,13 @@ void diversifyRepetitiveWetStripMm({
   );
   if (n == 0) return;
 
-  final wetIdx = <int>[];
   for (var i = 0; i < n; i++) {
-    if (showRainPrecip[i] || _hourShowsPrecipIcon(displayIcons[i])) {
-      wetIdx.add(i);
-    }
-  }
-  if (wetIdx.length < 3) return;
-
-  // Koľko rôznych textových bucketov? Ak ≤1, treba rozmanitosť.
-  final buckets = wetIdx.map((i) => precipAmountRangeLabel(precipMm[i])).toSet();
-  if (buckets.length >= 3) return;
-
-  for (final i in wetIdx) {
+    if (!(showRainPrecip[i] || _hourShowsPrecipIcon(displayIcons[i]))) continue;
     final idx = i < stripIndices.length ? stripIndices[i] : -1;
     final modelMm = idx >= 0 ? _ecmwfHourlyPrecipMm(h, idx) : 0.0;
-    final fromProb = displayMmFromPrecipProbability(storedProbs[i]);
-    var mm = precipMm[i];
-
-    if (modelMm >= kMeaningfulPrecipMmPerHour) {
-      mm = math.max(mm, modelMm);
-    } else if (fromProb > mm) {
-      mm = fromProb;
+    if (modelMm > 0) {
+      precipMm[i] = modelMm;
     }
-
-    // Poradie v mokrom úseku → jemne posuň do 0-1 / 1-2 / 2-3.
-    final rank = wetIdx.indexOf(i);
-    final wave = (rank % 5);
-    if (wave == 0) mm = math.max(mm, 0.4);
-    if (wave == 1) mm = math.max(mm, 0.8);
-    if (wave == 2) mm = math.max(mm, 1.3);
-    if (wave == 3) mm = math.max(mm, 0.6);
-    if (wave == 4) mm = math.max(mm, 2.1);
-
-    // % 80+ → aspoň 1-2; 90+ → 2-3.
-    if (storedProbs[i] >= 90) {
-      mm = math.max(mm, 2.2);
-    // ignore: curly_braces_in_flow_control_structures
-    } else if (storedProbs[i] >= 80) mm = math.max(mm, 1.3);
-    // ignore: curly_braces_in_flow_control_structures
-    else if (storedProbs[i] >= 70) mm = math.max(mm, 0.9);
-
-    precipMm[i] = mm.clamp(0.1, 8.0);
   }
 }
 
@@ -7036,11 +7201,8 @@ int trustedDailyApiPrecipProb({
       final icon = normalizeDisplayWeatherCode(stripIcons[i] ?? 0);
       if (!kPrecipitationCodes.contains(icon)) continue;
       any = true;
-      var hourMm = stripPrecipMm?[i] ?? h.precipitation?[i] ?? 0.0;
+      final hourMm = stripPrecipMm?[i] ?? h.precipitation?[i] ?? 0.0;
       final prob = stripProbs?[i] ?? h.precipitationProbability?[i] ?? 0;
-      if (hourMm < kMeaningfulPrecipMmPerHour && prob >= kMinPrecipProbPercent) {
-        hourMm = displayMmFromPrecipProbability(prob);
-      }
       sum += hourMm;
       if (prob > maxProb) maxProb = prob;
       continue;
@@ -7079,11 +7241,8 @@ int trustedDailyApiPrecipProb({
       final icon = normalizeDisplayWeatherCode(stripIcons[i] ?? 0);
       if (!kPrecipitationCodes.contains(icon)) continue;
       any = true;
-      var hourMm = stripPrecipMm?[i] ?? h.precipitation?[i] ?? 0.0;
+      final hourMm = stripPrecipMm?[i] ?? h.precipitation?[i] ?? 0.0;
       final prob = stripProbs?[i] ?? h.precipitationProbability?[i] ?? 0;
-      if (hourMm < kMeaningfulPrecipMmPerHour && prob >= kMinPrecipProbPercent) {
-        hourMm = displayMmFromPrecipProbability(prob);
-      }
       sum += hourMm;
       if (prob > maxProb) maxProb = prob;
       continue;
@@ -7094,11 +7253,7 @@ int trustedDailyApiPrecipProb({
     final wc = h.weatherCode?[i];
     if (!hourlyHourShowsPrecipInUi(mm: mm, prob: prob, weatherCode: wc)) continue;
     any = true;
-    sum += mm >= kMeaningfulPrecipMmPerHour
-        ? mm
-        : (prob >= kMinPrecipProbPercent
-            ? displayMmFromPrecipProbability(prob)
-            : mm);
+    sum += mm;
     if (prob > maxProb) maxProb = prob;
   }
   return (sumMm: sum, maxProb: maxProb, any: any);

@@ -83,6 +83,8 @@ class AirQualityData {
   final List<double?>? mugwort;
   final List<double?>? olive;
   final List<double?>? ragweed;
+  final List<double?>? hazel;
+  final List<double?>? oak;
 
   AirQualityData({
     this.aqi,
@@ -93,6 +95,8 @@ class AirQualityData {
     this.mugwort,
     this.olive,
     this.ragweed,
+    this.hazel,
+    this.oak,
   });
 
   factory AirQualityData.fromJson(Map<String, dynamic> json) {
@@ -113,6 +117,8 @@ class AirQualityData {
       mugwort: asDoubleList(hourly['mugwort_pollen'] as List?),
       olive: asDoubleList(hourly['olive_pollen'] as List?),
       ragweed: asDoubleList(hourly['ragweed_pollen'] as List?),
+      hazel: asDoubleList(hourly['hazel_pollen'] as List?),
+      oak: asDoubleList(hourly['oak_pollen'] as List?),
     );
   }
 }
