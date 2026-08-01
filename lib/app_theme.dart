@@ -43,6 +43,20 @@ BoxDecoration appSurfaceDecoration({
   );
 }
 
+/// Okamžitý push/pop — žiadny slide/fade (seká s WebView / PlatformView).
+PageRoute<T> appInstantRoute<T extends Object?>({
+  required WidgetBuilder builder,
+  RouteSettings? settings,
+}) {
+  return PageRouteBuilder<T>(
+    settings: settings,
+    opaque: true,
+    transitionDuration: Duration.zero,
+    reverseTransitionDuration: Duration.zero,
+    pageBuilder: (context, animation, secondaryAnimation) => builder(context),
+  );
+}
+
 /// Info dialógy (peľ, radar, kamera…) — jedna farba pozadia / accent / tlačidiel.
 BoxDecoration appInfoDialogDecoration({double radius = 20}) {
   return BoxDecoration(

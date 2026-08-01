@@ -43,6 +43,9 @@ GeoCity _geoCityFromWeatherApiSearch(Map<String, dynamic> json) {
   );
 }
 
+/// Maximálna vzdialenosť GPS ↔ WeatherAPI hit; inak null → Open-Meteo reverse.
+const double _kWeatherApiReverseMaxDistanceM = 75000;
+
 Future<GeoCity?> _reverseGeocodeWeatherApi(double lat, double lon) async {
   if (kWeatherApiKey.isEmpty) return null;
   try {
@@ -54,21 +57,42 @@ Future<GeoCity?> _reverseGeocodeWeatherApi(double lat, double lon) async {
     );
     final r = await http
         .get(uri)
-        .timeout(const Duration(milliseconds: 10000));
+        .timeout(const Duration(seconds: 4));
     if (r.statusCode != 200) return null;
     final data = json.decode(r.body);
     if (data is! List || data.isEmpty) return null;
-    final first = data.first;
-    if (first is! Map<String, dynamic>) return null;
-    final city = _geoCityFromWeatherApiSearch(first);
+
+    // Ber najbližší hit podľa lat/lon mesta — nie slepo data.first.
+    GeoCity? best;
+    var bestDist = double.infinity;
+    for (final item in data) {
+      if (item is! Map<String, dynamic>) continue;
+      final candidate = _geoCityFromWeatherApiSearch(item);
+      if (candidate.name.trim().isEmpty) continue;
+      if (candidate.lat == 0 && candidate.lon == 0) continue;
+      final dist = Geolocator.distanceBetween(
+        lat,
+        lon,
+        candidate.lat,
+        candidate.lon,
+      );
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = candidate;
+      }
+    }
+    if (best == null || bestDist > _kWeatherApiReverseMaxDistanceM) {
+      return null;
+    }
+
     return GeoCity(
-      name: city.name,
+      name: best.name,
       lat: lat,
       lon: lon,
-      country: city.country,
-      countryCode: city.countryCode,
-      admin1: city.admin1,
-      admin2: city.admin2,
+      country: best.country,
+      countryCode: best.countryCode,
+      admin1: best.admin1,
+      admin2: best.admin2,
       timezone: 'auto',
     );
   } catch (e) {

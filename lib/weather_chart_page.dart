@@ -571,8 +571,6 @@ class WeatherChartPage extends StatefulWidget {
 class _WeatherChartPageState extends State<WeatherChartPage> {
   late WeatherData _data;
   bool _extendingHorizon = false;
-  /// Prvý frame = len chrome (okamžitý open); ťažký graf až potom.
-  bool _bodyReady = false;
 
   GeoCity get city => widget.city;
   RadarNowcastContext get radarCtx => widget.radarCtx;
@@ -587,7 +585,6 @@ class _WeatherChartPageState extends State<WeatherChartPage> {
     _data = widget.data;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      setState(() => _bodyReady = true);
       if (!forecastDailyHorizonComplete(_data)) {
         unawaited(_extendHorizonInBackground());
       }
@@ -677,17 +674,19 @@ class _WeatherChartPageState extends State<WeatherChartPage> {
                 ),
               ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+              padding: const EdgeInsets.fromLTRB(20, 2, 20, 4),
               child: Text(
                 _radarAugmentsChart
                     ? 'Denné maximum, minimum a pravdepodobnosť zrážok z WeatherAPI. '
-                        'Ak radarové snímky detekujú dážď alebo sneženie, zobrazí sa zrážková ikona.'
-                    : 'Denné maximum, minimum, pravdepodobnosť zrážok a typ počasia z aktuálnej predpovede WeatherAPI.',
+                        'Pri daždi/snehu z radaru sa zobrazí zrážková ikona.'
+                    : 'Denné maximum, minimum, pravdepodobnosť zrážok a typ počasia z WeatherAPI.',
                 textAlign: TextAlign.center,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.72),
-                  fontSize: 12.5,
-                  height: 1.35,
+                  fontSize: 12,
+                  height: 1.3,
                 ),
               ),
             ),
@@ -731,30 +730,41 @@ class _WeatherChartPageState extends State<WeatherChartPage> {
                   ),
                 ),
               )
-            else if (!_bodyReady)
-              const Expanded(child: ColoredBox(color: kAmbientBlendColor))
             else
               Expanded(
-                child: Align(
-                  alignment: Alignment.topCenter,
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 16, 12, 12),
-                    child: _chartGlassPanel(
-                      child: SingleChildScrollView(
-                        physics: const ClampingScrollPhysics(),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            _ChartSummaryStrip(data: _data, radarCtx: radarCtx),
-                            _ChartDaysScroller(
-                              data: _data,
-                              dayCount: dayCount,
-                              radarCtx: radarCtx,
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    12,
+                    8,
+                    12,
+                    8 + MediaQuery.paddingOf(context).bottom,
+                  ),
+                  child: _chartGlassPanel(
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        return FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.topCenter,
+                          child: SizedBox(
+                            width: constraints.maxWidth,
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _ChartSummaryStrip(
+                                  data: _data,
+                                  radarCtx: radarCtx,
+                                ),
+                                _ChartDaysScroller(
+                                  data: _data,
+                                  dayCount: dayCount,
+                                  radarCtx: radarCtx,
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
-                      ),
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ),
@@ -1335,7 +1345,7 @@ class _ChartDaysScrollerState extends State<_ChartDaysScroller> {
         const _ChartTempLegend(),
         if (widget.dayCount > 7)
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 4),
             child: Text(
               'Potiahnite vľavo pre ďalšie dni →',
               textAlign: TextAlign.center,

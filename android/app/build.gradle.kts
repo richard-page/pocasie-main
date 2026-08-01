@@ -129,8 +129,8 @@ android {
         applicationId = "sk.menopocasie.app"
         minSdk = flutter.minSdkVersion
         targetSdk = 36
-        versionCode = 200
-        versionName = "2026.200"
+        versionCode = 201
+        versionName = "2026.201"
         multiDexEnabled = true
     }
 
